@@ -1,5 +1,25 @@
 # BetterMagnifier Kontrol Paneli Implementation Plan
 
+> ## ⚠ DURUM — 2026-08-04
+>
+> | Task | Durum |
+> |---|---|
+> | 1 — XAML island spike | **BAŞARISIZ** → [`spike/xaml-island-thread/FINDINGS.md`](../../../spike/xaml-island-thread/FINDINGS.md) |
+> | 2 — AppMessages + StatusSnapshot | Tamam, doğrulandı |
+> | 3 — SettingsStore | Tamam, 11 assert geçti |
+> | 4 — InputThread | Tamam, thread ayrımı log'dan doğrulandı |
+> | 5-9 — GUI | **BAŞLANMADI** — spike'a bağlı |
+>
+> `Application::Start` bu ortamda her apartment konfigürasyonunda access
+> violation veriyor; ana thread'de, ikincil thread olmadan yapılan kontrol
+> deneyi de çöküyor. Yani sorun MTA/STA değil. Windows App Runtime 2.3.1
+> kurulu, eksik redist değil.
+>
+> **Task 5'e geçmeden önce FINDINGS.md'deki A/B/C/D seçeneklerinden biri
+> seçilmeli.** Öneri: B (Windows App SDK 1.8 hattına düş, spike'ı tekrar koş).
+>
+> Task 2/3/4 GUI teknolojisinden bağımsızdı, hangi yol seçilirse geçerli kalır.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** BetterMagnifier'a per-monitor zoom durumunu canlı gösteren ve tüm ayarları yönetebilen küçük bir WinUI 3 kontrol paneli eklemek.

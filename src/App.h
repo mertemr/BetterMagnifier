@@ -18,6 +18,8 @@
 #include "TrayIcon.h"
 #include "AppMessages.h"
 #include "StatusSnapshot.h"
+#include "SettingsStore.h"
+#include "InputThread.h"
 
 #include <windows.h>
 #include <vector>
@@ -41,8 +43,9 @@ public:
     int  Run();
     void Shutdown();
 
-    // GUI thread bu pointer'i okur. App yasadigi surece gecerli.
-    StatusSnapshot* Status() { return &m_status; }
+    // GUI thread bu pointer'lari okur. App yasadigi surece gecerli.
+    StatusSnapshot* Status()   { return &m_status; }
+    SettingsStore*  Settings() { return &m_settings; }
 
 private:
     // ── Internal Setup ──
@@ -62,6 +65,13 @@ private:
     void OnFreeze();
     void OnScroll(int delta, POINT mousePos);
     void OnDisplayChange();
+    void OnFocusChanged(HWND focused);
+
+    // Ayarlar degistiginde uygula (WM_APP_SETTINGS_CHANGED)
+    void ApplySettings();
+
+    // wParam'i monitor indeksine cevir. kFocusedMonitor = farenin oldugu monitor.
+    bool ResolveMonitorIndex(WPARAM wparam, size_t& outIndex) const;
 
     // ── Message Window WndProc ──
     static LRESULT CALLBACK MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -76,6 +86,12 @@ private:
     TrayIcon                    m_trayIcon;
     std::vector<DXGICapture>    m_captures;
     std::vector<OverlayWindow>  m_overlays;
+
+    SettingsStore               m_settings;
+    InputThread                 m_inputThread;
+
+    // Fare gercekten hareket etti mi? Klavye odagi takibi ile cakismasin diye.
+    POINT m_lastCursorPos{ -1, -1 };
 
     // GUI thread'in okudugu canli durum. Render thread her frame yazar.
     StatusSnapshot              m_status;

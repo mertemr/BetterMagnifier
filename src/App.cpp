@@ -123,6 +123,11 @@ bool App::CreateMessageWindow()
 // =============================================================================
 bool App::InitializeComponents()
 {
+    // ── 0. Ayarlar ──
+    // Diger her sey ayarlara bagli olabilir, en once yukleniyor.
+    // Dosya yoksa varsayilanlarla devam eder — ilk calistirma hata degil.
+    m_settings.Load();
+
     // ── 1. Monitorler ──
     if (!m_monitorManager.Initialize())
     {
@@ -195,10 +200,23 @@ bool App::InitializeComponents()
     }
 
     // ── 4. Hotkey + Tray (message window'a bagli) ──
-    m_hotkeyManager.Initialize(m_messageHwnd);
+    m_hotkeyManager.Initialize(m_messageHwnd, m_settings.General());
     m_trayIcon.Create(m_messageHwnd, m_hInstance);
 
-    // ── 5. Statik monitor bilgilerini snapshot'a yaz ──
+    m_status.hotkeyFailedMask.store(m_hotkeyManager.LastFailedMask(),
+                                    std::memory_order_release);
+
+    // ── 5. Input thread ──
+    // Hook'lar BURADA, render thread'de DEGIL (bkz. InputThread.h).
+    // Basarisiz olursa scroll zoom calismaz ama uygulama ayakta kalir.
+    if (!m_inputThread.Start(m_messageHwnd,
+                             m_settings.General().followMode,
+                             m_settings.General().hijackWinZ))
+    {
+        LOG_WARN("InputThread baslatilamadi — mouse wheel zoom devre disi");
+    }
+
+    // ── 6. Statik monitor bilgilerini snapshot'a yaz ──
     PublishMonitorInfo();
 
     return true;
@@ -214,7 +232,7 @@ void App::SetupCallbacks()
 {
     m_hotkeyManager.SetToggleZoomCallback([this] { OnToggleZoom(); });
     m_hotkeyManager.SetFreezeCallback([this] { OnFreeze(); });
-    m_hotkeyManager.SetScrollCallback([this](int delta, POINT pos) { OnScroll(delta, pos); });
+    // Scroll artik InputThread'den WM_APP_SCROLL_ZOOM olarak geliyor.
 
     m_trayIcon.SetToggleCallback([this] { OnToggleZoom(); });
     m_trayIcon.SetExitCallback([] { PostQuitMessage(0); });
@@ -322,8 +340,14 @@ void App::Update()
             m_overlays[i].Show();
 
         // ── Freeze aktif degilse focal point'i fareye kilitle ──
-        // Fare bu monitorde degilse focal point'i oldugu yerde birak.
-        if (!mon->zoom.isFrozen && PtInRect(&mon->bounds, cursor))
+        //
+        // ONEMLI: sadece fare GERCEKTEN HAREKET ETTIYSE. Yoksa klavye odagi
+        // takibinin (OnFocusChanged) yazdigi focal point'i her frame eziyoruz
+        // ve Tab ile odak degistirmek hicbir sey yapmiyor gibi gorunuyor.
+        const bool cursorMoved = (cursor.x != m_lastCursorPos.x)
+                              || (cursor.y != m_lastCursorPos.y);
+
+        if (cursorMoved && !mon->zoom.isFrozen && PtInRect(&mon->bounds, cursor))
         {
             mon->zoom.focalPoint = cursor;
         }
@@ -344,6 +368,9 @@ void App::Update()
     // ama olay bazli uyanma icin overlay/hotkey akisini yeniden kurmak gerekir.
     if (!anyActive)
         Sleep(8);
+
+    // Bir sonraki frame'de "fare hareket etti mi" karsilastirmasi icin
+    m_lastCursorPos = cursor;
 }
 
 // =============================================================================
@@ -501,7 +528,14 @@ void App::OnToggleZoom()
             if (mon && mon->zoom.isActive)
             {
                 // Zoom acilinca 2x'ten basla (1.0x'te acmak anlamsiz)
-                m_monitorManager.SetZoom(i, 2.0f);
+                // Zoom acilinca hangi seviyeden baslasin?
+                // rememberZoomLevel aciksa son kullanilan seviye, degilse
+                // minZoom'un iki kati (1.0x'te acmak anlamsiz).
+                const auto ms = m_settings.Monitor(mon->deviceName);
+                const float startZoom = m_settings.General().rememberZoomLevel
+                    ? std::clamp(ms.lastZoom, ms.minZoom, ms.maxZoom)
+                    : std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
+                m_monitorManager.SetZoom(i, startZoom);
                 m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Aktif");
             }
             else
@@ -550,10 +584,121 @@ void App::OnScroll(int delta, POINT mousePos)
     {
         if (monitors[i].hMonitor == target->hMonitor)
         {
-            const float step = (delta > 0) ? ZoomState::kZoomStep : -ZoomState::kZoomStep;
+            // Zoom adimi ayarlardan geliyor (per-monitor)
+            const auto ms = m_settings.Monitor(monitors[i].deviceName);
+            const float step = (delta > 0) ? ms.zoomStep : -ms.zoomStep;
             m_monitorManager.AdjustZoom(i, step);
             return;
         }
+    }
+}
+
+// =============================================================================
+// OnFocusChanged — klavye odagi degisti, focal point'i oraya kaydir
+// =============================================================================
+// Odaklanan pencerenin MERKEZINI focal point yapiyoruz. Daha isabetli olan
+// caret pozisyonu UI Automation gerektiriyor ve uygulama bazinda tutarsiz
+// calisiyor — kapsam disi.
+//
+// Freeze aktifse dokunmuyoruz: kullanici bilincli olarak sabitlemis.
+// =============================================================================
+void App::OnFocusChanged(HWND focused)
+{
+    if (!focused)
+        return;
+
+    if (m_settings.General().followMode != FollowMode::MouseAndFocus)
+        return;
+
+    RECT rc{};
+    if (!GetWindowRect(focused, &rc))
+        return;
+
+    // Sifir boyutlu pencereleri yoksay
+    if (rc.right <= rc.left || rc.bottom <= rc.top)
+        return;
+
+    const POINT center{ (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
+
+    MonitorInfo* target = m_monitorManager.FindByPoint(center);
+    if (!target)
+        return;
+
+    // Sadece zoom AKTIF ve frozen DEGILSE kaydir
+    if (!target->zoom.isActive || target->zoom.isFrozen)
+        return;
+
+    target->zoom.focalPoint = center;
+}
+
+// =============================================================================
+// ResolveMonitorIndex — wParam'i monitor indeksine cevir
+// =============================================================================
+// kFocusedMonitor sentinel'i = "farenin uzerinde oldugu monitor".
+// Diger degerler dogrudan indeks. Sinir disi indeks false doner.
+// =============================================================================
+bool App::ResolveMonitorIndex(WPARAM wparam, size_t& outIndex) const
+{
+    const auto& monitors = m_monitorManager.GetMonitors();
+
+    if (wparam == kFocusedMonitor)
+    {
+        POINT cursor{};
+        GetCursorPos(&cursor);
+
+        for (size_t i = 0; i < monitors.size(); ++i)
+        {
+            if (PtInRect(&monitors[i].bounds, cursor))
+            {
+                outIndex = i;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (wparam < monitors.size())
+    {
+        outIndex = static_cast<size_t>(wparam);
+        return true;
+    }
+
+    return false;
+}
+
+// =============================================================================
+// ApplySettings — GUI ayarlari degistirdi, motora uygula
+// =============================================================================
+// GUI once SettingsStore'u yazdi SONRA bu mesaji postaladi, yani buradaki
+// okuma guvenli — yaris yok.
+// =============================================================================
+void App::ApplySettings()
+{
+    LOG_INFO("Ayarlar uygulaniyor...");
+
+    const auto& g = m_settings.General();
+
+    // Hotkey'leri yeniden kaydet, sonucu panele bildir
+    const UINT failedMask = m_hotkeyManager.Reregister(g);
+    m_status.hotkeyFailedMask.store(failedMask, std::memory_order_release);
+
+    // Input thread'in atomic bayraklarini guncelle
+    m_inputThread.SetFollowMode(g.followMode);
+    m_inputThread.SetHijackWinZ(g.hijackWinZ);
+
+    // Mevcut zoom yeni sinirlarin disinda kaldiysa iceri cek
+    for (size_t i = 0; i < m_monitorManager.GetMonitorCount(); ++i)
+    {
+        MonitorInfo* mon = m_monitorManager.GetMonitor(i);
+        if (!mon)
+            continue;
+
+        const auto ms = m_settings.Monitor(mon->deviceName);
+
+        if (mon->zoom.zoomLevel > ms.maxZoom)
+            m_monitorManager.SetZoom(i, ms.maxZoom);
+        else if (mon->zoom.zoomLevel < ms.minZoom)
+            m_monitorManager.SetZoom(i, ms.minZoom);
     }
 }
 
@@ -644,6 +789,49 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             s_instance->OnDisplayChange();
         return 0;
 
+    case WM_APP_SCROLL_ZOOM:
+        if (s_instance)
+        {
+            // Input thread'den geldi. Konumu SIMDI okuyoruz — olaydan
+            // birkac ms sonra, fare ayni monitorde.
+            POINT pt{};
+            GetCursorPos(&pt);
+            s_instance->OnScroll(static_cast<int>(static_cast<intptr_t>(wParam)), pt);
+        }
+        return 0;
+
+    case WM_APP_FOCUS_CHANGED:
+        if (s_instance)
+            s_instance->OnFocusChanged(reinterpret_cast<HWND>(lParam));
+        return 0;
+
+    case WM_APP_SETTINGS_CHANGED:
+        if (s_instance)
+            s_instance->ApplySettings();
+        return 0;
+
+    case WM_APP_SET_ZOOM:
+        if (s_instance)
+        {
+            size_t index = 0;
+            if (s_instance->ResolveMonitorIndex(wParam, index))
+            {
+                const float zoom = static_cast<float>(static_cast<int>(lParam)) / 1000.0f;
+                s_instance->m_monitorManager.SetZoom(index, zoom);
+            }
+        }
+        return 0;
+
+    case WM_APP_TOGGLE_ZOOM:
+        if (s_instance)
+            s_instance->OnToggleZoom();
+        return 0;
+
+    case WM_APP_TOGGLE_FREEZE:
+        if (s_instance)
+            s_instance->OnFreeze();
+        return 0;
+
     case WM_CLOSE:
     case WM_DESTROY:
         PostQuitMessage(0);
@@ -671,7 +859,11 @@ void App::Shutdown()
 
     m_running = false;
 
-    // 1. Girdi kaynaklarini kes (hook + hotkey) — artik callback gelmesin
+    // 1. Input thread'i once durdur — hook'lar kalkmadan mesaj penceresini
+    // yikmak, yolda olan bir PostMessage'in olu HWND'ye gitmesi demek.
+    m_inputThread.Stop();
+
+    // 1a. Hotkey kayitlarini kaldir
     m_hotkeyManager.Shutdown();
 
     // 2. Tray icon'u kaldir
@@ -696,7 +888,23 @@ void App::Shutdown()
     }
     UnregisterClassW(kMsgWindowClass, m_hInstance);
 
-    // 7. m_renderer destructor'i device'i en son birakir (member olarak)
+    // 7. Ayarlari kaydet — son zoom seviyeleri dahil
+    if (m_settings.General().rememberZoomLevel)
+    {
+        for (size_t i = 0; i < m_monitorManager.GetMonitorCount(); ++i)
+        {
+            const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
+            if (!mon)
+                continue;
+
+            auto ms = m_settings.Monitor(mon->deviceName);
+            ms.lastZoom = std::clamp(mon->zoom.zoomLevel, ms.minZoom, ms.maxZoom);
+            m_settings.SetMonitor(mon->deviceName, ms);
+        }
+    }
+    m_settings.Save();
+
+    // 8. m_renderer destructor'i device'i en son birakir (member olarak)
 
     s_instance    = nullptr;
     m_initialized = false;
