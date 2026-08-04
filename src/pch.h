@@ -47,6 +47,7 @@
 #include <shellapi.h>       // Shell_NotifyIcon (system tray) için
 #include <commctrl.h>       // Common controls
 #include <hidusage.h>       // Raw input HID usage pages
+#include <shellscalingapi.h>// GetDpiForMonitor, MDT_EFFECTIVE_DPI (Shcore.lib gerekir)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COM & WRL (Windows Runtime Library)
@@ -135,6 +136,41 @@
                 msg, static_cast<unsigned long>(_hr)));                         \
         }                                                                       \
     } while(false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WIDE → UTF-8 DÖNÜŞÜMÜ
+// ─────────────────────────────────────────────────────────────────────────────
+// Win32 API'leri wchar_t (UTF-16) döner, Logger ise char (UTF-8) yazıyor.
+// Bu köprü fonksiyonu her iki dünyayı birleştirir.
+//
+// NEDEN std::string(ws.begin(), ws.end()) KULLANMIYORUZ?
+//   O yaygın idiom her wchar_t'yi tek tek char'a daraltır (narrowing).
+//   İki sorun: (1) derleyici C4244 uyarısı verir — bu projede warning-as-error,
+//   (2) ASCII dışı her karakter BOZULUR. "DELL Ü2723" → "DELL ?2723".
+//   Monitör isimlerinde Türkçe karakter olabilir, kayıpsız dönüşüm gerekli.
+//
+// Python analojisi: ws.encode("utf-8") — Python'da bir satır, C++'ta bu.
+inline std::string ToUtf8(std::wstring_view ws)
+{
+    if (ws.empty())
+        return {};
+
+    // İki aşamalı çağrı: önce gereken byte sayısını sor, sonra doldur.
+    // Win32'de yaygın kalıp — buffer boyutunu tahmin etmek yerine API'ye sor.
+    const int needed = WideCharToMultiByte(
+        CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()),
+        nullptr, 0, nullptr, nullptr);
+
+    if (needed <= 0)
+        return {};
+
+    std::string out(static_cast<size_t>(needed), '\0');
+    WideCharToMultiByte(
+        CP_UTF8, 0, ws.data(), static_cast<int>(ws.size()),
+        out.data(), needed, nullptr, nullptr);
+
+    return out;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SAFE RELEASE HELPER (ComPtr kullanmadığımız nadir durumlar için)

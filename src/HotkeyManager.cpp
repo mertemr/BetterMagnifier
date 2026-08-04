@@ -31,30 +31,37 @@ bool HotkeyManager::Initialize(HWND hwnd)
 
     LOG_INFO("HotkeyManager baslatiliyor...");
 
-    // ── Global Hotkey: Win+Z = Toggle Zoom ──
+    // ── Global Hotkey: Ctrl+Alt+Z = Toggle Zoom ──
     // RegisterHotKey: Hangi pencereye tiklanirsa tiklansin, bu tuş kombinasyonu
     // bizim mesaj loop'umuza WM_HOTKEY mesaji gonderir.
-    // Python analojisi: keyboard.add_hotkey('win+z', callback)
+    // Python analojisi: keyboard.add_hotkey('ctrl+alt+z', callback)
     //
-    // MOD_WIN = Windows tusu, MOD_NOREPEAT = basili tutunca tekrarlama
-    if (!RegisterHotKey(hwnd, kHotkeyToggleZoom, MOD_WIN | MOD_NOREPEAT, 'Z'))
+    // MOD_NOREPEAT = basili tutunca tekrarlama (toggle icin sart)
+    //
+    // NEDEN MOD_WIN DEGIL:
+    //   Win+Z Windows 11'de Snap Layouts'a rezerve — RegisterHotKey basarisiz
+    //   doner (sistem kisayollarini override edemeyiz). Win+<harf>
+    //   kombinasyonlarinin cogu Windows tarafindan alinmis durumda.
+    //   Ctrl+Alt+<harf> ise sistem tarafindan rezerve edilmiyor, guvenli alan.
+    if (!RegisterHotKey(hwnd, kHotkeyToggleZoom, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Z'))
     {
-        LOG_ERROR("Win+Z hotkey kaydedilemedi (baska uygulama kullaniyor olabilir)");
-        // Kritik degil, devam et
+        LOG_ERROR("Ctrl+Alt+Z hotkey kaydedilemedi ({}) — baska uygulama kullaniyor olabilir",
+            GetLastError());
+        // Kritik degil — tray menusunden toggle yapilabilir
     }
     else
     {
-        LOG_INFO("  Hotkey: Win+Z = Toggle Zoom");
+        LOG_INFO("  Hotkey: Ctrl+Alt+Z = Toggle Zoom");
     }
 
-    // ── Global Hotkey: Win+Shift+Z = Freeze/Pin ──
-    if (!RegisterHotKey(hwnd, kHotkeyFreeze, MOD_WIN | MOD_SHIFT | MOD_NOREPEAT, 'Z'))
+    // ── Global Hotkey: Ctrl+Alt+X = Freeze/Pin ──
+    if (!RegisterHotKey(hwnd, kHotkeyFreeze, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'X'))
     {
-        LOG_ERROR("Win+Shift+Z hotkey kaydedilemedi");
+        LOG_ERROR("Ctrl+Alt+X hotkey kaydedilemedi ({})", GetLastError());
     }
     else
     {
-        LOG_INFO("  Hotkey: Win+Shift+Z = Freeze/Pin");
+        LOG_INFO("  Hotkey: Ctrl+Alt+X = Freeze/Pin");
     }
 
     // ── Low-Level Mouse Hook ──

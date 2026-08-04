@@ -187,7 +187,7 @@ bool D3DRenderer::CreateDevice()
     DXGI_ADAPTER_DESC adapterDesc{};
     adapter->GetDesc(&adapterDesc);
     LOG_INFO("GPU: {} (VRAM: {} MB)",
-        std::string(adapterDesc.Description, adapterDesc.Description + wcslen(adapterDesc.Description)),
+        ToUtf8(adapterDesc.Description),
         adapterDesc.DedicatedVideoMemory / (1024 * 1024));
 
     return true;
@@ -283,7 +283,10 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
     swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     swapDesc.BufferCount = 2;                             // Double buffering
     swapDesc.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD; // Modern flip model
-    swapDesc.AlphaMode   = DXGI_ALPHA_MODE_PREMULTIPLIED; // Alpha destegi (seffaf overlay)
+    // HWND swap chain'de PREMULTIPLIED alpha DESTEKLENMEZ — sadece
+    // CreateSwapChainForComposition (DirectComposition) kabul eder.
+    // Overlay opak oldugu icin IGNORE dogru secim (bkz. OverlayWindow.cpp).
+    swapDesc.AlphaMode   = DXGI_ALPHA_MODE_IGNORE;
     swapDesc.Flags       = 0;
 
     HRESULT hr = m_dxgiFactory->CreateSwapChainForHwnd(
@@ -297,20 +300,8 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
 
     if (FAILED(hr))
     {
-        // PREMULTIPLIED alpha desteklenmiyorsa UNSPECIFIED ile tekrar dene
-        if (hr == DXGI_ERROR_INVALID_CALL)
-        {
-            LOG_WARN("PREMULTIPLIED alpha desteklenmiyor, UNSPECIFIED deneniyor...");
-            swapDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
-            hr = m_dxgiFactory->CreateSwapChainForHwnd(
-                m_device.Get(), hwnd, &swapDesc, nullptr, nullptr, &rt.swapChain);
-        }
-
-        if (FAILED(hr))
-        {
-            LOG_ERROR("CreateSwapChainForHwnd basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
-            return false;
-        }
+        LOG_ERROR("CreateSwapChainForHwnd basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
     }
 
     // ── Render Target View olustur ──
@@ -356,10 +347,15 @@ void D3DRenderer::RenderFrame(
     if (!rt.swapChain || !rt.rtv)
         return;
 
-    // ── Shader Resource View olustur (texture'i okumak icin) ──
-    ComPtr<ID3D11ShaderResourceView> srv;
-    if (!EnsureShaderResourceView(srcTexture, srv))
+    if (!srcTexture)
         return;
+
+    // NOT: Burada SRV olusturmaya CALISMIYORUZ.
+    // Desktop Duplication texture'lari D3D11_BIND_SHADER_RESOURCE flag'i
+    // OLMADAN gelir — CreateShaderResourceView her zaman basarisiz olur.
+    // Bu asamada CopySubresourceRegion kullaniyoruz, o SRV gerektirmiyor.
+    // Shader tabanli olceklendirmeye gecince (Adim 4) DD texture'i once
+    // SRV bind flag'li ara bir texture'a kopyalamak gerekecek.
 
     // ── Viewport ayarla ──
     D3D11_VIEWPORT viewport{};
@@ -405,14 +401,21 @@ void D3DRenderer::RenderFrame(
     if (cropW == 0 || cropH == 0)
         return;
 
-    // Back buffer'a kopyala (stretch/scale GPU'nun texture sampler'i ile olur)
-    // Simdilik basit CopySubresourceRegion — full shader pipeline ileride
+    // Back buffer'a kopyala.
+    // ponytail: CopySubresourceRegion 1:1 kopyalar — OLCEKLEME YAPMAZ.
+    // Yani su an zoom seviyesi kirpma bolgesini kucultuyor ama goruntu
+    // buyumuyor. Gercek zoom icin shader pipeline gerekli (Adim 4):
+    // fullscreen quad + linear sampler + srcRect'i UV'ye ceviren constant buffer.
     ComPtr<ID3D11Texture2D> backBuffer;
     HRESULT hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
     if (SUCCEEDED(hr))
     {
-        // Kaynak bolgesiyle hedef ayni boyutta degilse, bu sadece 1:1 kopyalar.
-        // Scale icin shader lazim — bu asamada temel altyapiyi kuruyoruz.
+        // KRITIK: Back buffer su an render target olarak BAGLI.
+        // Bagli bir kaynaga CopySubresourceRegion yapilamaz — D3D11 debug layer
+        // "resource is bound as render target" hatasi verir ve kopya sessizce duser.
+        // Once RTV'yi cikar.
+        m_context->OMSetRenderTargets(0, nullptr, nullptr);
+
         m_context->CopySubresourceRegion(
             backBuffer.Get(), 0,    // Hedef
             0, 0, 0,                // Hedef offset
@@ -513,7 +516,7 @@ bool D3DRenderer::EnsureShaderResourceView(
 
     D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
     srvDesc.Format                    = desc.Format;
-    srvDesc.ViewType                  = D3D11_SRV_DIMENSION_TEXTURE2D;
+    srvDesc.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Texture2D.MostDetailedMip = 0;
     srvDesc.Texture2D.MipLevels       = 1;
 

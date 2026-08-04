@@ -24,6 +24,7 @@
 // =============================================================================
 
 #include "pch.h"
+#include "App.h"
 #include "Logger.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,69 +110,34 @@ int WINAPI wWinMain(
 #endif
     LOG_INFO("Debug build: {}", kIsDebugBuild ? "EVET" : "HAYIR");
 
-    // ── 5. Smoke Test — Temel Logging Kontrolü ──
-    LOG_DEBUG("Bu satır sadece Debug build'de görünür");
-    LOG_INFO("Logger çalışıyor — INFO seviyesi");
-    LOG_WARN("Logger çalışıyor — WARN seviyesi");
-
-    // ── 6. Message Loop (Hybrid Game-Loop Pattern) ──
-    // Python'daki asyncio event loop'a benzer:
-    //   while True:
-    //       event = poll_events()
-    //       if event == QUIT: break
-    //       process(event)
-    //       render()
+    // ── 5. App'i başlat ve çalıştır ──
+    // Tüm iş App sınıfında: component init, message loop, capture/render, cleanup.
+    // WinMain'in tek sorumluluğu process seviyesi kurulum (DPI, COM, Logger).
     //
-    // PeekMessage vs GetMessage farkı:
-    //   GetMessage: Mesaj gelene kadar bekler (CPU %0 ama render döngüsü durur)
-    //   PeekMessage: Mesaj yoksa false döner, devam eder (render yapabiliriz)
-    //
-    // Şu an basit bir loop — ileriki aşamalarda DXGI capture + render eklenecek.
-    LOG_INFO("Message loop baslatiliyor...");
-
-    MSG msg{};
-    bool running = true;
-
-    // Gecici: Henuz tray icon/overlay yok, programi 5 saniye sonra otomatik kapat.
-    // TrayIcon implement edilince bu kaldirilacak.
-    auto startTime = std::chrono::steady_clock::now();
-
-    while (running)
+    // Neden ayrı scope ({ }) içinde?
+    //   App destructor'ı CoUninitialize'dan ÖNCE çalışmalı — içindeki tüm
+    //   COM nesneleri (D3D device, DXGI swap chain) COM hâlâ ayaktayken
+    //   serbest bırakılmalı. Scope bitince destructor garantili çalışır.
+    //   Python analojisi: with App() as app: app.run()
+    int exitCode = 0;
     {
-        // Tüm bekleyen mesajları işle (non-blocking)
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+        BetterMagnifier::App app;
+
+        if (!app.Initialize(hInstance))
         {
-            if (msg.message == WM_QUIT)
-            {
-                running = false;
-                break;
-            }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            LOG_ERROR("App baslatilamadi — cikiliyor");
+            MessageBoxW(nullptr,
+                L"BetterMagnifier başlatılamadı.\nDetaylar için logs klasörüne bakın.",
+                L"BetterMagnifier", MB_ICONERROR);
+            exitCode = 1;
         }
-
-        if (!running)
-            break;
-
-        // ── RENDER/UPDATE BÖLGESI ──
-        // Burada ileride şunlar yapılacak:
-        //   1. DXGI Desktop Duplication → frame capture
-        //   2. D3D11 → process zoom region
-        //   3. Swap chain → present to overlay window
-
-        // Gecici auto-exit: 5 saniye sonra kapat (TrayIcon implement edilince kaldirilacak)
-        auto elapsed = std::chrono::steady_clock::now() - startTime;
-        if (elapsed > std::chrono::seconds(5))
+        else
         {
-            LOG_INFO("Smoke test tamamlandi, 5 saniye doldu, cikiliyor...");
-            PostQuitMessage(0);
+            exitCode = app.Run();
         }
-
-        // Şimdilik sadece CPU'yu yakmamak için kısa uyku:
-        Sleep(16);  // ~60 FPS — ileride v-sync ile değiştirilecek
     }
 
-    // ── 7. Cleanup (RAII sırası önemli!) ──
+    // ── 6. Cleanup (RAII sırası önemli!) ──
     // C++'ta "cleanup sırası" kritiktir. Genel kural:
     //   "Son oluşturulan → ilk yıkılır" (LIFO — stack gibi)
     //
@@ -187,13 +153,13 @@ int WINAPI wWinMain(
     // büyük ölçüde otomatik oluyor, ama dikkatli olmak lazım.
 
     LOG_INFO("BetterMagnifier kapatılıyor...");
-    LOG_INFO("Exit code: {}", static_cast<int>(msg.wParam));
+    LOG_INFO("Exit code: {}", exitCode);
 
     BetterMagnifier::Logger::Instance().Shutdown();
 
     CoUninitialize();
 
-    return static_cast<int>(msg.wParam);
+    return exitCode;
 }
 
 // =============================================================================

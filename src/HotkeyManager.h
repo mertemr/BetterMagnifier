@@ -41,8 +41,10 @@ public:
     void HandleHotkey(int hotkeyId);
 
     // Hotkey ID'leri
-    static constexpr int kHotkeyToggleZoom = 1;   // Win+Z
-    static constexpr int kHotkeyFreeze     = 2;   // Win+Shift+Z
+    // NOT: Win+<harf> kullanmiyoruz — Windows 11 cogunu rezerve etmis
+    // (Win+Z = Snap Layouts). Ctrl+Alt+<harf> guvenli alan.
+    static constexpr int kHotkeyToggleZoom = 1;   // Ctrl+Alt+Z
+    static constexpr int kHotkeyFreeze     = 2;   // Ctrl+Alt+X
 
 private:
     // ── Mouse Hook ──

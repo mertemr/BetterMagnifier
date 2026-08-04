@@ -87,7 +87,7 @@ void MonitorManager::Refresh()
         {
             mon.zoom = it->second;
             LOG_DEBUG("Zoom state korundu: {} -> level={:.2f}", 
-                std::string(mon.deviceName.begin(), mon.deviceName.end()),
+                ToUtf8(mon.deviceName),
                 mon.zoom.zoomLevel);
         }
     }
@@ -173,7 +173,7 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
     else
     {
         LOG_WARN("EnumDisplaySettings basarisiz: {}", 
-            std::string(info.deviceName.begin(), info.deviceName.end()));
+            ToUtf8(info.deviceName));
         info.refreshRate = 60;  // Fallback
     }
 
@@ -234,7 +234,7 @@ bool MonitorManager::MatchDXGIOutputs()
         adapter->GetDesc1(&adapterDesc);
         LOG_INFO("  GPU {}: {} (VRAM: {} MB)",
             adapterIdx,
-            std::string(adapterDesc.Description, adapterDesc.Description + wcslen(adapterDesc.Description)),
+            ToUtf8(adapterDesc.Description),
             adapterDesc.DedicatedVideoMemory / (1024 * 1024));
 
         // Her adapter'in output'larini iterate et
@@ -269,7 +269,7 @@ bool MonitorManager::MatchDXGIOutputs()
 
                     LOG_INFO("    Output {} -> {} (Adapter {})",
                         outputIdx,
-                        std::string(mon.deviceName.begin(), mon.deviceName.end()),
+                        ToUtf8(mon.deviceName),
                         adapterIdx);
                     break;
                 }
@@ -398,7 +398,7 @@ void MonitorManager::LogAllMonitors() const
     for (size_t i = 0; i < m_monitors.size(); i++)
     {
         const auto& mon = m_monitors[i];
-        std::string name(mon.deviceName.begin(), mon.deviceName.end());
+        std::string name = ToUtf8(mon.deviceName);
         
         LOG_INFO("  [{}] {} {}",
             i, name, mon.isPrimary ? "(PRIMARY)" : "");

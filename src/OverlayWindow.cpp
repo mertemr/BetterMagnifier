@@ -81,8 +81,17 @@ bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
 // Create — Overlay penceresi olustur
 // =============================================================================
 //
+// NEDEN WS_EX_LAYERED KULLANMIYORUZ (onemli mimari karar):
+//   DXGI flip-model swap chain (DXGI_SWAP_EFFECT_FLIP_DISCARD) layered pencerede
+//   CALISMAZ — CreateSwapChainForHwnd DXGI_ERROR_INVALID_CALL doner.
+//   Layered + D3D icin DirectComposition kurmak gerekirdi.
+//
+//   Ama gerek yok: bu bir TAM EKRAN magnifier. Buyutulmus goruntu monitorun
+//   tamamini kapliyor, altinda hicbir sey gorunmeyecek — yani seffafliga
+//   ihtiyacimiz yok. Overlay opak olabilir, swap chain dogrudan calisir.
+//   (Kismi ekran "lens" modu eklenirse o zaman DirectComposition gerekir.)
+//
 // Window Styles Aciklamasi:
-//   WS_EX_LAYERED      — Seffaflik destegi (per-pixel alpha)
 //   WS_EX_TRANSPARENT  — Mouse olaylari bu pencereden gecer (click-through)
 //   WS_EX_TOPMOST      — Her zaman ustte (diger pencerelerin uzerinde)
 //   WS_EX_NOACTIVATE   — Tiklayinca focus almasin (calisan uygulama focus'unu kaybetmesin)
@@ -101,8 +110,7 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
 
     m_monitorIndex = monitorIndex;
 
-    DWORD exStyle = WS_EX_LAYERED
-                  | WS_EX_TRANSPARENT
+    DWORD exStyle = WS_EX_TRANSPARENT
                   | WS_EX_TOPMOST
                   | WS_EX_NOACTIVATE
                   | WS_EX_TOOLWINDOW;
@@ -132,10 +140,19 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
         return false;
     }
 
-    // Pencereyi tamamen seffaf yap
-    // SetLayeredWindowAttributes ile alpha = 0 → tamamen gorunmez
-    // Render basladiginda bu deger render pipeline tarafindan ayarlanacak
-    SetLayeredWindowAttributes(m_hwnd, 0, 0, LWA_ALPHA);
+    // ── FEEDBACK LOOP ONLEME (kritik!) ──
+    // Desktop Duplication tum masaustunu yakaliyor — overlay de masaustunun
+    // parcasi. Onlem alinmazsa overlay kendi icerigini yakalar → sonsuz ayna
+    // (kamerayi kendi ekranina tutmak gibi).
+    //
+    // WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+): pencere kullaniciya normal
+    // gorunur ama ekran yakalama API'lerine gorunmez. Tam istedigimiz sey.
+    // Eski Windows'ta basarisiz olur — o zaman feedback loop olusur, uyari veriyoruz.
+    if (!SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE))
+    {
+        LOG_WARN("SetWindowDisplayAffinity basarisiz ({}) — Windows 10 2004+ gerekiyor, "
+                 "feedback loop olusabilir", GetLastError());
+    }
 
     LOG_INFO("Overlay window olusturuldu: monitor={}, pos=({},{}), size={}x{}, HWND=0x{:X}",
         monitorIndex, x, y, w, h, reinterpret_cast<uintptr_t>(m_hwnd));
@@ -150,8 +167,8 @@ void OverlayWindow::Show()
 {
     if (m_hwnd && !m_visible)
     {
-        // Alpha'yi 255 yap (tam opak — render pipeline icerigi belirler)
-        SetLayeredWindowAttributes(m_hwnd, 0, 255, LWA_ALPHA);
+        // SW_SHOWNOACTIVATE: goster ama focus'u CALMA — altta calisan
+        // uygulamanin klavye odagi bozulmasin.
         ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
         m_visible = true;
         LOG_DEBUG("Overlay gorunur: monitor={}", m_monitorIndex);
