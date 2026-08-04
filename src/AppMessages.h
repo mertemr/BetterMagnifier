@@ -1,0 +1,63 @@
+#pragma once
+
+// =============================================================================
+// AppMessages.h — Thread'ler arasi mesaj sabitleri
+// =============================================================================
+// GUI thread ve input thread, render thread'e SADECE bu mesajlarla konusur.
+// Paylasilan mutable state yok, kilit yok — Win32 mesaj kuyrugu bizim
+// thread-safe kuyrugumuz.
+//
+// Python analojisi: queue.Queue() ile thread'ler arasi is gecirmek.
+// Win32'de mesaj kuyrugu zaten her thread'de var, ayrica kurmaya gerek yok.
+//
+// NEDEN PostMessage, SendMessage DEGIL:
+//   SendMessage hedef thread'in mesaji ISLEMESINI BEKLER. Render thread
+//   Present(vSync) ile bloklu oldugu icin bu, gonderen thread'i bir frame
+//   boyunca kilitler. Low-level hook'ta bu LowLevelHooksTimeout'a takilir.
+// =============================================================================
+
+#ifndef BETTER_MAGNIFIER_APP_MESSAGES_H
+#define BETTER_MAGNIFIER_APP_MESSAGES_H
+
+#include <windows.h>
+
+namespace BetterMagnifier {
+
+// Tray icon callback'i — TrayIcon::Create bu degeri uCallbackMessage'a koyar
+inline constexpr UINT WM_APP_TRAY             = WM_APP + 1;
+
+// GUI -> motor: ayarlar degisti, SettingsStore'dan yeniden oku
+inline constexpr UINT WM_APP_SETTINGS_CHANGED = WM_APP + 2;
+
+// GUI -> motor: zoom seviyesini ayarla
+//   wParam = monitor indeksi (size_t)
+//   lParam = zoom * 1000 (int)   ornek: 2.50x -> 2500
+inline constexpr UINT WM_APP_SET_ZOOM         = WM_APP + 3;
+
+// GUI/hotkey -> motor: zoom ac-kapa
+//   wParam = monitor indeksi, veya kFocusedMonitor = fare neredeyse orada
+inline constexpr UINT WM_APP_TOGGLE_ZOOM      = WM_APP + 4;
+
+// GUI/hotkey -> motor: freeze ac-kapa (wParam ayni)
+inline constexpr UINT WM_APP_TOGGLE_FREEZE    = WM_APP + 5;
+
+// Input thread -> motor: mouse wheel ile zoom degisimi
+//   wParam = wheel delta (int, pozitif = zoom in)
+//   lParam = kullanilmiyor. Render thread GetCursorPos() ile konumu kendisi
+//   okur — olay ile isleme arasi birkac ms, fare ayni monitorde kalir.
+inline constexpr UINT WM_APP_SCROLL_ZOOM      = WM_APP + 6;
+
+// Input thread -> motor: klavye odagi degisti, focal point'i oraya kaydir
+//   wParam = kullanilmiyor
+//   lParam = odaklanan pencerenin HWND'si
+inline constexpr UINT WM_APP_FOCUS_CHANGED    = WM_APP + 7;
+
+// Tray -> motor: kontrol panelini goster
+inline constexpr UINT WM_APP_SHOW_PANEL       = WM_APP + 8;
+
+// wParam sentinel'i: "belirli bir monitor degil, farenin uzerinde oldugu monitor"
+inline constexpr WPARAM kFocusedMonitor = static_cast<WPARAM>(-1);
+
+} // namespace BetterMagnifier
+
+#endif // BETTER_MAGNIFIER_APP_MESSAGES_H

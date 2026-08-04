@@ -198,6 +198,9 @@ bool App::InitializeComponents()
     m_hotkeyManager.Initialize(m_messageHwnd);
     m_trayIcon.Create(m_messageHwnd, m_hInstance);
 
+    // ── 5. Statik monitor bilgilerini snapshot'a yaz ──
+    PublishMonitorInfo();
+
     return true;
 }
 
@@ -273,6 +276,8 @@ int App::Run()
 // =============================================================================
 void App::Update()
 {
+    m_status.monitorCount.store(m_overlays.size(), std::memory_order_relaxed);
+
     // ── Mouse pozisyonunu takip et (magnifier fareyi izler) ──
     POINT cursor{};
     GetCursorPos(&cursor);
@@ -286,11 +291,28 @@ void App::Update()
         if (!mon)
             continue;
 
+        // ── Snapshot'i guncelle (GUI thread bunu 10 Hz okuyor) ──
+        // Pasif monitorler de raporlanmali, bu yuzden zoom kontrolunden ONCE.
+        auto& st = m_status.Monitor(i);
+        st.zoomLevel.store(mon->zoom.zoomLevel, std::memory_order_relaxed);
+        st.isActive.store(mon->zoom.isActive, std::memory_order_relaxed);
+        st.isFrozen.store(mon->zoom.isFrozen, std::memory_order_relaxed);
+        st.captureOk.store(
+            m_captures[i].IsInitialized() && !m_captures[i].NeedsReinit(),
+            std::memory_order_relaxed);
+        st.captureExcluded.store(m_overlays[i].IsExcludedFromCapture(),
+                                 std::memory_order_relaxed);
+
         // ── Zoom pasif → overlay'i gizle, capture'a dokunma ──
         if (!mon->zoom.isActive)
         {
             if (m_overlays[i].IsVisible())
                 m_overlays[i].Hide();
+
+            // Zoom kapaliyken FPS anlamsiz — panelde "—" gorunmesi icin sifirla
+            st.fps.store(0.0f, std::memory_order_relaxed);
+            m_lastFrameTime[i < StatusSnapshot::kMaxMonitors
+                            ? i : StatusSnapshot::kMaxMonitors - 1] = {};
             continue;
         }
 
@@ -382,11 +404,70 @@ void App::RenderMonitor(size_t monitorIndex)
 
         m_renderer.RenderFrame(frame.texture.Get(), monitorIndex, srcRect);
         m_renderer.Present(monitorIndex, true);
+
+        // ── FPS olcumu ──
+        // Present'ten SONRA olcuyoruz, cunku vSync bekleyisi de frame
+        // suresinin parcasi. Iki frame arasi sureyi 1/dt ile FPS'e ceviriyoruz.
+        //
+        // Python analojisi: time.perf_counter() farki. Fark: steady_clock
+        // monotonic garantisi veriyor — sistem saati geri alinsa bile bozulmaz.
+        const auto now = std::chrono::steady_clock::now();
+        const size_t slot = (monitorIndex < StatusSnapshot::kMaxMonitors)
+                          ? monitorIndex : StatusSnapshot::kMaxMonitors - 1;
+        auto& lastTime = m_lastFrameTime[slot];
+
+        if (lastTime.time_since_epoch().count() != 0)
+        {
+            const float dt = std::chrono::duration<float>(now - lastTime).count();
+            if (dt > 0.0f)
+            {
+                // Ustel yumusatma — ham 1/dt cok zipliyor, gostergede okunmaz.
+                const float instant = 1.0f / dt;
+                auto& fpsSlot = m_status.Monitor(monitorIndex).fps;
+                const float prev = fpsSlot.load(std::memory_order_relaxed);
+                const float smoothed = (prev <= 0.0f) ? instant
+                                                      : (prev * 0.9f + instant * 0.1f);
+                fpsSlot.store(smoothed, std::memory_order_relaxed);
+            }
+        }
+        lastTime = now;
     }
 
     // AcquireFrame'den sonra HER DURUMDA ReleaseFrame — yoksa sonraki
     // AcquireFrame "frame already acquired" ile patlar.
     capture.ReleaseFrame();
+}
+
+// =============================================================================
+// PublishMonitorInfo — statik monitor bilgilerini snapshot'a yaz
+// =============================================================================
+// Panel bunlari kart basliklarinda gosteriyor. Sadece init ve
+// WM_DISPLAYCHANGE'de cagriliyor — her frame degil.
+// =============================================================================
+void App::PublishMonitorInfo()
+{
+    const size_t count = m_monitorManager.GetMonitorCount();
+    m_status.monitorCount.store(count, std::memory_order_release);
+
+    for (size_t i = 0; i < count && i < StatusSnapshot::kMaxMonitors; ++i)
+    {
+        const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
+        if (!mon)
+            continue;
+
+        auto& st = m_status.Monitor(i);
+
+        // wcsncpy_s + _TRUNCATE: her zaman null-terminated, tasma yok
+        wcsncpy_s(st.deviceName, MonitorStatus::kNameCapacity,
+                  mon->deviceName.c_str(), _TRUNCATE);
+
+        st.width.store(mon->Width(), std::memory_order_relaxed);
+        st.height.store(mon->Height(), std::memory_order_relaxed);
+        st.refreshRate.store(static_cast<int>(mon->refreshRate), std::memory_order_relaxed);
+        st.dpiPercent.store(static_cast<int>(mon->ScaleFactor() * 100.0f),
+                            std::memory_order_relaxed);
+        st.isPrimary.store(mon->isPrimary, std::memory_order_relaxed);
+    }
 }
 
 // =============================================================================
@@ -529,6 +610,9 @@ void App::OnDisplayChange()
         m_overlays.push_back(std::move(overlay));
         m_captures.push_back(std::move(capture));
     }
+
+    // Yeni monitor bilgilerini snapshot'a yaz — panel basliklari guncellensin
+    PublishMonitorInfo();
 
     LOG_INFO("Pipeline yeniden kuruldu ({} monitor)", m_overlays.size());
 }

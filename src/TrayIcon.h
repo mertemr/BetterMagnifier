@@ -7,6 +7,8 @@
 #ifndef BETTER_MAGNIFIER_TRAY_ICON_H
 #define BETTER_MAGNIFIER_TRAY_ICON_H
 
+#include "AppMessages.h"
+
 #include <windows.h>
 #include <shellapi.h>
 #include <functional>
@@ -36,7 +38,9 @@ public:
     void SetToggleCallback(std::function<void()> cb)  { m_onToggle = std::move(cb); }
     void SetExitCallback(std::function<void()> cb)    { m_onExit = std::move(cb); }
 
-    static constexpr UINT kTrayCallbackMsg = WM_APP + 1;
+    // Tek kaynak: AppMessages.h. Iki yerde WM_APP+1 yazmak, birini
+    // degistirip digerini unutmaya davetiye.
+    static constexpr UINT kTrayCallbackMsg = WM_APP_TRAY;
     static constexpr UINT kTrayIconId      = 1;
 
     // Menu item ID'leri

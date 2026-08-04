@@ -16,10 +16,14 @@
 #include "OverlayWindow.h"
 #include "HotkeyManager.h"
 #include "TrayIcon.h"
+#include "AppMessages.h"
+#include "StatusSnapshot.h"
 
 #include <windows.h>
 #include <vector>
 #include <memory>
+#include <array>
+#include <chrono>
 
 namespace BetterMagnifier {
 
@@ -37,11 +41,17 @@ public:
     int  Run();
     void Shutdown();
 
+    // GUI thread bu pointer'i okur. App yasadigi surece gecerli.
+    StatusSnapshot* Status() { return &m_status; }
+
 private:
     // ── Internal Setup ──
     bool CreateMessageWindow();
     bool InitializeComponents();
     void SetupCallbacks();
+
+    // Snapshot'in statik monitor bilgilerini doldur (init ve display change'de)
+    void PublishMonitorInfo();
 
     // ── Per-Frame ──
     void Update();
@@ -66,6 +76,12 @@ private:
     TrayIcon                    m_trayIcon;
     std::vector<DXGICapture>    m_captures;
     std::vector<OverlayWindow>  m_overlays;
+
+    // GUI thread'in okudugu canli durum. Render thread her frame yazar.
+    StatusSnapshot              m_status;
+
+    // FPS olcumu — monitor basina son frame zamani
+    std::array<std::chrono::steady_clock::time_point, StatusSnapshot::kMaxMonitors> m_lastFrameTime{};
 
     bool m_running     = false;
     bool m_initialized = false;

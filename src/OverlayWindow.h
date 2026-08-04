@@ -42,15 +42,20 @@ public:
     HWND GetHwnd() const { return m_hwnd; }
     size_t GetMonitorIndex() const { return m_monitorIndex; }
 
+    // SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) basarili miydi?
+    // false ise overlay kendini yakalar (feedback loop). Panelde uyari gosterilir.
+    bool IsExcludedFromCapture() const { return m_excludedFromCapture; }
+
     // Window class kaydi (bir kez yapilir)
     static bool RegisterWindowClass(HINSTANCE hInstance);
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-    HWND    m_hwnd         = nullptr;
-    size_t  m_monitorIndex = 0;
-    bool    m_visible      = false;
+    HWND    m_hwnd                = nullptr;
+    size_t  m_monitorIndex        = 0;
+    bool    m_visible             = false;
+    bool    m_excludedFromCapture = false;
 
     static constexpr wchar_t kClassName[] = L"BetterMagnifierOverlay";
     static bool s_classRegistered;
