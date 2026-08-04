@@ -105,6 +105,15 @@
 #include <iomanip>
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DEBUG ASSERT YÖNLENDİRMESİ
+// ─────────────────────────────────────────────────────────────────────────────
+// _CrtSetReportMode / _set_error_mode için. Debug build'de assert çıktısını
+// MessageBox yerine stderr'e yöneltiyoruz (bkz. main.cpp) — böylece
+// self-check betikten koşulabilir hale geliyor.
+#include <crtdbg.h>
+#include <cstdlib>
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HRESULT CHECK MAKROSU
 // ─────────────────────────────────────────────────────────────────────────────
 // Python'da:   response.raise_for_status()

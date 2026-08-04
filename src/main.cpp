@@ -25,6 +25,7 @@
 
 #include "pch.h"
 #include "App.h"
+#include "SettingsStore.h"
 #include "Logger.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -110,7 +111,21 @@ int WINAPI wWinMain(
 #endif
     LOG_INFO("Debug build: {}", kIsDebugBuild ? "EVET" : "HAYIR");
 
-    // ── 5. App'i başlat ve çalıştır ──
+    // ── 5. Debug self-check ──
+    // Saf mantığı olan tek bileşenimiz SettingsStore. Bozulursa burada
+    // düşüyoruz — uygulamanın ortasında tuhaf davranış olarak değil.
+#ifdef _DEBUG
+    // assert başarısız olunca MessageBox AÇMA — stderr'e yaz ve düş.
+    // Otomatik doğrulamada dialog bekleyen bir process asılı kalır; log'da da
+    // hiçbir iz bırakmaz. Bu üç çağrı self-check'i betikten koşulabilir yapıyor.
+    _set_error_mode(_OUT_TO_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+
+    BetterMagnifier::SettingsStoreSelfCheck();
+#endif
+
+    // ── 6. App'i başlat ve çalıştır ──
     // Tüm iş App sınıfında: component init, message loop, capture/render, cleanup.
     // WinMain'in tek sorumluluğu process seviyesi kurulum (DPI, COM, Logger).
     //

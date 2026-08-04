@@ -188,6 +188,7 @@
     <ClCompile Include="src\OverlayWindow.cpp" />
     <ClCompile Include="src\HotkeyManager.cpp" />
     <ClCompile Include="src\TrayIcon.cpp" />
+    <ClCompile Include="src\SettingsStore.cpp" />
   </ItemGroup>
 
   <!-- Header Files -->
@@ -196,6 +197,7 @@
     <ClInclude Include="src\Logger.h" />
     <ClInclude Include="src\AppMessages.h" />
     <ClInclude Include="src\StatusSnapshot.h" />
+    <ClInclude Include="src\SettingsStore.h" />
     <ClInclude Include="src\App.h" />
     <ClInclude Include="src\MonitorManager.h" />
     <ClInclude Include="src\D3DRenderer.h" />
