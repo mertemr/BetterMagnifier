@@ -56,6 +56,11 @@ private:
     // Snapshot'in statik monitor bilgilerini doldur (init ve display change'de)
     void PublishMonitorInfo();
 
+    // Gorunur overlay'lerin topmost'unu yeniden iddia et.
+    // Rate limit'li: EVENT_OBJECT_SHOW cok sik tetikleniyor, her seferinde
+    // SetWindowPos cagirmak z-order gurultusu yaratir.
+    void AssertOverlaysTopmost();
+
     // ── Per-Frame ──
     void Update();
     void RenderMonitor(size_t monitorIndex);

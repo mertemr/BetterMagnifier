@@ -150,29 +150,53 @@ bool InputThread::InstallHooks()
     // WINEVENT_OUTOFCONTEXT: callback BIZIM thread'imizde cagrilir (DLL
     // enjeksiyonu yok) — bu yuzden bu thread'in mesaj loop'u olmak zorunda.
     // WINEVENT_SKIPOWNPROCESS: kendi pencerelerimiz (overlay, panel) tetiklemesin.
+    // Aralik EVENT_OBJECT_SHOW..EVENT_OBJECT_FOCUS: hem odak degisimini hem de
+    // yeni pencere gosterimini (dropdown, flyout) yakaliyor. Handler filtreliyor.
     m_focusHook = SetWinEventHook(
-        EVENT_OBJECT_FOCUS, EVENT_OBJECT_FOCUS,
+        EVENT_OBJECT_SHOW, EVENT_OBJECT_FOCUS,
         nullptr,
         WinEventProc,
         0, 0,
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
     if (!m_focusHook)
-        LOG_WARN("EVENT_OBJECT_FOCUS hook kurulamadi: {} — klavye odagi takibi devre disi",
-            GetLastError());
+        LOG_WARN("EVENT_OBJECT_* hook kurulamadi: {} — odak takibi ve popup "
+                 "tespiti devre disi", GetLastError());
     else
-        LOG_INFO("  Klavye odagi hook'u aktif");
+        LOG_INFO("  Odak + popup hook'u aktif");
+
+    // ── Menu popup hook'u ──
+    // Tepsi sag tik menusu gibi klasik menuler EVENT_SYSTEM_MENUPOPUPSTART
+    // uretiyor. Ayri hook cunku o olay 0x0006, yukarideki aralik 0x8002+.
+    m_popupHook = SetWinEventHook(
+        EVENT_SYSTEM_MENUPOPUPSTART, EVENT_SYSTEM_MENUPOPUPSTART,
+        nullptr,
+        WinEventProc,
+        0, 0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+    if (!m_popupHook)
+        LOG_WARN("EVENT_SYSTEM_MENUPOPUPSTART hook kurulamadi: {}", GetLastError());
+    else
+        LOG_INFO("  Menu popup hook'u aktif");
 
     return true;
 }
 
 void InputThread::RemoveHooks()
 {
+    if (m_popupHook)
+    {
+        UnhookWinEvent(m_popupHook);
+        m_popupHook = nullptr;
+        LOG_DEBUG("Menu popup hook'u kaldirildi");
+    }
+
     if (m_focusHook)
     {
         UnhookWinEvent(m_focusHook);
         m_focusHook = nullptr;
-        LOG_DEBUG("Klavye odagi hook'u kaldirildi");
+        LOG_DEBUG("Odak + popup hook'u kaldirildi");
     }
 
     if (m_keyboardHook)
@@ -443,16 +467,31 @@ void CALLBACK InputThread::WinEventProc(
     HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG /*idChild*/,
     DWORD /*idEventThread*/, DWORD /*dwmsEventTime*/)
 {
-    if (event != EVENT_OBJECT_FOCUS || !hwnd)
+    if (!hwnd || !s_instance || !s_instance->m_target)
+        return;
+
+    // ── Yeni popup/menu dogdu -> topmost'u ANINDA yeniden iddia et ──
+    //
+    // Menuler ve dropdown'lar HWND_TOPMOST ile ve bizden SONRA olusturuluyor,
+    // yani z-order'da uzerimize cikiyorlar ve kullanici popup'i iki kez
+    // goruyor. Periyodik yoklama dropdown'lar icin cok yavas: dropdown
+    // saniyenin altinda bir surede acilip kullaniliyor.
+    //
+    // EVENT_OBJECT_SHOW cok sik tetikleniyor; rate limit motor tarafinda
+    // (App::MessageWndProc) yapiliyor, burada sadece haber veriyoruz.
+    if (event == EVENT_SYSTEM_MENUPOPUPSTART || event == EVENT_OBJECT_SHOW)
+    {
+        PostMessageW(s_instance->m_target, WM_APP_ASSERT_TOPMOST, 0, 0);
+        return;
+    }
+
+    if (event != EVENT_OBJECT_FOCUS)
         return;
 
     // idObject == OBJID_CLIENT: gercek bir kontrol odaklandi.
     // Menu/scrollbar/caret gibi alt nesneleri yoksayiyoruz — zoom bolgesini
     // her scrollbar tiklamasinda ziplatmak istemiyoruz.
     if (idObject != OBJID_CLIENT)
-        return;
-
-    if (!s_instance || !s_instance->m_target)
         return;
 
     if (s_instance->m_followMode.load(std::memory_order_relaxed) != FollowMode::MouseAndFocus)

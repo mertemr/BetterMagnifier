@@ -385,24 +385,10 @@ void App::Update()
     // Zoom aktifse Present(vSync) bizi zaten refresh rate'e kilitliyor.
     // ponytail: sabit 8ms; idle'da MsgWaitForMultipleObjects daha dogru olur
     // ama olay bazli uyanma icin overlay/hotkey akisini yeniden kurmak gerekir.
-    // ── Topmost'u periyodik olarak yeniden iddia et ──
-    // Menuler ve popup'lar HWND_TOPMOST ile ve BIZDEN SONRA olusturuldugu icin
-    // z-order'da uzerimize cikiyor; kullanici popup'i iki kez goruyor (biri
-    // bizim buyutulmus capture'imizda, biri kendi penceresinde).
-    //
-    // 250 ms: bir menuyu acip okumaya baslamadan once ustune cikmaya yeter,
-    // her frame SetWindowPos cagirmanin z-order gurultusunu de yaratmaz.
+    // Periyodik yedek: olay bazli tetikleme (WM_APP_ASSERT_TOPMOST) asil yol,
+    // bu sadece kacan durumlar icin ag. 250 ms yeterince seyrek.
     if (anyActive)
-    {
-        const auto now = std::chrono::steady_clock::now();
-        if (now - m_lastTopmostAssert > std::chrono::milliseconds(250))
-        {
-            for (auto& overlay : m_overlays)
-                overlay.EnsureTopmost();
-
-            m_lastTopmostAssert = now;
-        }
-    }
+        AssertOverlaysTopmost();
 
     // ── Bosa donmeyi engelle ──
     // Zoom aktifken Present(vSync) loop'u dogal olarak frame hizina kilitler.
@@ -602,6 +588,45 @@ void App::RenderMonitor(size_t monitorIndex)
     // AcquireFrame'den sonra HER DURUMDA ReleaseFrame — yoksa sonraki
     // AcquireFrame "frame already acquired" ile patlar.
     capture.ReleaseFrame();
+}
+
+// =============================================================================
+// AssertOverlaysTopmost — menu/popup'larin uzerinde kal
+// =============================================================================
+// Iki kaynaktan cagriliyor:
+//   1. WM_APP_ASSERT_TOPMOST — input thread yeni bir popup/menu dogdugunu
+//      gorunce (EVENT_SYSTEM_MENUPOPUPSTART / EVENT_OBJECT_SHOW). ASIL YOL:
+//      dropdown'lar saniyenin altinda acilip kullaniliyor, yoklama yetismiyor.
+//   2. Update() her turda — kacan durumlar icin yedek ag.
+//
+// RATE LIMIT: EVENT_OBJECT_SHOW cok sik tetikleniyor. 40 ms alt sinir, iki
+// ardisik frame'den kisa; kullanici farki gormez ama SetWindowPos firtinasi
+// ve z-order gurultusu olusmaz.
+// =============================================================================
+void App::AssertOverlaysTopmost()
+{
+    const auto now = std::chrono::steady_clock::now();
+
+    if (m_lastTopmostAssert.time_since_epoch().count() != 0
+        && now - m_lastTopmostAssert < std::chrono::milliseconds(40))
+    {
+        return;
+    }
+
+    bool any = false;
+    for (auto& overlay : m_overlays)
+    {
+        if (overlay.IsVisible())
+        {
+            overlay.EnsureTopmost();
+            any = true;
+        }
+    }
+
+    // Hicbir overlay gorunmuyorsa zaman damgasini guncellemiyoruz — zoom
+    // acildiginda ilk popup icin rate limit bosa harcanmasin.
+    if (any)
+        m_lastTopmostAssert = now;
 }
 
 // =============================================================================
@@ -1090,6 +1115,11 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_APP_TOGGLE_FREEZE:
         if (s_instance)
             s_instance->OnFreeze();
+        return 0;
+
+    case WM_APP_ASSERT_TOPMOST:
+        if (s_instance)
+            s_instance->AssertOverlaysTopmost();
         return 0;
 
     case WM_CLOSE:

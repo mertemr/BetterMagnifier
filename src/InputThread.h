@@ -87,6 +87,11 @@ private:
     HHOOK         m_keyboardHook = nullptr;
     HWINEVENTHOOK m_focusHook    = nullptr;
 
+    // Menu/popup dogumunu yakalar (EVENT_SYSTEM_MENUPOPUPSTART).
+    // Ayri bir hook cunku o olay 0x0006, object olaylari 0x8002+ —
+    // tek bir aralikta birlestirmek arada kalan onlarca olayi da cekerdi.
+    HWINEVENTHOOK m_popupHook    = nullptr;
+
     // Win32 hook callback'leri static olmak zorunda (calling convention).
     // Bu yuzden global instance pointer'i tutuyoruz. Uygulamada tek
     // InputThread var ve olmasi da gerekmiyor.

@@ -64,6 +64,15 @@ inline constexpr UINT WM_APP_FOCUS_CHANGED    = WM_APP + 7;
 // Tray -> motor: kontrol panelini goster
 inline constexpr UINT WM_APP_SHOW_PANEL       = WM_APP + 8;
 
+// Input thread -> motor: yeni bir popup/menu dogdu, topmost'u ANINDA yeniden
+// iddia et.
+//
+// Neden gerekli: menuler ve dropdown'lar HWND_TOPMOST ile ve bizden SONRA
+// olusturuluyor, yani uzerimize cikiyorlar. Periyodik yoklama (250 ms)
+// dropdown'lar icin cok yavas — kullanici onu saniyenin altinda bir surede
+// aciyor ve kullaniyor, o arada popup'i cift goruyor.
+inline constexpr UINT WM_APP_ASSERT_TOPMOST   = WM_APP + 9;
+
 // wParam sentinel'i: "belirli bir monitor degil, farenin uzerinde oldugu monitor"
 inline constexpr WPARAM kFocusedMonitor = static_cast<WPARAM>(-1);
 
