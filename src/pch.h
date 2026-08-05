@@ -217,6 +217,34 @@ inline bool UseFlipOverlay()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POPUP'LARIN ÜSTÜNDE KALMAK — iki kötü seçenek arasında tercih
+// ─────────────────────────────────────────────────────────────────────────────
+// Menüler ve dropdown'lar HWND_TOPMOST ile ve bizden SONRA doğuyor, yani
+// z-order'da üstümüze çıkıyorlar. İki seçenek var ve ikisi de kusurlu:
+//
+// AÇIK (varsayılan) — topmost'u yeniden iddia edip üste çıkıyoruz:
+//   Popup'ı sadece büyütülmüş halde görürsün. AMA tamamen kapatılan pencere
+//   yeniden çizim yapmayı bırakıyor; masaüstü kompozisyonunda son boyanmış
+//   hali kalıyor ve bizim capture'ımız o DONMUŞ hali büyütüyor. Menüde
+//   gezinirken vurgu (highlight) güncellenmiyor.
+//
+// KAPALI (BM_NO_TOPMOST_FIGHT=1) — popup üstümüzde kalıyor:
+//   Popup CANLI ve doğru çalışıyor ama büyütülmüyor, ve arkada bizim
+//   büyütülmüş kopyamız da göründüğü için ekranda iki kez var.
+//
+// Doğru çözüm ikisi de değil: kompozisyon seviyesinde büyütme (Magnification
+// API) gerekiyor, o da per-monitor bağımsız zoom'u kaybettiriyor.
+inline bool FightPopupZOrder()
+{
+    static const bool off = []() {
+        wchar_t buf[8]{};
+        const DWORD n = GetEnvironmentVariableW(L"BM_NO_TOPMOST_FIGHT", buf, 8);
+        return (n > 0 && n < 8 && buf[0] == L'1');
+    }();
+    return !off;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SAFE RELEASE HELPER (ComPtr kullanmadığımız nadir durumlar için)
 // ─────────────────────────────────────────────────────────────────────────────
 template<typename T>

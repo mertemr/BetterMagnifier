@@ -605,6 +605,11 @@ void App::RenderMonitor(size_t monitorIndex)
 // =============================================================================
 void App::AssertOverlaysTopmost()
 {
+    // BM_NO_TOPMOST_FIGHT=1 ile kapatilabilir — popup canli kalir ama
+    // buyutulmez ve cift gorunur (bkz. pch.h FightPopupZOrder).
+    if (!FightPopupZOrder())
+        return;
+
     const auto now = std::chrono::steady_clock::now();
 
     if (m_lastTopmostAssert.time_since_epoch().count() != 0
