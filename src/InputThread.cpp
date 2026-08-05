@@ -11,6 +11,36 @@
 
 namespace BetterMagnifier {
 
+namespace {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sentetik (enjekte edilmis) girdiyi yoksay
+// ─────────────────────────────────────────────────────────────────────────────
+// SendInput ile uretilen olaylar LLKHF_INJECTED / LLMHF_INJECTED bayragini
+// tasiyor. Bunlari yoksaymamizin iki sebebi var:
+//
+// 1. Otomasyon uygulamayi surukleyemesin. Test betigi ya da baska bir arac
+//    Win/Ctrl/Alt basip birakirken process olur veya olay kaybolursa modifier
+//    MANTIKSAL OLARAK BASILI kalabiliyor. O andan sonra kullanicinin her
+//    "+"/"-" tusu veya tekerlek hareketi zoom komutu gibi yorumlaniyor ve
+//    uygulama kendi kendine zoom yapiyor gorunuyor. Tam olarak bu yasandi.
+//
+// 2. Bir magnifier'in gercek fiziksel girdiye tepki vermesi gerekiyor.
+//    Baska bir programin bizi uzaktan surmesi icin bir sebep yok.
+//
+// BM_ALLOW_INJECTED=1 ile kapatilabilir — sadece otomatik dogrulama icin.
+bool IgnoreInjectedInput()
+{
+    static const bool allow = []() {
+        wchar_t buf[8]{};
+        const DWORD n = GetEnvironmentVariableW(L"BM_ALLOW_INJECTED", buf, 8);
+        return (n > 0 && n < 8 && buf[0] == L'1');
+    }();
+    return !allow;
+}
+
+} // anonymous namespace
+
 InputThread* InputThread::s_instance = nullptr;
 
 InputThread::~InputThread()
@@ -236,6 +266,10 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
     {
         auto* data = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
 
+        // Sentetik fare olaylarini yoksay (bkz. IgnoreInjectedInput)
+        if (data && (data->flags & LLMHF_INJECTED) && IgnoreInjectedInput())
+            return CallNextHookEx(nullptr, nCode, wParam, lParam);
+
         // ── Ctrl+Alt+tekerlek = zoom adimi ──
         //
         // Windows Magnifier'in kendi kombinasyonu, ondan deviraliyoruz.
@@ -327,6 +361,10 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
         (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))
     {
         auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+
+        // Sentetik tus olaylarini yoksay (bkz. IgnoreInjectedInput)
+        if (kb && (kb->flags & LLKHF_INJECTED) && IgnoreInjectedInput())
+            return CallNextHookEx(nullptr, nCode, wParam, lParam);
 
         if (kb)
         {

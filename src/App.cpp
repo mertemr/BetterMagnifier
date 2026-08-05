@@ -128,6 +128,17 @@ bool App::InitializeComponents()
     // Dosya yoksa varsayilanlarla devam eder — ilk calistirma hata degil.
     m_settings.Load();
 
+    // MouseAndFocus'un anlami degisti: eskiden sadece zoom bolgesini
+    // kaydiriyordu, artik IMLECI tasiyor ("capa == imlec" degismez kurali,
+    // bkz. OnFocusChanged). Bu davranis masaustunu normal kullanirken
+    // rahatsiz edici. Ayar dosyasi bu degisiklikten once yazilmis olabilir,
+    // o yuzden sessizce degistirmek yerine uyariyoruz.
+    if (m_settings.General().followMode == FollowMode::MouseAndFocus)
+    {
+        LOG_WARN("FollowMode=MouseAndFocus — odak degisince FARE ISARETCISI de "
+                 "oraya tasinacak. Istemiyorsan settings.ini'de FollowMode=Mouse yap.");
+    }
+
     // ── 1. Monitorler ──
     if (!m_monitorManager.Initialize())
     {
