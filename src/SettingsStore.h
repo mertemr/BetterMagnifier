@@ -60,9 +60,12 @@ struct GeneralSettings
     // Kapatilirsa sadece RegisterHotKey tabanli Ctrl+Alt+Z / Ctrl+Alt+X kalir.
     bool       hijackMagnifierKeys = true;
 
-    // VARSAYILAN Mouse. MouseAndFocus, odak degisince fare isaretcisini de
-    // tasiyor (bkz. App::OnFocusChanged "capa == imlec" kurali) — bu davranis
-    // masaustunu normal kullanirken rahatsiz edici, o yuzden opt-in.
+    // VARSAYILAN Mouse.
+    //
+    // MouseAndFocus zoom bolgesini klavye odagina kaydiriyor, ama o anda capa
+    // imlecten kopuyor ve TIKLAMA GORDUGUN YERE GITMIYOR (bkz.
+    // App::OnFocusChanged). Ikisi ayni anda saglanamaz, o yuzden tiklamanin
+    // calismasi varsayilan, odak takibi opt-in.
     FollowMode followMode        = FollowMode::Mouse;
     bool       startWithWindows  = false;
     bool       rememberZoomLevel = true;

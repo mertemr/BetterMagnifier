@@ -128,15 +128,15 @@ bool App::InitializeComponents()
     // Dosya yoksa varsayilanlarla devam eder — ilk calistirma hata degil.
     m_settings.Load();
 
-    // MouseAndFocus'un anlami degisti: eskiden sadece zoom bolgesini
-    // kaydiriyordu, artik IMLECI tasiyor ("capa == imlec" degismez kurali,
-    // bkz. OnFocusChanged). Bu davranis masaustunu normal kullanirken
-    // rahatsiz edici. Ayar dosyasi bu degisiklikten once yazilmis olabilir,
-    // o yuzden sessizce degistirmek yerine uyariyoruz.
+    // MouseAndFocus acikken capa imlecten koparak odaklanan pencereye gidiyor,
+    // dolayisiyla TIKLAMA GORDUGUN YERE GITMIYOR (bkz. OnFocusChanged).
+    // Ikisi ayni anda mumkun degil. Ayar dosyasi eski varsayilanla yazilmis
+    // olabilir, o yuzden sessizce degistirmek yerine uyariyoruz.
     if (m_settings.General().followMode == FollowMode::MouseAndFocus)
     {
-        LOG_WARN("FollowMode=MouseAndFocus — odak degisince FARE ISARETCISI de "
-                 "oraya tasinacak. Istemiyorsan settings.ini'de FollowMode=Mouse yap.");
+        LOG_WARN("FollowMode=MouseAndFocus — zoom bolgesi klavye odagini takip "
+                 "edecek AMA tiklama hizalamasi bozulur. Tiklamanin dogru yere "
+                 "gitmesini istiyorsan settings.ini'de FollowMode=Mouse yap.");
     }
 
     // ── 1. Monitorler ──
@@ -879,41 +879,29 @@ void App::OnFocusChanged(HWND focused)
     if (!target->zoom.isActive || target->zoom.isFrozen)
         return;
 
-    // ── CAPA == IMLEC DEGISMEZ KURALI ──
+    // ── SetCursorPos DENENDI VE GERI ALINDI ──
     //
-    // Eskiden burada dogrudan focalPoint'e yaziliyordu. Bu, tiklama
-    // hizalamasini BOZUYORDU: tikladigin an odak degisir, EVENT_OBJECT_FOCUS
-    // tetiklenir, capa imlecten pencere merkezine atlar. Capa artik imlecte
-    // olmadigi icin bir sonraki tiklaman gordugun yere gitmez.
-    // Kullanicinin "tiklama calismiyor" dedigi sey tam olarak buydu.
+    // Fikir su idi: "capa == imlec" degismez kuralini korumak icin capa'yi
+    // degil IMLECI tasimak. Boylece odak takibi ile tiklama hizalamasi
+    // birbirini bozmayacakti.
     //
-    // Cozum: capa'yi DEGISTIRMIYORUZ, IMLECI tasiyoruz. Boylece
-    // "capa == imlec" degismez kurali her zaman geciyor ve odak takibi ile
-    // tiklama hizalamasi birbirini bozmuyor.
+    // Pratikte yikici cikti. Imleci tasimak, yeni konumdaki pencerede
+    // hover/odak tetikliyor -> yeni EVENT_OBJECT_FOCUS -> yeni tasima ->
+    // GERI BESLEME DONGUSU. Context menusunde asagi inerken imlec yukari
+    // firliyor, ekran disina cikiyor.
     //
-    // Bedeli: odak degisince fare isaretcisi de oraya gidiyor. Bu yuzden
-    // MouseAndFocus artik VARSAYILAN DEGIL — isteyerek acilan bir mod.
+    // "Imlec odaklanan pencerenin icindeyse dokunma" korumasi da yetmedi:
+    // menu acikken odak menuye degil SAHIBI pencereye gidebiliyor, o zaman
+    // imlec o pencerenin disinda kaliyor ve merkeze firlatiliyor.
     //
-    // ── AMA TIKLAMAYLA GELEN ODAK DEGISIMINDE TASIMA ──
-    // Tikladiginda da odak degisiyor. Orada imleci tasimak imleci ONUN
-    // istedigi yerden KOPARIYOR: 600,600'e tikliyorsun, odak degisiyor, imlec
-    // pencerenin merkezine (orn. 800,700) sicriyor. Gozlenen "fare baska yone
-    // zipliyor" bugu tam olarak buydu.
+    // Ders: imleci kullanicidan habersiz tasimak, konuma tepki veren her UI
+    // ile yaris haline giriyor. Bir magnifier bunu yapmamali.
     //
-    // Ayrimi zamanlama tahminiyle degil, durumsuz bir testle yapiyoruz:
-    // imlec ZATEN odaklanan pencerenin icindeyse odak degisimi tiklamadan
-    // gelmis demektir — imlec dogru yerde, dokunmuyoruz. Disindaysa klavyeyle
-    // (Tab) gelmis demektir, orada tasimak istedigimiz sey.
-    POINT cursor{};
-    GetCursorPos(&cursor);
-
-    if (PtInRect(&rc, cursor))
-    {
-        // Tiklama kaynakli: capa zaten imlecte, hicbir sey yapma.
-        return;
-    }
-
-    SetCursorPos(center.x, center.y);
+    // Simdi sadece capa'yi tasiyoruz — eski, ongorulebilir davranis.
+    //
+    // KABUL EDILEN BEDEL: bu mod acikken capa imlecten kopuyor, dolayisiyla
+    // tiklama gordugun yere gitmiyor. Ikisi ayni anda mumkun degil. Bu yuzden
+    // varsayilan FollowMode::Mouse ve acilista uyari basiyoruz.
     target->zoom.focalPoint = center;
 }
 
