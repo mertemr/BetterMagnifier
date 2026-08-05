@@ -1,72 +1,152 @@
-# Spike Sonucu: WinUI 3 XAML Islands — BAŞARISIZ
+# Spike Sonucu: WinUI 3 XAML Islands — BAŞARILI
 
-**Tarih:** 2026-08-04
+**Tarih:** 2026-08-05 (ilk deneme 2026-08-04 başarısızdı, aşağıda)
 **Soru:** Ana thread MTA kalırken, ayrı bir STA thread'de `DesktopWindowXamlSource` ayağa kalkar mı?
-**Cevap:** Soru cevaplanamadı — daha temel bir şey bozuk. `Application::Start` bu ortamda hiçbir konfigürasyonda çalışmıyor.
+**Cevap:** **EVET.** Island ikincil STA thread'de çalışıyor, ana thread MTA kalıyor, tema stilleri uygulanıyor, kontroller girdi alıyor.
 
-## Ne denendi
+Kontrol paneli tasarımının açık riski kapandı. Spec bölüm 9'daki geri dönüş yollarına (ayrı process + IPC, Dear ImGui) gerek yok.
 
-| Varyant | Konfigürasyon | Sonuç |
-|---|---|---|
-| `mta` | Ana thread MTA + ayrı STA thread | `0xC0000005` |
-| `none` | Ana thread apartment init yok + ayrı STA thread | `0xC0000005` |
-| `mainsta` | `Application::Start` **ana thread'de**, ikincil thread yok | `0xC0000005` |
+## Doğrulanan konfigürasyon
 
-Üçüncüsü kontrol deneyi: threading tamamen devre dışı, en basit WinUI 3 kullanımı. O da çöküyor.
+| Ne | Değer |
+|---|---|
+| Windows App SDK | `1.8.250916003` (foundation `1.8.250906002`, WinUI `1.8.250906003`) |
+| Makinedeki runtime | `Microsoft.WindowsAppRuntime.1.8` `8000.921.1539.0` |
+| Bootstrapper | `WindowsPackageType=None` auto-initializer (elle `MddBootstrapInitialize` YOK) |
+| Ana thread | MTA — `CoInitializeEx(nullptr, COINIT_MULTITHREADED)` |
+| GUI thread | STA — `winrt::init_apartment(apartment_type::single_threaded)` |
+| Toolset | `$(DefaultPlatformToolset)` (VS 18.8'de v145 ile derlendi) |
 
-**Sonuç: çökme threading kaynaklı değil.** Tasarımın MTA/STA varsayımı test edilemedi.
-
-## Denenen iki başlatma yolu
-
-1. **Elle bootstrapper** — `MddBootstrapInitialize(0x00020003, ...)` → `S_OK`, ardından `DispatcherQueueController::CreateOnCurrentThread()` → OK, ardından `Application app{}` → `0x8001010E` (`RPC_E_WRONG_THREAD`).
-
-   WinUI 3'te `Application` doğrudan aktive edilemiyor; `Application::Start()` üzerinden kurulmalı.
-
-2. **`Application::Start(callback)`** — hem elle bootstrapper ile hem `<WindowsPackageType>None</WindowsPackageType>` auto-initializer ile denendi. İkisinde de callback'e **hiç girmeden** `0xC0000005`.
-
-## Ortam durumu — runtime eksik değil
+Çıktı:
 
 ```
-Microsoft.WindowsAppRuntime.2   2.3.1.0   (kurulu)
-Microsoft.WindowsAppRuntime.2   2.3.0.0
-Microsoft.WindowsAppRuntime.2   2.2.0.0
-+ 1.4 / 1.5 / 1.6 / 1.7 / 1.8 hatları
+=== Varyant: mta ===
+Ana thread: MTA (COINIT_MULTITHREADED)
+GUI thread baslatiliyor (STA)...
+  [1/5] Bootstrapper auto-init (WindowsPackageType=None)
+  [2/5] Application::Start cagriliyor...
+  [2.5/5] Start callback'ine GIRILDI
+  [2.6/5] Application ornegi olusturuldu
+  [3/5] XAML runtime OK (tema sozlugu varsayilan)
+  [4/5] Host HWND OK
+  [5/5] DesktopWindowXamlSource OK
+
+SPIKE BASARILI: island ikincil STA thread'de ayakta, ana thread MTA
 ```
 
-Windows App SDK 2.3.1 runtime kurulu. Bootstrapper framework paketini çözüyor (`S_OK`). Yani "redist yükle" çözümü geçerli değil.
+Pencerede yuvarlak köşeli, düzgün stillenmiş bir WinUI butonu ve doğru renkte metin
+görünüyor — hiçbir renk elle verilmedi, hepsi tema sözlüğünden geldi.
 
-## Build tarafında çözülen üç ayrı sorun
+## İlk denemeyi batıran iki hata
 
-Bunlar spike'a özgü değil, ana projeye de gerekecek:
+Önceki tur `0xC0000005` (access violation) alıyordu ve bu, sorunun MTA/STA
+olmadığı sonucuna götürmüştü. İki ayrı hata vardı, ikisi de bizim kodumuzdaydı:
 
-1. **`ResolveNuGetPackageAssets` patlaması** — C++ vcxproj'da `PackageReference` kullanınca `Microsoft.NuGet.targets` içindeki eski task "Sıra hiçbir öğe içermiyor" ile düşüyor (native projede managed `TargetFramework` arıyor). Çözüm: `<ResolveNuGetPackages>false</ResolveNuGetPackages>`.
+### 1. `Application::Start` callback'i bir `Application` örneği OLUŞTURMALI
 
-2. **`Microsoft.WindowsAppRuntime.Bootstrap.lib` bulunamıyor** — Windows App SDK 2.x alt paketlere bölünmüş. Lib `microsoft.windowsappsdk.foundation/<sürüm>/lib/native/x64/` altında ve paketin `.props`'u include yolunu ekliyor ama **lib yolunu eklemiyor**. Elle `AdditionalLibraryDirectories` gerekiyor. `windowsappsdk 2.3.1` → `foundation 2.3.5` (transitive).
+`Application::Start(cb)` kendisi bir `Application` yaratmaz — bunu callback'ten
+bekler. Önceki kod callback içinde doğrudan `Application::Current()` çağırıyordu;
+örnek olmadığı için `null` dönüyordu ve `null` üzerinden `.DispatcherShutdownMode()`
+çağırmak = access violation.
 
-3. **`C3779` `IVector<UIElement>::Append`** — `winrt/Windows.Foundation.Collections.h` include etmek şart, `Windows.Foundation.h` yetmiyor.
+C++/WinRT'de null bir projeksiyon nesnesinde metot çağırmak sessizce patlar,
+istisna fırlatmaz. Hata mesajı olmadığı için "callback'e hiç girilmiyor" sanılmıştı;
+oysa giriliyordu, ilk üç satırda düşüyordu.
 
-4. **`C4002` `GetCurrentTime`** — `windows.h` bunu makro yapıyor, `Microsoft.UI.Xaml.Media.Animation`'da aynı isimde metot var. Üretilmiş header'da uyarı çıkıyor. Ana projede `TreatWarningAsError` açık olduğu için **hata** olur. Çözüm: XAML header'larından önce `#undef GetCurrentTime`.
+Çözüm — projeksiyonda hazır olan `ApplicationT<D>` şablonuyla markup'sız bir App:
 
-## Sıradaki adım — karar kullanıcıya ait
+```cpp
+struct SpikeApp : winrt::Microsoft::UI::Xaml::ApplicationT<SpikeApp> {};
 
-Spec bölüm 9'daki geri dönüş yolları artık gündemde:
+Application::Start([](auto&&) {
+    auto app = winrt::make<SpikeApp>();   // BU SATIR ŞART
+    auto current = Application::Current(); // artık dolu
+    ...
+});
+```
 
-**A. Access violation'ı debugger ile kovala.** WinDbg/VS ile crash stack'ine bak. Muhtemel sebepler: 2.x'te değişmiş bir init sırası, eksik bir `.winmd` kaydı, ya da bu makinedeki runtime kurulumunun bozuk olması. Belirsiz süre.
+### 2. `XamlControlsResources` elle ATANMAMALI
 
-**B. Windows App SDK 1.8 hattına düş.** 1.8 (`8000.921.1539.0`) kurulu ve Islands o hatta uzun süre olgunlaştı. 2.x'in yeni `XamlIsland`/`DesktopAttachedSiteBridge` API'lerinden vazgeçilir. En düşük riskli WinUI 3 yolu.
+Access violation düzeldikten sonra temiz bir `E_FAIL` çıktı:
+`Cannot find a resource with the given key: AcrylicBackgroundFillColorDefaultBrush`.
 
-**C. Paneli ayrı process'e taşı.** Kontrol paneli kendi exe'si olur, ana uygulama ile `WM_COPYDATA` veya named pipe üzerinden konuşur. WinUI 3 kendi process'inde kendi ana thread'inde yaşar — MTA/STA sorunu tamamen ortadan kalkar. Bedeli: IPC katmanı + iki binary.
+Bu bir eksik dosya sorunu **değil**. WinUI 2 / UWP'de tema sözlüğünü elle merge
+etmek gerekiyordu; WinUI 3'te gerekmiyor, varsayılan sözlük zaten yüklü.
+`current.Resources(XamlControlsResources{})` mevcut sözlüğü komple değiştiriyor ve
+`XamlControlsResources`'ın kendi iç referansları (tam da o Acrylic fırçası) o anda
+ortadan kalkmış oluyor. Yani o satır çözüm değil, sorunun kaynağıydı.
 
-**D. GUI teknolojisini yeniden değerlendir.** Brainstorming'de reddedilen Dear ImGui seçeneği bu bulgu ışığında yeniden bakılabilir: mevcut D3D11 device'a oturuyor, çalışma zamanı bağımlılığı sıfır, bu sınıf hatalara açık değil. Bedeli: yerel Windows görünümü değil.
+**Eleme kaydı** — PRI dosyası şüphesi tek tek test edildi ve elendi:
 
-Öneri: **B önce denenmeli** (tek satırlık sürüm değişikliği, spike'ı tekrar çalıştır). Başarısızsa **C**, çünkü tasarımın geri kalanı (SettingsStore, StatusSnapshot, InputThread) IPC ile aynen çalışır.
+| Deneme | Sonuç |
+|---|---|
+| Sadece `spike.pri` | E_FAIL |
+| `resources.pri` eklendi (uygulamanın kendi PRI'si) | E_FAIL |
+| Framework'ün `Microsoft.UI.Xaml.Controls.pri`'si exe yanına | E_FAIL |
+| `resources.pri` = framework Controls.pri | E_FAIL |
+| **`XamlControlsResources` satırı kaldırıldı** | **ÇALIŞTI** |
 
-## Etkilenmeyen işler
+`makepri merge` da denendi — Windows SDK 10.0.26100'de `merge` komutu yok, zaten
+gereksizdi.
 
-Planın Task 2, 3, 4'ü GUI teknolojisinden bağımsız ve bu bulgudan etkilenmiyor:
+## Teşhis aracı: vectored exception handler
 
-- **Task 2** `AppMessages.h` + `StatusSnapshot` — thread'ler arası kontrat
-- **Task 3** `SettingsStore` — INI kalıcılık + hotkey ayrıştırma
-- **Task 4** `InputThread` — hook'ları render thread'den çıkarır (mevcut latent bug)
+`0xC0000005` tek başına hiçbir şey anlatmıyor. `spike.cpp`'deki `CrashProbe`,
+SEH'ten önce çalışıp hata adresini, modülü ve erişilmeye çalışılan adresi yazdırıyor.
+Erişilen adres `0x0` ise suçlu bellidir: null pointer üzerinden sanal metot çağrısı.
 
-Bunlar hangi GUI seçilirse seçilsin gerekli.
+Bu fonksiyon spike'a özgü değil — ana projede de benzer bir çökme olursa aynı desen
+işe yarar.
+
+## Build tarafında çözülen sorunlar
+
+Bunlar ana projeye WinUI eklenirken de gerekecek:
+
+1. **`ResolveNuGetPackageAssets` patlaması** — C++ vcxproj'da `PackageReference`
+   kullanınca `Microsoft.NuGet.targets` içindeki eski task "Sıra hiçbir öğe
+   içermiyor" ile düşüyor. Çözüm: `<ResolveNuGetPackages>false</ResolveNuGetPackages>`.
+
+2. **`Microsoft.WindowsAppRuntime.Bootstrap.lib` bulunamıyor** — SDK alt paketlere
+   bölünmüş. Lib `microsoft.windowsappsdk.foundation/<sürüm>/lib/native/x64/` altında;
+   paketin `.props`'u include yolunu ekliyor ama **lib yolunu eklemiyor**. Elle
+   `AdditionalLibraryDirectories` gerekiyor.
+
+   Dikkat: foundation'ın sürümü ana paketten **farklı** ve transitive seçiliyor
+   (`1.8.250916003` → `1.8.250906002`). `spike.vcxproj`'da `WasdkFoundationVersion`
+   property'si olarak duruyor; ana paket sürümü değişirse bu da güncellenmeli.
+   (Glob ile otomatikleştirmek denendi: `ItemDefinitionGroup` içinde item listesi
+   kullanmak yasak — MSB4164.)
+
+3. **`UseWinUI=true`** gerekiyor; WinUI hedeflerini ve `.pri` üretimini devreye sokuyor.
+
+4. **C3779 — eksik include'lar.** C++/WinRT'de "auto döndüren işlev tanımlanmadan
+   kullanılamaz" hatası her zaman eksik bir header demek:
+   - `IVector<T>::Append` → `winrt/Windows.Foundation.Collections.h`
+   - `Button::Click` → `winrt/Microsoft.UI.Xaml.Controls.Primitives.h`
+
+5. **`C4002` `GetCurrentTime`** — `windows.h` bunu makro yapıyor,
+   `Microsoft.UI.Xaml.Media.Animation`'da aynı isimde metot var. Ana projede
+   `TreatWarningAsError` açık olduğu için **hata** olur. XAML header'larından önce
+   `#undef GetCurrentTime`.
+
+6. **`MSB8027` / `LNK4042`** — `WindowsAppRuntimeAutoInitializer.cpp` iki ayrı
+   paketten geldiği için iki kez derleniyor. Sadece uyarı, çıktı doğru. Ana projeye
+   taşınırken `TreatWarningAsError` yüzünden bastırılması gerekebilir.
+
+## Tasarıma etkisi
+
+Spec'teki üç thread'li mimari **aynen geçerli**:
+
+- Render thread (main, MTA) — D3D11/DXGI/overlay
+- Input thread — low-level hook'lar
+- GUI thread (STA) — `DesktopWindowXamlSource` ile XAML island
+
+Bir kısıt netleşti: `Application::Start` mesaj loop'unu kendisi işletiyor ve
+uygulama kapanana kadar dönmüyor. Yani GUI thread'e iş geçirmek için
+`PostThreadMessage` yerine `DispatcherQueue.TryEnqueue` kullanmak gerekiyor.
+GUI→motor yönü etkilenmiyor (mesaj penceresine `PostMessage`, spec'te olduğu gibi).
+
+## Sonraki adım
+
+Plan Task 5'ten devam edilebilir. Task 2/3/4 zaten tamamdı ve bu bulgudan
+etkilenmiyor.

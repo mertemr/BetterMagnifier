@@ -39,7 +39,12 @@
 #include <winrt/Microsoft.UI.Dispatching.h>
 #include <winrt/Microsoft.UI.Xaml.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
+// Button::Click olayinin TAM tanimi ButtonBase'de, o da Primitives'te.
+// Sadece Controls.h ile C3779 ("auto donduren islev tanimlanmadan
+// kullanilamaz") aliyorsun — Collections.h ile ayni tuzak.
+#include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Microsoft.UI.Xaml.Hosting.h>
+#include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <MddBootstrap.h>
 
 using namespace winrt;
@@ -51,6 +56,75 @@ using namespace winrt::Microsoft::UI::Dispatching;
 // -1 = henuz sonuc yok, 0 = basarili, digerleri = HRESULT
 static std::atomic<int> g_result{ -1 };
 static std::atomic<bool> g_windowUp{ false };
+
+// =============================================================================
+// Crash probe — access violation'in NEREDE oldugunu soyler
+// =============================================================================
+// 0xC0000005 tek basina hicbir sey anlatmiyor. Vectored exception handler
+// SEH'ten ONCE calisir; hata adresini, o adresin hangi DLL'e dustugunu ve
+// hangi adrese erisilmeye calisildigini yazdirip sonra cokmeye devam eder.
+//
+// Erisilen adres 0x0 ise sucu bellidir: null pointer uzerinden sanal metot
+// cagrisi. C++/WinRT'de null bir projeksiyon nesnesinde metot cagirmak tam
+// olarak boyle patlar.
+//
+// Python analojisi: sys.excepthook — istisnayi yakalamaz, sadece son sozunu
+// soyler ve programin dusmesine izin verir.
+// =============================================================================
+static LONG CALLBACK CrashProbe(EXCEPTION_POINTERS* ep)
+{
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+
+    void* addr = ep->ExceptionRecord->ExceptionAddress;
+
+    HMODULE mod = nullptr;
+    wchar_t modName[MAX_PATH] = L"<bilinmeyen modul>";
+    if (GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(addr), &mod))
+    {
+        GetModuleFileNameW(mod, modName, MAX_PATH);
+    }
+
+    const ULONG_PTR kind = ep->ExceptionRecord->ExceptionInformation[0];
+    const ULONG_PTR target = ep->ExceptionRecord->ExceptionInformation[1];
+
+    std::printf("\n  !! ACCESS VIOLATION\n");
+    std::printf("  !! Hata adresi : %p\n", addr);
+    std::printf("  !! Modul       : %ls\n", modName);
+    if (mod)
+    {
+        std::printf("  !! Offset      : +0x%llX (base %p)\n",
+            static_cast<unsigned long long>(
+                reinterpret_cast<uintptr_t>(addr) - reinterpret_cast<uintptr_t>(mod)),
+            static_cast<void*>(mod));
+    }
+    std::printf("  !! Islem       : %s -> 0x%llX%s\n",
+        kind == 0 ? "okuma" : (kind == 1 ? "yazma" : "calistirma"),
+        static_cast<unsigned long long>(target),
+        target < 0x10000 ? "  (NULL POINTER)" : "");
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// =============================================================================
+// SpikeApp — Application::Start'in callback'inde OLUSTURULMASI gereken nesne
+// =============================================================================
+// ONCEKI SPIKE'IN HATASI BURADAYDI. Callback icinde dogrudan
+// Application::Current() cagrilmisti; ama Start() bir Application ornegi
+// OLUSTURMAZ — bunu callback'ten bekler. Ornek yoksa Current() null doner,
+// null uzerinden .DispatcherShutdownMode() cagirmak = 0xC0000005.
+//
+// WinUI 3 proje sablonlarindaki "App" sinifi tam olarak budur; XAML derleyicisi
+// olmadigi icin markup'siz, cizgi roman kadar sade bir surumunu yaziyoruz.
+//
+// Python analojisi: QApplication(sys.argv) satirini unutup QApplication.instance()
+// cagirmak — None doner, uzerinde metot cagirinca patlarsin.
+// =============================================================================
+struct SpikeApp : winrt::Microsoft::UI::Xaml::ApplicationT<SpikeApp>
+{
+};
 
 static LRESULT CALLBACK HostWndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
@@ -103,10 +177,34 @@ static void GuiThreadMain()
             {
                 // Bu lambda XAML runtime hazir olduktan SONRA, dogru thread'de
                 // cagriliyor. Butun XAML kurulumu buraya ait.
-                auto app = Application::Current();
-                app.DispatcherShutdownMode(DispatcherShutdownMode::OnExplicitShutdown);
-                app.Resources(XamlControlsResources{});
-                std::printf("  [3/5] XAML runtime OK\n");
+                std::printf("  [2.5/5] Start callback'ine GIRILDI\n");
+
+                // Application ornegini burada olusturuyoruz. make<> composable
+                // WinRT tipini insa eder ve XAML runtime bunu "current app"
+                // olarak kaydeder. Bu satir olmadan Application::Current() null.
+                auto app = winrt::make<SpikeApp>();
+                std::printf("  [2.6/5] Application ornegi olusturuldu\n");
+
+                auto current = Application::Current();
+                if (!current)
+                {
+                    std::printf("  Application::Current() HALA NULL — teshis yanlis\n");
+                    g_result = static_cast<int>(E_POINTER);
+                    return;
+                }
+
+                current.DispatcherShutdownMode(DispatcherShutdownMode::OnExplicitShutdown);
+
+                // XamlControlsResources ATANMIYOR — bilerek.
+                //
+                // WinUI 2 / UWP'de tema sozlugunu elle merge etmek gerekiyordu.
+                // WinUI 3'te GEREKMIYOR: varsayilan sozluk zaten yuklu.
+                // Elle "current.Resources(XamlControlsResources{})" yazmak
+                // mevcut sozlugu KOMPLE degistiriyor, XamlControlsResources'in
+                // kendi ic referanslari (AcrylicBackgroundFillColorDefaultBrush
+                // gibi) o an ortadan kalkmis oluyor ve E_FAIL geliyor.
+                // Yani o satir sorunun kaynagiydi, cozumu degil.
+                std::printf("  [3/5] XAML runtime OK (tema sozlugu varsayilan)\n");
 
                 // ── Host Win32 penceresi ──
                 WNDCLASSEXW wc{};
@@ -138,9 +236,21 @@ static void GuiThreadMain()
                 source.SiteBridge().ResizePolicy(
                     winrt::Microsoft::UI::Content::ContentSizePolicy::ResizeContentToParentWindow);
 
+                // Metin ve kontrol renkleri ELLE VERILMIYOR — hepsi tema
+                // sozlugunden gelmeli. Buton duzgun stillenmis cikiyorsa tema
+                // kaynaklari calisiyor demektir; testin asil olctugu sey bu.
+                //
+                // RequestedTheme'i Light'a sabitliyoruz: host Win32 penceresinin
+                // zemini beyaz, varsayilan koyu temada beyaz metin beyaz uzerine
+                // dusup "bos pencere" yanilgisi yaratiyordu.
+                using winrt::Microsoft::UI::Xaml::Media::SolidColorBrush;
+                namespace MUC = winrt::Microsoft::UI;
+
                 StackPanel panel{};
                 panel.Padding(ThicknessHelper::FromUniformLength(24));
                 panel.Spacing(8);
+                panel.RequestedTheme(ElementTheme::Light);
+                panel.Background(SolidColorBrush{ MUC::Colors::White() });
 
                 TextBlock title{};
                 title.Text(L"Island ikincil STA thread'de ayakta");
@@ -149,8 +259,15 @@ static void GuiThreadMain()
 
                 TextBlock detail{};
                 detail.Text(L"Ana thread MTA, bu thread STA. Tasarim gecerli.");
-                detail.Opacity(0.7);
                 panel.Children().Append(detail);
+
+                // Buton iki seyi birden olcuyor: island girdi aliyor mu, ve
+                // tema stilleri uygulaniyor mu (duz dikdortgen degil, yuvarlak
+                // kosemli WinUI butonu gorunuyorsa sozluk yerinde demektir).
+                Button probe{};
+                probe.Content(winrt::box_value(L"Tikla"));
+                probe.Click([](auto&&, auto&&) { std::printf("  >> Buton tiklandi (island girdi aliyor)\n"); });
+                panel.Children().Append(probe);
 
                 source.Content(panel);
                 source.SiteBridge().Show();
@@ -201,6 +318,9 @@ int main(int argc, char** argv)
     // Buffer'siz stdout — cokme durumunda son satiri kaybetmemek icin.
     // Access violation'da buffer flush edilmiyor, ilerleme izini yitiriyoruz.
     setvbuf(stdout, nullptr, _IONBF, 0);
+
+    // Cokme olursa son sozunu soylesin — hangi modul, hangi adres.
+    AddVectoredExceptionHandler(1, CrashProbe);
 
     const char* variant = (argc > 1) ? argv[1] : "mta";
     std::printf("=== Varyant: %s ===\n", variant);

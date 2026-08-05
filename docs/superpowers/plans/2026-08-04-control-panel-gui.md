@@ -1,24 +1,37 @@
 # BetterMagnifier Kontrol Paneli Implementation Plan
 
-> ## ⚠ DURUM — 2026-08-04
+> ## DURUM — 2026-08-05
 >
 > | Task | Durum |
 > |---|---|
-> | 1 — XAML island spike | **BAŞARISIZ** → [`spike/xaml-island-thread/FINDINGS.md`](../../../spike/xaml-island-thread/FINDINGS.md) |
+> | 1 — XAML island spike | **BAŞARILI** → [`spike/xaml-island-thread/FINDINGS.md`](../../../spike/xaml-island-thread/FINDINGS.md) |
 > | 2 — AppMessages + StatusSnapshot | Tamam, doğrulandı |
 > | 3 — SettingsStore | Tamam, 11 assert geçti |
 > | 4 — InputThread | Tamam, thread ayrımı log'dan doğrulandı |
-> | 5-9 — GUI | **BAŞLANMADI** — spike'a bağlı |
+> | 5-9 — GUI | **SIRADA** — engel kalmadı |
 >
-> `Application::Start` bu ortamda her apartment konfigürasyonunda access
-> violation veriyor; ana thread'de, ikincil thread olmadan yapılan kontrol
-> deneyi de çöküyor. Yani sorun MTA/STA değil. Windows App Runtime 2.3.1
-> kurulu, eksik redist değil.
+> Island ikincil STA thread'de çalışıyor, ana thread MTA kalıyor, tema stilleri
+> uygulanıyor. Spec bölüm 9'daki geri dönüş yollarına (ayrı process + IPC,
+> Dear ImGui) gerek yok.
 >
-> **Task 5'e geçmeden önce FINDINGS.md'deki A/B/C/D seçeneklerinden biri
-> seçilmeli.** Öneri: B (Windows App SDK 1.8 hattına düş, spike'ı tekrar koş).
+> **Pinlenen sürüm: Windows App SDK `1.8.250916003`** (2.3.1 değil).
 >
-> Task 2/3/4 GUI teknolojisinden bağımsızdı, hangi yol seçilirse geçerli kalır.
+> 2026-08-04'teki `0xC0000005`'in sebebi MTA/STA değilmiş; iki kod hatasıymış:
+> `Application::Start` callback'i bir `Application` örneği oluşturmuyordu, ve
+> `XamlControlsResources` WinUI 3'te elle atanmamalıymış. Ayrıntı FINDINGS.md'de.
+>
+> **Task 5'e geçilebilir.**
+>
+> ### Ortam notu — toolset
+>
+> Bu makinede VS2022 yok, **VS 18.8 Community** var ve kurulu tek toolset `v145`.
+> Projeler artık `v143` pinlemiyor, `$(DefaultPlatformToolset)` kullanıyor —
+> her iki VS'te de derleniyor. Plandaki MSBuild yolları VS2022'yi gösteriyor;
+> bu makinede karşılığı:
+>
+> ```bash
+> "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" BetterMagnifier.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal /nologo
+> ```
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
