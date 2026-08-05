@@ -67,6 +67,12 @@ private:
     void OnFocusChanged(HWND focused);
     void ApplySettings();
 
+    // Locking the workstation switches to the secure desktop, which tears down
+    // our low-level hooks; Windows does not put them back. RegisterHotKey
+    // bindings survive, the hooks do not, so Win+Plus and Ctrl+Alt+wheel go
+    // dead until they are reinstalled.
+    void OnSessionUnlock();
+
     // kFocusedMonitor resolves to whichever monitor holds the cursor.
     bool ResolveMonitorIndex(WPARAM wparam, size_t& outIndex) const;
 

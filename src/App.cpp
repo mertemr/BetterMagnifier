@@ -32,6 +32,8 @@
 #include "App.h"
 #include "Logger.h"
 
+#include <wtsapi32.h>   // WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK
+
 namespace BetterMagnifier {
 
 App* App::s_instance = nullptr;
@@ -113,9 +115,41 @@ bool App::CreateMessageWindow()
         return false;
     }
 
-    LOG_DEBUG("Mesaj penceresi olusturuldu: HWND=0x{:X}",
+    // Ask for lock/unlock notifications. Locking switches to the secure
+    // desktop, which detaches our low-level hooks for good; we reinstall them
+    // on unlock.
+    if (!WTSRegisterSessionNotification(m_messageHwnd, NOTIFY_FOR_THIS_SESSION))
+    {
+        LOG_WARN("WTSRegisterSessionNotification failed ({}), hooks will not "
+                 "recover automatically after unlock", GetLastError());
+    }
+
+    LOG_DEBUG("Message window created: HWND=0x{:X}",
         reinterpret_cast<uintptr_t>(m_messageHwnd));
     return true;
+}
+
+// Reinstall everything the secure desktop tore down.
+//
+// Capture recovers on its own (DXGICapture::Reinitialize retries twice a
+// second), but the low-level hooks do not: Windows detaches them and never
+// puts them back, so Win+Plus and Ctrl+Alt+wheel stay dead. RegisterHotKey
+// bindings usually survive, and re-registering them is cheap insurance.
+void App::OnSessionUnlock()
+{
+    LOG_INFO("Session unlocked, reinstalling input hooks");
+
+    m_inputThread.Stop();
+
+    if (!m_inputThread.Start(m_messageHwnd,
+                             m_settings.General().followMode,
+                             m_settings.General().hijackMagnifierKeys))
+    {
+        LOG_ERROR("Could not reinstall input hooks after unlock");
+    }
+
+    const UINT failedMask = m_hotkeyManager.Reregister(m_settings.General());
+    m_status.hotkeyFailedMask.store(failedMask, std::memory_order_release);
 }
 
 // =============================================================================
@@ -1115,6 +1149,11 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             s_instance->AssertOverlaysTopmost();
         return 0;
 
+    case WM_WTSSESSION_CHANGE:
+        if (s_instance && wParam == WTS_SESSION_UNLOCK)
+            s_instance->OnSessionUnlock();
+        return 0;
+
     case WM_CLOSE:
     case WM_DESTROY:
         PostQuitMessage(0);
@@ -1163,9 +1202,10 @@ void App::Shutdown()
     // 5. Overlay pencereleri yik
     m_overlays.clear();
 
-    // 6. Mesaj penceresi
+    // 6. Message window
     if (m_messageHwnd)
     {
+        WTSUnRegisterSessionNotification(m_messageHwnd);
         DestroyWindow(m_messageHwnd);
         m_messageHwnd = nullptr;
     }

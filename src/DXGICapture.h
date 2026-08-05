@@ -17,6 +17,7 @@
 #include <d3d11.h>
 #include <dxgi1_5.h>
 #include <wrl/client.h>
+#include <chrono>
 
 namespace BetterMagnifier {
 
@@ -61,7 +62,14 @@ public:
     UINT GetHeight()     const { return m_height; }
 
 private:
+    // Full teardown, including the borrowed device/output pointers. Only for
+    // the destructor and move assignment.
     void Cleanup();
+
+    // Drops just the duplication session and keeps device and output, so
+    // Reinitialize still has what it needs. Using Cleanup here is what made
+    // locking the workstation permanently kill capture.
+    void ReleaseDuplication();
 
     Microsoft::WRL::ComPtr<IDXGIOutputDuplication> m_duplication;
     Microsoft::WRL::ComPtr<IDXGIOutput1>           m_output1;
@@ -78,6 +86,10 @@ private:
 
     uint64_t m_frameCount = 0;
     uint64_t m_errorCount = 0;
+
+    // Throttles recovery attempts. While the workstation is locked every
+    // attempt fails, and retrying per frame is pure log spam.
+    std::chrono::steady_clock::time_point m_lastReinitAttempt{};
 };
 
 } // namespace BetterMagnifier

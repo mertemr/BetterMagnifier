@@ -83,6 +83,7 @@ also stays in bounds for every anchor position by construction.
 - Single-instance guard (named mutex)
 - `Ctrl+Alt+Shift+Q` panic exit
 - Elevation manifest (verified with `mt.exe` against the built exe)
+- Recovery after locking the workstation (see below)
 
 ### Works, not verified by me
 
@@ -113,6 +114,45 @@ the user's call, not something this project changes.
 vSync in layered mode. The panic exit exists because of it. If it recurs, the
 next step is instrumentation, not guessing: time `Present` and log the
 durations.
+
+## Requested: edge-push panning
+
+The view should stay put while the cursor moves inside it and only scroll once
+the cursor reaches an edge, the way Windows Magnifier's fullscreen mode
+behaves. That makes corners and edges reachable without the pointer sliding
+onto the next monitor.
+
+**This conflicts with click alignment, for a concrete reason.**
+
+The current transform is anchored: `srcOrigin = cursor * (1 - 1/zoom)`, which
+makes screen position `C` show source pixel `C`. That identity is exactly what
+makes clicks land where they appear — and it also forces the view to track the
+cursor on every move, so there is no edge behaviour to speak of.
+
+Under edge-push, `srcOrigin` moves independently. Source pixel `C` then appears
+at `(C - srcOrigin) * zoom`, which is not `C`. The OS still draws the cursor at
+`C`, so the drawn cursor sits over source pixel `srcOrigin + C/zoom` instead of
+the thing it points at. Clicks go to `C`. Misaligned again.
+
+Windows Magnifier escapes this because it magnifies the whole composed desktop
+**including the cursor**, so the pointer is scaled and placed along with
+everything else.
+
+To have both, we would have to do the same thing ourselves:
+
+1. Composite our own cursor into the overlay at `(C - srcOrigin) * zoom`.
+   Desktop Duplication already hands the cursor over separately, via
+   `frameInfo.PointerPosition` and `GetFramePointerShape`, and the three
+   pointer shape types (monochrome, colour, masked colour) each need handling
+   plus shape caching.
+2. Hide the real cursor. This is the ugly part: there is no per-application way
+   to hide a system-wide cursor. `SetSystemCursor` with a blank cursor is
+   global and has to be restored, which makes it a system setting change and a
+   liability if the process dies.
+
+So it is a real feature, not a tweak, and step 2 is genuinely invasive.
+Worth deciding alongside the `WC_MAGNIFIER` question, since that path would get
+correct cursor handling from the OS for free.
 
 ## The central tension
 
@@ -219,5 +259,27 @@ groundwork for that control panel. Delete it if the plan is dropped.
 2. Whether `Win+Plus` still double-triggers under elevation, which decides
    whether the OS Magnifier shortcut has to be turned off
 3. Translate or delete the `.cpp` comments
-4. Whether to spike the `WC_MAGNIFIER` path, given how much the current
-   architecture is fighting the OS
+4. Edge-push panning: accept losing click alignment, or build cursor
+   compositing plus cursor hiding
+5. Whether to spike the `WC_MAGNIFIER` path, given how much the current
+   architecture is fighting the OS, and that it would settle both 4 and the
+   popup problem at once
+
+## Lock and unlock recovery
+
+Locking the workstation switches to the secure desktop, where Desktop
+Duplication is unavailable and low-level hooks are detached. Two separate bugs
+came out of that:
+
+**Capture could never recover.** On `DXGI_ERROR_ACCESS_LOST` the code called
+`Cleanup()`, which nulls `m_device` and resets `m_output1` — precisely what
+`Reinitialize()` needs. It then failed with "device or output is gone" forever.
+`Initialize()` did the same on failure, so starting up while locked was equally
+fatal. Recoverable failures now drop only the duplication session, and retries
+are throttled to twice a second so a locked machine does not spam the log.
+
+**Hooks stayed dead after unlock.** Windows detaches low-level hooks on the
+secure desktop and does not restore them, so `Win+Plus` and `Ctrl+Alt+wheel`
+went quiet while `Ctrl+Alt+Z` (a `RegisterHotKey` binding) kept working. The
+app now takes `WTSRegisterSessionNotification` and reinstalls the input thread
+and the hotkeys on `WTS_SESSION_UNLOCK`.
