@@ -45,11 +45,11 @@ public:
     //
     // targetHwnd  : olaylarin PostMessage ile gonderilecegi pencere (mesaj penceresi)
     // initialMode : klavye odagi takibi aktif mi
-    // hijackWinZ  : Win+Z'yi yut ve kendi toggle'imiza cevir
+    // hijackMagnifierKeys : Windows Magnifier kisayollarini devral
     //
     // Hook'lar thread ICINDE kurulur; Start() donmeden once kurulum
     // tamamlanmis olur (promise/future ile senkron bekleme).
-    bool Start(HWND targetHwnd, FollowMode initialMode, bool hijackWinZ);
+    bool Start(HWND targetHwnd, FollowMode initialMode, bool hijackMagnifierKeys);
 
     // Thread'e WM_QUIT postala, hook'lari kaldir, join et. Idempotent.
     void Stop();
@@ -60,7 +60,7 @@ public:
     // Hook'lari kur/kaldir yapmaktansa atomic bayrak okumak hem ucuz
     // hem yaris kosulsuz.
     void SetFollowMode(FollowMode mode);
-    void SetHijackWinZ(bool enable);
+    void SetHijackMagnifierKeys(bool enable);
 
 private:
     void ThreadMain();
@@ -80,7 +80,7 @@ private:
     std::atomic<DWORD> m_threadId{0};
 
     std::atomic<FollowMode> m_followMode{FollowMode::MouseAndFocus};
-    std::atomic<bool>       m_hijackWinZ{false};
+    std::atomic<bool>       m_hijackMagnifierKeys{true};
 
     HWND          m_target       = nullptr;
     HHOOK         m_mouseHook    = nullptr;

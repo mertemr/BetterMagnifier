@@ -41,11 +41,20 @@ inline constexpr UINT WM_APP_TOGGLE_ZOOM      = WM_APP + 4;
 // GUI/hotkey -> motor: freeze ac-kapa (wParam ayni)
 inline constexpr UINT WM_APP_TOGGLE_FREEZE    = WM_APP + 5;
 
-// Input thread -> motor: mouse wheel ile zoom degisimi
-//   wParam = wheel delta (int, pozitif = zoom in)
+// Input thread -> motor: zoom'u bir adim degistir
+//   wParam = yon: kZoomIn (+1) veya kZoomOut (-1)
 //   lParam = kullanilmiyor. Render thread GetCursorPos() ile konumu kendisi
 //   okur — olay ile isleme arasi birkac ms, fare ayni monitorde kalir.
-inline constexpr UINT WM_APP_SCROLL_ZOOM      = WM_APP + 6;
+//
+// Kaynaklari: Ctrl+Alt+tekerlek, Win+arti, Win+eksi.
+//
+// TOGGLE_ZOOM'dan farki: bu mesaj zoom KAPALIYSA da acabilir (Windows
+// Magnifier'in Win+arti davranisi). Cikarken minZoom'a inilirse kapatir.
+inline constexpr UINT WM_APP_ZOOM_STEP        = WM_APP + 6;
+
+// WM_APP_ZOOM_STEP wParam degerleri
+inline constexpr WPARAM kZoomIn  = 1;
+inline constexpr WPARAM kZoomOut = static_cast<WPARAM>(-1);
 
 // Input thread -> motor: klavye odagi degisti, focal point'i oraya kaydir
 //   wParam = kullanilmiyor

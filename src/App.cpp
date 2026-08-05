@@ -211,7 +211,7 @@ bool App::InitializeComponents()
     // Basarisiz olursa scroll zoom calismaz ama uygulama ayakta kalir.
     if (!m_inputThread.Start(m_messageHwnd,
                              m_settings.General().followMode,
-                             m_settings.General().hijackWinZ))
+                             m_settings.General().hijackMagnifierKeys))
     {
         LOG_WARN("InputThread baslatilamadi — mouse wheel zoom devre disi");
     }
@@ -437,9 +437,46 @@ void App::RenderMonitor(size_t monitorIndex)
         const long focalX = mon->zoom.focalPoint.x - mon->bounds.left;
         const long focalY = mon->zoom.focalPoint.y - mon->bounds.top;
 
+        // ── IMLEC CAPALI DONUSUM (ortalama DEGIL) ──
+        //
+        // Eskiden bolge focal point'in ORTASINA kuruluyordu:
+        //     srcOrigin = focal - srcSize/2
+        // Bunun sonucu: imlecin altindaki nokta overlay'in MERKEZINDE
+        // ciziliyordu, ama gercek imlec bitmap'i sistem tarafindan kendi
+        // gercek konumunda ciziliyor. Ikisi farkli yerde => gordugun yer ile
+        // tikladigin yer uyusmuyordu, zoom acikken Windows kullanilamiyordu.
+        //
+        // Simdi bolgeyi focal point'e CAPALIYORUZ:
+        //     srcOrigin = focal * (1 - 1/zoom)
+        //
+        // Bu donusumde ekran konumu s, kaynak pikseli (srcOrigin + s/zoom)
+        // gosteriyor. s = focal icin:
+        //     focal*(1 - 1/zoom) + focal/zoom = focal
+        // Yani focal point'teki nokta ekranda TAM OLARAK focal point'e dusuyor.
+        // Buyutmenin sabit noktasi imlec. Gercek imlec altindaki buyutulmus
+        // icerige birebir oturuyor, koordinat donusumu yapmaya gerek yok —
+        // mevcut click-through zaten dogru yere gidiyor.
+        //
+        // CLAMP GEREKMIYOR: formul her focal konumunda sinir icinde kaliyor.
+        //   focal = 0     -> origin = 0
+        //   focal = monW  -> origin = monW*(1-1/zoom),
+        //                    sag kenar = origin + monW/zoom = monW
+        // Yani ekranin her yerine erisilebiliyor ve tasma olmuyor.
+        //
+        // Python analojisi: PIL'de resize degil, sabit bir noktayi koruyarak
+        // affine transform uygulamak — cv2.getRotationMatrix2D'nin center
+        // parametresi gibi.
+        const double invZoom = 1.0 / static_cast<double>(zoom);
+
         RECT srcRect{};
-        srcRect.left   = std::clamp(focalX - srcW / 2, 0L, (std::max)(0L, monW - srcW));
-        srcRect.top    = std::clamp(focalY - srcH / 2, 0L, (std::max)(0L, monH - srcH));
+        srcRect.left = static_cast<long>(static_cast<double>(focalX) * (1.0 - invZoom));
+        srcRect.top  = static_cast<long>(static_cast<double>(focalY) * (1.0 - invZoom));
+
+        // Yuvarlama ve focal point'in monitor disina tasabildigi durumlar
+        // (fare baska monitorde, freeze aktif) icin guvenlik agi.
+        srcRect.left = std::clamp(srcRect.left, 0L, (std::max)(0L, monW - srcW));
+        srcRect.top  = std::clamp(srcRect.top,  0L, (std::max)(0L, monH - srcH));
+
         srcRect.right  = srcRect.left + srcW;
         srcRect.bottom = srcRect.top  + srcH;
 
@@ -620,29 +657,88 @@ void App::OnFreeze()
     }
 }
 
-// Mouse wheel → zoom.
+// =============================================================================
+// OnZoomStep — zoom'u bir adim degistir
+// =============================================================================
+// Kaynaklari: Ctrl+Alt+tekerlek, Win+arti, Win+eksi.
 //
-// DIKKAT: Low-level mouse hook scroll'u ENGELLEMEZ, altindaki uygulamaya da
-// gider. Bu yuzden scroll'u sadece o monitorde zoom AKTIFKEN yakaliyoruz.
-// Boylece normal scroll davranisini hicbir zaman bozmuyoruz — zoom kapaliysa
-// hicbir sey olmuyor.
-void App::OnScroll(int delta, POINT mousePos)
+// Windows Magnifier davranisini taklit ediyor:
+//   Zoom KAPALI + yon(+)  -> ac (baslangic seviyesinde)
+//   Zoom ACIK  + yon(+)   -> bir adim buyut
+//   Zoom ACIK  + yon(-)   -> bir adim kucult; minZoom'a inince KAPAT
+//   Zoom KAPALI + yon(-)  -> hicbir sey (kapali olani daha fazla kapatamayiz)
+//
+// Fare tekerlegi icin eski davranistan farki: eskiden sadece zoom AKTIFKEN
+// tepki veriyordu cunku duz tekerlek yutulmuyordu ve normal kaydirmayi
+// bozmamak gerekiyordu. Artik Ctrl+Alt+tekerlek yutuluyor, yani kombinasyon
+// bize ait — zoom'u acmasi da mesru.
+// =============================================================================
+void App::OnZoomStep(int direction)
 {
-    const MonitorInfo* target = m_monitorManager.FindByPoint(mousePos);
-    if (!target || !target->zoom.isActive)
+    POINT cursor{};
+    GetCursorPos(&cursor);
+
+    const MonitorInfo* target = m_monitorManager.FindByPoint(cursor);
+    if (!target)
         return;
 
     const auto& monitors = m_monitorManager.GetMonitors();
     for (size_t i = 0; i < monitors.size(); ++i)
     {
-        if (monitors[i].hMonitor == target->hMonitor)
+        if (monitors[i].hMonitor != target->hMonitor)
+            continue;
+
+        const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
+        if (!mon)
+            return;
+
+        const auto ms = m_settings.Monitor(mon->deviceName);
+
+        // ── Kapaliyken buyutme istegi = ac ──
+        if (!mon->zoom.isActive)
         {
-            // Zoom adimi ayarlardan geliyor (per-monitor)
-            const auto ms = m_settings.Monitor(monitors[i].deviceName);
-            const float step = (delta > 0) ? ms.zoomStep : -ms.zoomStep;
-            m_monitorManager.AdjustZoom(i, step);
+            if (direction <= 0)
+                return;   // Kapali olani daha fazla kapatamayiz
+
+            m_monitorManager.ToggleZoom(i);
+
+            const float startZoom = m_settings.General().rememberZoomLevel
+                ? std::clamp(ms.lastZoom, ms.minZoom, ms.maxZoom)
+                : std::clamp(ms.minZoom + ms.zoomStep, ms.minZoom, ms.maxZoom);
+
+            m_monitorManager.SetZoom(i, startZoom);
+            m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Aktif");
+
+            LOG_INFO("Monitor {} zoom acildi ({:.2f}x) — Win+arti / Ctrl+Alt+tekerlek", i, startZoom);
             return;
         }
+
+        // ── Acikken adim ──
+        const float step = (direction > 0) ? ms.zoomStep : -ms.zoomStep;
+        m_monitorManager.AdjustZoom(i, step);
+
+        // ── minZoom'a inildiyse kapat ──
+        // Windows Magnifier'in Win+eksi davranisi. Not: minZoom ayarda 1.0'dan
+        // buyukse (orn. 1.5) o seviyede kapanir — tuhaf gorunebilir ama tutarli.
+        const MonitorInfo* after = m_monitorManager.GetMonitor(i);
+        if (after && direction < 0 && after->zoom.zoomLevel <= ms.minZoom)
+        {
+            // Kapatmadan ONCE kullanilan seviyeyi sakla: ToggleZoom
+            // zoomLevel'i minZoom'a sifirliyor.
+            if (m_settings.General().rememberZoomLevel)
+            {
+                auto updated = ms;
+                updated.lastZoom = std::clamp(ms.minZoom + ms.zoomStep,
+                                              ms.minZoom, ms.maxZoom);
+                m_settings.SetMonitor(mon->deviceName, updated);
+            }
+
+            m_monitorManager.ToggleZoom(i);
+            m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Pasif");
+            LOG_INFO("Monitor {} zoom kapandi (minZoom'a inildi)", i);
+        }
+
+        return;
     }
 }
 
@@ -737,7 +833,7 @@ void App::ApplySettings()
 
     // Input thread'in atomic bayraklarini guncelle
     m_inputThread.SetFollowMode(g.followMode);
-    m_inputThread.SetHijackWinZ(g.hijackWinZ);
+    m_inputThread.SetHijackMagnifierKeys(g.hijackMagnifierKeys);
 
     // Mevcut zoom yeni sinirlarin disinda kaldiysa iceri cek
     for (size_t i = 0; i < m_monitorManager.GetMonitorCount(); ++i)
@@ -842,14 +938,13 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             s_instance->OnDisplayChange();
         return 0;
 
-    case WM_APP_SCROLL_ZOOM:
+    case WM_APP_ZOOM_STEP:
         if (s_instance)
         {
-            // Input thread'den geldi. Konumu SIMDI okuyoruz — olaydan
-            // birkac ms sonra, fare ayni monitorde.
-            POINT pt{};
-            GetCursorPos(&pt);
-            s_instance->OnScroll(static_cast<int>(static_cast<intptr_t>(wParam)), pt);
+            // wParam kZoomIn (1) veya kZoomOut ((WPARAM)-1).
+            // WPARAM isaretsiz — isaretli okumak icin intptr_t'den geciyoruz.
+            const int dir = (static_cast<intptr_t>(wParam) > 0) ? +1 : -1;
+            s_instance->OnZoomStep(dir);
         }
         return 0;
 

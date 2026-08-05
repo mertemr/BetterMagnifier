@@ -51,9 +51,14 @@ struct GeneralSettings
     UINT       freezeModifiers   = MOD_CONTROL | MOD_ALT;
     UINT       freezeVk          = 'X';
 
-    // Win+Z'yi WH_KEYBOARD_LL ile ele gecir. VARSAYILAN KAPALI:
-    // acildiginda Windows 11 Snap Layouts calismaz hale gelir.
-    bool       hijackWinZ        = false;
+    // Windows Magnifier kisayollarini WH_KEYBOARD_LL / WH_MOUSE_LL ile devral:
+    //   Win+arti / Win+eksi     -> zoom adimi
+    //   Ctrl+Alt+tekerlek       -> zoom adimi (yutulur, sayfa kaymaz)
+    //   Win+orta tik            -> zoom bolgesini sabitle/coz
+    //
+    // VARSAYILAN ACIK: kullanici Windows'un magnifier'i yerine bunu istiyor.
+    // Kapatilirsa sadece RegisterHotKey tabanli Ctrl+Alt+Z / Ctrl+Alt+X kalir.
+    bool       hijackMagnifierKeys = true;
 
     FollowMode followMode        = FollowMode::MouseAndFocus;
     bool       startWithWindows  = false;

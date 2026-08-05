@@ -63,7 +63,10 @@ private:
     // ── Event Handlers ──
     void OnToggleZoom();
     void OnFreeze();
-    void OnScroll(int delta, POINT mousePos);
+    // Zoom'u bir adim degistir. Zoom kapaliysa ve yon +1 ise ACAR;
+    // minZoom'a inildiyse ve yon -1 ise KAPATIR.
+    // Kaynaklari: Ctrl+Alt+tekerlek, Win+arti, Win+eksi.
+    void OnZoomStep(int direction);
     void OnDisplayChange();
     void OnFocusChanged(HWND focused);
 

@@ -30,7 +30,7 @@ InputThread::~InputThread()
 // Python analojisi: concurrent.futures.Future, ya da threading.Event +
 // bir sonuc degiskeni.
 // =============================================================================
-bool InputThread::Start(HWND targetHwnd, FollowMode initialMode, bool hijackWinZ)
+bool InputThread::Start(HWND targetHwnd, FollowMode initialMode, bool hijackMagnifierKeys)
 {
     if (m_running.load(std::memory_order_acquire))
         return true;
@@ -43,7 +43,7 @@ bool InputThread::Start(HWND targetHwnd, FollowMode initialMode, bool hijackWinZ
 
     m_target = targetHwnd;
     m_followMode.store(initialMode, std::memory_order_relaxed);
-    m_hijackWinZ.store(hijackWinZ, std::memory_order_relaxed);
+    m_hijackMagnifierKeys.store(hijackMagnifierKeys, std::memory_order_relaxed);
     s_instance = this;
 
     std::promise<bool> ready;
@@ -100,9 +100,9 @@ bool InputThread::InstallHooks()
     LOG_INFO("  Mouse hook aktif (input thread'de)");
 
     // ── Klavye hook'u (Win+Z ele gecirme) ──
-    // Her zaman kuruyoruz ama sadece hijackWinZ acikken olay yutuyoruz.
+    // Her zaman kuruyoruz ama sadece hijackMagnifierKeys acikken olay yutuyoruz.
     // Kur/kaldir yapmaktansa atomic bayrak okumak hem ucuz hem yaris kosulsuz.
-    // Basarisiz olursa kritik degil — sadece Win+Z ozelligi calismaz.
+    // Basarisiz olursa kritik degil — sadece Win+arti/eksi devralinmaz.
     m_keyboardHook = SetWindowsHookExW(
         WH_KEYBOARD_LL,
         LowLevelKeyboardProc,
@@ -110,7 +110,7 @@ bool InputThread::InstallHooks()
         0);
 
     if (!m_keyboardHook)
-        LOG_WARN("WH_KEYBOARD_LL kurulamadi: {} — Win+Z ele gecirme devre disi",
+        LOG_WARN("WH_KEYBOARD_LL kurulamadi: {} — Win+arti/eksi devralma devre disi",
             GetLastError());
     else
         LOG_INFO("  Klavye hook'u aktif");
@@ -205,15 +205,16 @@ void InputThread::SetFollowMode(FollowMode mode)
     m_followMode.store(mode, std::memory_order_relaxed);
 }
 
-void InputThread::SetHijackWinZ(bool enable)
+void InputThread::SetHijackMagnifierKeys(bool enable)
 {
-    const bool prev = m_hijackWinZ.exchange(enable, std::memory_order_relaxed);
+    const bool prev = m_hijackMagnifierKeys.exchange(enable, std::memory_order_relaxed);
 
     if (prev != enable)
     {
-        LOG_INFO("Win+Z ele gecirme {}{}",
+        LOG_INFO("Magnifier kisayol devralma {}{}",
             enable ? "ACIK" : "KAPALI",
-            enable ? " — Windows Snap Layouts devre disi" : "");
+            enable ? " — Win+arti/eksi, Ctrl+Alt+tekerlek, Win+orta tik bize geliyor"
+                   : "");
     }
 }
 
@@ -230,42 +231,90 @@ void InputThread::SetHijackWinZ(bool enable)
 // =============================================================================
 LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode == HC_ACTION && s_instance && s_instance->m_target && wParam == WM_MOUSEWHEEL)
+    if (nCode == HC_ACTION && s_instance && s_instance->m_target &&
+        s_instance->m_hijackMagnifierKeys.load(std::memory_order_relaxed))
     {
         auto* data = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
-        if (data)
-        {
-            const int delta = GET_WHEEL_DELTA_WPARAM(data->mouseData);
 
-            // Konumu gondermiyoruz — render thread GetCursorPos() ile kendisi
-            // okuyor. Olay ile isleme arasi birkac ms, fare ayni monitorde kalir.
-            PostMessageW(s_instance->m_target, WM_APP_SCROLL_ZOOM,
-                         static_cast<WPARAM>(delta), 0);
+        // ── Ctrl+Alt+tekerlek = zoom adimi ──
+        //
+        // Windows Magnifier'in kendi kombinasyonu, ondan deviraliyoruz.
+        //
+        // NEDEN DUZ TEKERLEK DEGIL: hook olayi yutmadigi surece alttaki
+        // uygulamaya da gidiyor. Duz tekerlekle zoom yapinca sayfa hem
+        // zoom'laniyor hem kayiyordu. Ctrl+Alt+tekerlegi YUTARAK aliyoruz,
+        // boylece cift etki bitiyor ve duz tekerlek normal kaydirmaya donuyor.
+        if (wParam == WM_MOUSEWHEEL && data)
+        {
+            const bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool altDown  = (GetAsyncKeyState(VK_MENU)    & 0x8000) != 0;
+
+            if (ctrlDown && altDown)
+            {
+                const int delta = GET_WHEEL_DELTA_WPARAM(data->mouseData);
+                PostMessageW(s_instance->m_target, WM_APP_ZOOM_STEP,
+                             (delta > 0) ? kZoomIn : kZoomOut, 0);
+
+                // YUT — alttaki uygulama ne zoom ne scroll gormesin.
+                return 1;
+            }
+        }
+
+        // ── Win + orta tik = zoom bolgesini sabitle/coz ──
+        //
+        // Elin zaten farede, klavyeye gitmiyorsun. MBUTTONUP'i da yutuyoruz,
+        // yoksa alttaki uygulama yarim bir orta tiklama gorur (bazi
+        // tarayicilarda bu yeni sekme acar).
+        if (wParam == WM_MBUTTONDOWN || wParam == WM_MBUTTONUP)
+        {
+            const bool winDown =
+                (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
+                (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+
+            if (winDown)
+            {
+                if (wParam == WM_MBUTTONDOWN)
+                {
+                    PostMessageW(s_instance->m_target, WM_APP_TOGGLE_FREEZE,
+                                 kFocusedMonitor, 0);
+                }
+                return 1;   // ikisini de yut
+            }
         }
     }
 
     // Chain'i MUTLAKA devam ettir — yoksa diger uygulamalar fare olaylarini
-    // alamaz. return 1 sadece olayi YUTMAK istedigimizde (klavyede Win+Z).
+    // alamaz. return 1 sadece yukarida, olayi bilincli yuttugumuz yerlerde.
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
 // =============================================================================
-// LowLevelKeyboardProc — Win+Z'yi yut
+// LowLevelKeyboardProc — Windows Magnifier kisayollarini devral
 // =============================================================================
 //
 // return 1 = olayi YUT (chain'e gitmez, Windows gormez).
-// RegisterHotKey'in yapamadigi seyi yapmanin tek yolu bu: Win+Z Windows 11'de
-// Snap Layouts'a rezerve, RegisterHotKey basarisiz doner.
 //
-// NE YUTUYORUZ, NE YUTMUYORUZ:
-//   Sadece Win basiliyken Z'nin KeyDown'unu yutuyoruz. Win tusunun KENDISINI
-//   yutmuyoruz — yutsak Start menusu, Win+D, Win+E hepsi bozulur.
+// NEDEN HOOK, RegisterHotKey DEGIL:
+//   Win+arti / Win+eksi Windows Magnifier'a rezerve. RegisterHotKey bunlari
+//   ALAMAZ, basarisiz doner. Sistem kisayolunu gercekten devralmanin tek yolu
+//   low-level hook'ta olayi yutmak.
 //
-// KAYBEDILEN: hijack acikken Windows 11 Snap Layouts calismaz. Varsayilan
-// KAPALI olmasinin sebebi bu.
+// DEVRALINANLAR (Win basiliyken):
+//   VK_OEM_PLUS  / VK_ADD      -> zoom adim +  (zoom kapaliysa ACAR)
+//   VK_OEM_MINUS / VK_SUBTRACT -> zoom adim -  (minZoom'a inince KAPATIR)
+//
+//   Hem ana klavye sirasi (OEM_*) hem numpad (ADD/SUBTRACT): Windows
+//   Magnifier ikisini de kabul ediyor, biz de edelim.
+//
+// NE YUTMUYORUZ:
+//   Win tusunun KENDISINI. Yutsak Start menusu, Win+D, Win+E hepsi bozulur.
+//   Sadece Win basiliyken ilgili tusun KeyDown'unu yutuyoruz.
+//
+// KAYBEDILEN: hijack acikken Windows'un kendi Magnifier'i bu tuslarla
+// acilmaz. Istenen davranis tam olarak bu.
 //
 // YUTAMADIKLARIMIZ (kernel/Winlogon korumali, kod ile engellenemez):
-//   Ctrl+Alt+Del, Win+L. Bunlar mimari olarak erisimimizin disinda.
+//   Ctrl+Alt+Del, Win+L. Mimari olarak erisimimizin disinda.
 //
 // ADMIN NOTU: yuksek integrity'li pencere odaktayken (Task Manager, UAC) hook
 // devreye girmez. DXGI Desktop Duplication da secure desktop'ta calismadigi
@@ -273,25 +322,32 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
 // =============================================================================
 LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
-    if (nCode == HC_ACTION && s_instance &&
-        s_instance->m_hijackWinZ.load(std::memory_order_relaxed))
+    if (nCode == HC_ACTION && s_instance && s_instance->m_target &&
+        s_instance->m_hijackMagnifierKeys.load(std::memory_order_relaxed) &&
+        (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))
     {
         auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-        if (kb && kb->vkCode == 'Z' &&
-            (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))
+        if (kb)
         {
             // Win tusu basili mi? 0x8000 biti = su an basili.
             const bool winDown =
                 (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
                 (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
 
-            if (winDown && s_instance->m_target)
+            if (winDown)
             {
-                PostMessageW(s_instance->m_target, WM_APP_TOGGLE_ZOOM, kFocusedMonitor, 0);
+                const bool isPlus  = (kb->vkCode == VK_OEM_PLUS)  || (kb->vkCode == VK_ADD);
+                const bool isMinus = (kb->vkCode == VK_OEM_MINUS) || (kb->vkCode == VK_SUBTRACT);
 
-                // YUT — Snap Layouts bu tusu gormesin.
-                return 1;
+                if (isPlus || isMinus)
+                {
+                    PostMessageW(s_instance->m_target, WM_APP_ZOOM_STEP,
+                                 isPlus ? kZoomIn : kZoomOut, 0);
+
+                    // YUT — Windows Magnifier acilmasin.
+                    return 1;
+                }
             }
         }
     }

@@ -265,8 +265,9 @@ bool SettingsStore::Load()
     // ── Bayraklar ──
     // GetPrivateProfileIntW varsayilan degeri parametre olarak aliyor —
     // eksik anahtar otomatik varsayilana duser.
-    m_general.hijackWinZ =
-        GetPrivateProfileIntW(L"General", L"HijackWinZ", 0, file.c_str()) != 0;
+    // Varsayilan 1 (ACIK) — kullanici Windows'un magnifier'i yerine bunu istiyor.
+    m_general.hijackMagnifierKeys =
+        GetPrivateProfileIntW(L"General", L"HijackMagnifierKeys", 1, file.c_str()) != 0;
     m_general.startWithWindows =
         GetPrivateProfileIntW(L"General", L"StartWithWindows", 0, file.c_str()) != 0;
     m_general.rememberZoomLevel =
@@ -354,8 +355,8 @@ bool SettingsStore::Save() const
             toggle.c_str(), file.c_str()) != 0 && ok;
     ok = WritePrivateProfileStringW(L"General", L"FreezeHotkey",
             freeze.c_str(), file.c_str()) != 0 && ok;
-    ok = WriteInt(file, L"General", L"HijackWinZ",
-            m_general.hijackWinZ ? 1 : 0) && ok;
+    ok = WriteInt(file, L"General", L"HijackMagnifierKeys",
+            m_general.hijackMagnifierKeys ? 1 : 0) && ok;
     ok = WriteInt(file, L"General", L"StartWithWindows",
             m_general.startWithWindows ? 1 : 0) && ok;
     ok = WriteInt(file, L"General", L"RememberZoomLevel",
@@ -499,7 +500,7 @@ void SettingsStoreSelfCheck()
         assert(fresh.Load());
         assert(fresh.General().toggleVk == 'Z');
         assert(fresh.General().toggleModifiers == (MOD_CONTROL | MOD_ALT));
-        assert(fresh.General().hijackWinZ == false);
+        assert(fresh.General().hijackMagnifierKeys == true);   // varsayilan ACIK
         assert(fresh.General().followMode == FollowMode::MouseAndFocus);
         assert(fresh.General().rememberZoomLevel == true);
 
@@ -512,7 +513,7 @@ void SettingsStoreSelfCheck()
         SettingsStore w;
         w.MutableGeneral().toggleModifiers  = MOD_CONTROL | MOD_SHIFT;
         w.MutableGeneral().toggleVk         = 'M';
-        w.MutableGeneral().hijackWinZ       = true;
+        w.MutableGeneral().hijackMagnifierKeys = false;
         w.MutableGeneral().followMode       = FollowMode::Mouse;
         w.MutableGeneral().rememberZoomLevel = false;
         w.SetMonitor(L"\\\\.\\DISPLAY1", MonitorSettings{ 1.5f, 8.0f, 0.5f, 3.25f });
@@ -522,7 +523,7 @@ void SettingsStoreSelfCheck()
         assert(r.Load());
         assert(r.General().toggleModifiers == (MOD_CONTROL | MOD_SHIFT));
         assert(r.General().toggleVk == 'M');
-        assert(r.General().hijackWinZ == true);
+        assert(r.General().hijackMagnifierKeys == false);
         assert(r.General().followMode == FollowMode::Mouse);
         assert(r.General().rememberZoomLevel == false);
 
