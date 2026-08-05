@@ -67,6 +67,32 @@ int WINAPI wWinMain(
     AttachDebugConsole();
 #endif
 
+    // ── 2b. Tek instance kontrolü ──
+    //
+    // İki kopya birlikte çalışırsa: iki tam ekran topmost overlay üst üste
+    // biner, iki ayrı global hook zinciri kurulur ve ikisi de aynı monitör
+    // için Desktop Duplication açmaya çalışır. Sonuç kasma ve tahmin
+    // edilemeyen girdi davranışı — hangi overlay'in tıklamayı yuttuğu
+    // belirsiz hale gelir.
+    //
+    // Named mutex: process ölünce Windows handle'ı otomatik kapatır, yani
+    // çökme sonrası kilitli kalma riski yok (dosya tabanlı kilidin aksine).
+    //
+    // Python analojisi: tek örnek için port bind etmek / lock file tutmak,
+    // ama bu ikisinden de güvenli çünkü OS temizliğini garanti ediyor.
+    HANDLE singleInstance = CreateMutexW(nullptr, TRUE, L"BetterMagnifier_SingleInstance_Mutex");
+    if (!singleInstance || GetLastError() == ERROR_ALREADY_EXISTS)
+    {
+        if (singleInstance)
+            CloseHandle(singleInstance);
+
+        MessageBoxW(nullptr,
+            L"BetterMagnifier zaten çalışıyor.\n\n"
+            L"Tepsi (system tray) ikonuna bakın.",
+            L"BetterMagnifier", MB_ICONINFORMATION | MB_OK);
+        return 0;
+    }
+
     // ── 3. COM Initialize ──
     // COM = Component Object Model — Windows'un nesne paylaşım sistemi.
     // Python analojisi: Python'da import etmeden önce sys.path ayarlamak gibi.
@@ -173,6 +199,14 @@ int WINAPI wWinMain(
     BetterMagnifier::Logger::Instance().Shutdown();
 
     CoUninitialize();
+
+    // Tek instance mutex'ini birak — process olurken Windows zaten kapatir
+    // ama acikca birakmak niyeti belli ediyor.
+    if (singleInstance)
+    {
+        ReleaseMutex(singleInstance);
+        CloseHandle(singleInstance);
+    }
 
     return exitCode;
 }

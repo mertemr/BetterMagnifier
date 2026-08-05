@@ -102,6 +102,15 @@ private:
     // FPS olcumu — monitor basina son frame zamani
     std::array<std::chrono::steady_clock::time_point, StatusSnapshot::kMaxMonitors> m_lastFrameTime{};
 
+    // Son sunulan zoom bolgesi. Ne ekran ne de capa degismediyse yeniden
+    // cizip Present etmenin anlami yok — bos yere vSync bekleyip GPU
+    // yakiyoruz. Bu, kasma hissini azaltan ikinci parca.
+    std::array<RECT, StatusSnapshot::kMaxMonitors> m_lastSrcRect{};
+
+    // Bu turda herhangi bir monitore Present edildi mi? Edilmediyse loop'u
+    // vSync bloklamiyor, o yuzden elle kisa bir uyku gerekiyor.
+    bool m_presentedThisTick = false;
+
     bool m_running     = false;
     bool m_initialized = false;
 

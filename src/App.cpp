@@ -295,6 +295,7 @@ int App::Run()
 void App::Update()
 {
     m_status.monitorCount.store(m_overlays.size(), std::memory_order_relaxed);
+    m_presentedThisTick = false;
 
     // ── Mouse pozisyonunu takip et (magnifier fareyi izler) ──
     POINT cursor{};
@@ -328,9 +329,16 @@ void App::Update()
                 m_overlays[i].Hide();
 
             // Zoom kapaliyken FPS anlamsiz — panelde "—" gorunmesi icin sifirla
+            const size_t slot = (i < StatusSnapshot::kMaxMonitors)
+                              ? i : StatusSnapshot::kMaxMonitors - 1;
             st.fps.store(0.0f, std::memory_order_relaxed);
-            m_lastFrameTime[i < StatusSnapshot::kMaxMonitors
-                            ? i : StatusSnapshot::kMaxMonitors - 1] = {};
+            m_lastFrameTime[slot] = {};
+
+            // Son cizilen bolgeyi de sifirla. Yoksa zoom tekrar acildiginda
+            // ayni bolge cikarsa "degisen yok" deyip cizimi atlariz —
+            // FLIP_DISCARD'da Present sonrasi back buffer icerigi TANIMSIZ,
+            // yani ekranda cop gorunur.
+            m_lastSrcRect[slot] = RECT{};
             continue;
         }
 
@@ -366,8 +374,15 @@ void App::Update()
     // Zoom aktifse Present(vSync) bizi zaten refresh rate'e kilitliyor.
     // ponytail: sabit 8ms; idle'da MsgWaitForMultipleObjects daha dogru olur
     // ama olay bazli uyanma icin overlay/hotkey akisini yeniden kurmak gerekir.
-    if (!anyActive)
-        Sleep(8);
+    // ── Bosa donmeyi engelle ──
+    // Zoom aktifken Present(vSync) loop'u dogal olarak frame hizina kilitler.
+    // Ama hicbir monitore Present etmediysek (zoom kapali, ya da hicbir sey
+    // degismedigi icin cizim atlandi) o fren yok — loop CPU'yu yakar.
+    //
+    // 4 ms, degisimi fark etmek icin yeterince kisa (240 Hz'lik yoklama),
+    // bos dongu icin yeterince uzun.
+    if (!m_presentedThisTick)
+        Sleep(anyActive ? 4 : 8);
 
     // Bir sonraki frame'de "fare hareket etti mi" karsilastirmasi icin
     m_lastCursorPos = cursor;
@@ -480,6 +495,27 @@ void App::RenderMonitor(size_t monitorIndex)
         srcRect.right  = srcRect.left + srcW;
         srcRect.bottom = srcRect.top  + srcH;
 
+        // ── Degisen bir sey yoksa hic cizme ──
+        // Ne yeni frame geldi ne de capa oynadi: ekranda gosterilecek yeni
+        // bir sey yok. Present cagirmak sadece vSync'te bloklayip GPU
+        // yakmak olurdu.
+        const size_t rectSlot = (monitorIndex < StatusSnapshot::kMaxMonitors)
+                              ? monitorIndex : StatusSnapshot::kMaxMonitors - 1;
+        const RECT& lastRect = m_lastSrcRect[rectSlot];
+
+        const bool rectSame = (lastRect.left   == srcRect.left)
+                           && (lastRect.top    == srcRect.top)
+                           && (lastRect.right  == srcRect.right)
+                           && (lastRect.bottom == srcRect.bottom);
+
+        if (!frame.isNewFrame && rectSame)
+        {
+            capture.ReleaseFrame();
+            return;
+        }
+
+        m_lastSrcRect[rectSlot] = srcRect;
+
         // Yeni frame varsa onu ver; yoksa nullptr = "son frame'i tekrar kullan".
         ID3D11Texture2D* newFrame = (frame.isNewFrame && frame.texture)
                                   ? frame.texture.Get()
@@ -493,6 +529,7 @@ void App::RenderMonitor(size_t monitorIndex)
         }
 
         m_renderer.Present(monitorIndex, true);
+        m_presentedThisTick = true;
 
         // ── FPS olcumu ──
         // Present'ten SONRA olcuyoruz, cunku vSync bekleyisi de frame
@@ -777,6 +814,21 @@ void App::OnFocusChanged(HWND focused)
     if (!target->zoom.isActive || target->zoom.isFrozen)
         return;
 
+    // ── CAPA == IMLEC DEGISMEZ KURALI ──
+    //
+    // Eskiden burada dogrudan focalPoint'e yaziliyordu. Bu, tiklama
+    // hizalamasini BOZUYORDU: tikladigin an odak degisir, EVENT_OBJECT_FOCUS
+    // tetiklenir, capa imlecten pencere merkezine atlar. Capa artik imlecte
+    // olmadigi icin bir sonraki tiklaman gordugun yere gitmez.
+    // Kullanicinin "tiklama calismiyor" dedigi sey tam olarak buydu.
+    //
+    // Cozum: capa'yi DEGISTIRMIYORUZ, IMLECI tasiyoruz. Boylece
+    // "capa == imlec" degismez kurali her zaman geciyor ve odak takibi ile
+    // tiklama hizalamasi birbirini bozmuyor.
+    //
+    // Bedeli: odak degisince fare isaretcisi de oraya gidiyor. Bu yuzden
+    // MouseAndFocus artik VARSAYILAN DEGIL — isteyerek acilan bir mod.
+    SetCursorPos(center.x, center.y);
     target->zoom.focalPoint = center;
 }
 

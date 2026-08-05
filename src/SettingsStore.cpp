@@ -276,7 +276,7 @@ bool SettingsStore::Load()
     // ── Takip modu ──
     {
         wchar_t buf[32]{};
-        GetPrivateProfileStringW(L"General", L"FollowMode", L"MouseAndFocus",
+        GetPrivateProfileStringW(L"General", L"FollowMode", L"Mouse",
                                  buf, 32, file.c_str());
         // Taninmayan deger -> varsayilan (MouseAndFocus)
         m_general.followMode = EqualsCI(buf, L"Mouse")
@@ -501,7 +501,7 @@ void SettingsStoreSelfCheck()
         assert(fresh.General().toggleVk == 'Z');
         assert(fresh.General().toggleModifiers == (MOD_CONTROL | MOD_ALT));
         assert(fresh.General().hijackMagnifierKeys == true);   // varsayilan ACIK
-        assert(fresh.General().followMode == FollowMode::MouseAndFocus);
+        assert(fresh.General().followMode == FollowMode::Mouse);   // varsayilan
         assert(fresh.General().rememberZoomLevel == true);
 
         // Bilinmeyen monitor -> varsayilan

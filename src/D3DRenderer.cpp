@@ -252,6 +252,20 @@ bool D3DRenderer::CreateDevice()
         return false;
     }
 
+    // ── Frame latency = 1 ──
+    // DXGI varsayilani 3 frame kuyruk tutuyor. 75 Hz'de bu 40 ms'ye kadar
+    // girdi-ekran gecikmesi demek: fareyi oynatiyorsun, goruntu uc kare
+    // sonra yetisiyor. Bir magnifier'da bu "kasma" olarak hissediliyor.
+    //
+    // 1'e cekmek gecikmeyi tek kareye indiriyor. Bedeli: GPU ile CPU arasinda
+    // daha az tampon, yani cok agir sahnelerde throughput dusebilir — bizim
+    // is yukumuz tek bir fullscreen ucgen, sorun olmaz.
+    hr = dxgiDevice->SetMaximumFrameLatency(1);
+    if (FAILED(hr))
+        LOG_WARN("SetMaximumFrameLatency(1) basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+    else
+        LOG_INFO("Frame latency = 1 (varsayilan 3)");
+
     ComPtr<IDXGIAdapter> adapter;
     hr = dxgiDevice->GetAdapter(&adapter);
     if (FAILED(hr))
