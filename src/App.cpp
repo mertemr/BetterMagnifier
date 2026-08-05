@@ -385,6 +385,25 @@ void App::Update()
     // Zoom aktifse Present(vSync) bizi zaten refresh rate'e kilitliyor.
     // ponytail: sabit 8ms; idle'da MsgWaitForMultipleObjects daha dogru olur
     // ama olay bazli uyanma icin overlay/hotkey akisini yeniden kurmak gerekir.
+    // ── Topmost'u periyodik olarak yeniden iddia et ──
+    // Menuler ve popup'lar HWND_TOPMOST ile ve BIZDEN SONRA olusturuldugu icin
+    // z-order'da uzerimize cikiyor; kullanici popup'i iki kez goruyor (biri
+    // bizim buyutulmus capture'imizda, biri kendi penceresinde).
+    //
+    // 250 ms: bir menuyu acip okumaya baslamadan once ustune cikmaya yeter,
+    // her frame SetWindowPos cagirmanin z-order gurultusunu de yaratmaz.
+    if (anyActive)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - m_lastTopmostAssert > std::chrono::milliseconds(250))
+        {
+            for (auto& overlay : m_overlays)
+                overlay.EnsureTopmost();
+
+            m_lastTopmostAssert = now;
+        }
+    }
+
     // ── Bosa donmeyi engelle ──
     // Zoom aktifken Present(vSync) loop'u dogal olarak frame hizina kilitler.
     // Ama hicbir monitore Present etmediysek (zoom kapali, ya da hicbir sey
@@ -849,6 +868,26 @@ void App::OnFocusChanged(HWND focused)
     //
     // Bedeli: odak degisince fare isaretcisi de oraya gidiyor. Bu yuzden
     // MouseAndFocus artik VARSAYILAN DEGIL — isteyerek acilan bir mod.
+    //
+    // ── AMA TIKLAMAYLA GELEN ODAK DEGISIMINDE TASIMA ──
+    // Tikladiginda da odak degisiyor. Orada imleci tasimak imleci ONUN
+    // istedigi yerden KOPARIYOR: 600,600'e tikliyorsun, odak degisiyor, imlec
+    // pencerenin merkezine (orn. 800,700) sicriyor. Gozlenen "fare baska yone
+    // zipliyor" bugu tam olarak buydu.
+    //
+    // Ayrimi zamanlama tahminiyle degil, durumsuz bir testle yapiyoruz:
+    // imlec ZATEN odaklanan pencerenin icindeyse odak degisimi tiklamadan
+    // gelmis demektir — imlec dogru yerde, dokunmuyoruz. Disindaysa klavyeyle
+    // (Tab) gelmis demektir, orada tasimak istedigimiz sey.
+    POINT cursor{};
+    GetCursorPos(&cursor);
+
+    if (PtInRect(&rc, cursor))
+    {
+        // Tiklama kaynakli: capa zaten imlecte, hicbir sey yapma.
+        return;
+    }
+
     SetCursorPos(center.x, center.y);
     target->zoom.focalPoint = center;
 }

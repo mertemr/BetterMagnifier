@@ -111,6 +111,12 @@ private:
     // vSync bloklamiyor, o yuzden elle kisa bir uyku gerekiyor.
     bool m_presentedThisTick = false;
 
+    // Topmost'u en son ne zaman yeniden iddia ettik?
+    // Menuler bizden sonra topmost olarak olusturuldugu icin uzerimize
+    // cikiyorlar (bkz. OverlayWindow::EnsureTopmost). Her frame cagirmak
+    // gereksiz; periyodik yetiyor.
+    std::chrono::steady_clock::time_point m_lastTopmostAssert{};
+
     bool m_running     = false;
     bool m_initialized = false;
 

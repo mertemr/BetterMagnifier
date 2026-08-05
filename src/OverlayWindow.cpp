@@ -227,6 +227,20 @@ bool OverlayWindow::IsVisible() const
 }
 
 // =============================================================================
+// EnsureTopmost — menulerin uzerinde kal
+// =============================================================================
+void OverlayWindow::EnsureTopmost()
+{
+    if (!m_hwnd || !m_visible)
+        return;
+
+    // SWP_NOACTIVATE: focus calmayacagiz.
+    // SWP_NOMOVE | SWP_NOSIZE: sadece z-order degisiyor, geometri sabit.
+    SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+// =============================================================================
 // Reposition — DPI veya resolution degistiginde
 // =============================================================================
 void OverlayWindow::Reposition(const RECT& bounds)

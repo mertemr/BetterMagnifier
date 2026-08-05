@@ -39,6 +39,18 @@ public:
     // Boyut guncelleme (DPI/resolution degisimi)
     void Reposition(const RECT& bounds);
 
+    // ── Topmost'u yeniden iddia et ──
+    // Menuler ve popup'lar da HWND_TOPMOST ile olusturuluyor ve BIZDEN SONRA
+    // yaratildiklari icin z-order'da uzerimize cikiyorlar. Sonuc: kullanici
+    // popup'i IKI KEZ goruyor — bir kez bizim buyutulmus capture'imizin
+    // icinde, bir kez de kendi penceresi olarak buyutulmemis halde.
+    //
+    // Periyodik olarak topmost'u yeniden iddia edince ustte kaliyoruz ve
+    // popup sadece buyutulmus halde gorunuyor.
+    //
+    // SWP_NOACTIVATE sart: focus calmamaliyiz.
+    void EnsureTopmost();
+
     HWND GetHwnd() const { return m_hwnd; }
     size_t GetMonitorIndex() const { return m_monitorIndex; }
 
