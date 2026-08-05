@@ -139,6 +139,13 @@ durations.
 
 ## Control panel
 
+> **BROKEN: the panel opens as a blank white window.** The host window and its
+> dark title bar are right, every XAML call succeeds, and nothing renders. The
+> island never comes alive: no bridge child window, `Loaded` never fires, the
+> dispatcher never ticks. Measurements and the ranked list of things to try are
+> in [`PANEL-BLANK.md`](PANEL-BLANK.md). Diagnostics live on branch
+> `wip/panel-blank-island`.
+
 WinUI 3, built in code, hosted as a XAML island on its own STA thread. Two tabs.
 
 **Status tab** - one card per monitor, refreshed at 10 Hz from `StatusSnapshot`:
@@ -339,9 +346,10 @@ became the broader `hijackMagnifierKeys`, which covers `Win+Plus`/`Win+Minus`,
 
 ## Decisions waiting on the user
 
-0. First: open the panel and use it. Everything in
-   [Control panel](#control-panel) past "the window appears" is unverified, and
-   it is a five-minute check that no script here can do.
+0. First: get the panel to render at all. It opens blank; the measurements and
+   the ranked list of suspects are in [`PANEL-BLANK.md`](PANEL-BLANK.md). The
+   strongest concrete lead is the PMv2 DPI awareness that `main.cpp` sets and the
+   working spike never did.
 1. Which popup mode becomes the default
 2. Whether `Win+Plus` still double-triggers under elevation, which decides
    whether the OS Magnifier shortcut has to be turned off

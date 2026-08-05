@@ -274,6 +274,17 @@ void ControlPanel::ThreadMain()
                 // hides instead of being destroyed and gets reopened later.
                 app.DispatcherShutdownMode(WUX::DispatcherShutdownMode::OnExplicitShutdown);
 
+                // A XAML exception raised during layout or render lands here, not
+                // in the catch below: those passes run after this callback returns.
+                app.UnhandledException(
+                    [](winrt::Windows::Foundation::IInspectable const&,
+                       WUX::UnhandledExceptionEventArgs const& e)
+                    {
+                        LOG_ERROR("XAML unhandled exception: 0x{:08X} - {}",
+                            static_cast<unsigned long>(e.Exception().value),
+                            ToUtf8(e.Message()));
+                    });
+
                 // XamlControlsResources is deliberately NOT assigned. WinUI 3
                 // already has the default theme dictionary loaded, and assigning
                 // that object REPLACES the dictionary, wiping the brushes it
@@ -412,7 +423,50 @@ void ControlPanel::BuildUi()
     root.Background(Brush(32, 32, 32));
     root.Children().Append(tabs);
 
+    // Loaded proves the tree is attached to a live island; SizeChanged proves it
+    // got a non-zero layout slot. Blank window with neither firing means the
+    // island is not connected at all.
+    root.Loaded([](winrt::Windows::Foundation::IInspectable const&,
+                   WUX::RoutedEventArgs const&)
+    {
+        LOG_INFO("Panel root Loaded");
+    });
+    root.SizeChanged([](winrt::Windows::Foundation::IInspectable const&,
+                        WUX::SizeChangedEventArgs const& e)
+    {
+        LOG_INFO("Panel root SizeChanged: {}x{}",
+            static_cast<int>(e.NewSize().Width), static_cast<int>(e.NewSize().Height));
+    });
+
     m_impl->source.Content(root);
+
+    // BM_PANEL_PROBE=1 swaps the real UI for the exact content the spike used, to
+    // separate "the island does not render" from "this control does not render".
+    // It is currently blank too - see docs/PANEL-BLANK.md.
+    {
+        wchar_t buf[8]{};
+        if (GetEnvironmentVariableW(L"BM_PANEL_PROBE", buf, 8) > 0 && buf[0] == L'1')
+        {
+            WUXC::StackPanel probe{};
+            probe.Padding(WUX::ThicknessHelper::FromUniformLength(24));
+            probe.Spacing(8);
+            probe.RequestedTheme(WUX::ElementTheme::Light);
+            probe.Background(Brush(255, 255, 255));
+
+            WUXC::TextBlock t{};
+            t.Text(L"probe: island is rendering");
+            t.FontSize(18.0);
+            probe.Children().Append(t);
+
+            WUXC::Button b{};
+            b.Content(winrt::box_value(L"probe button"));
+            probe.Children().Append(b);
+
+            m_impl->source.Content(probe);
+            LOG_INFO("Panel probe content installed");
+        }
+    }
+
     m_impl->source.SiteBridge().Show();
 
     RebuildMonitorCards();
@@ -601,6 +655,11 @@ void ControlPanel::StartLiveTimer()
         [this](winrt::Windows::Foundation::IInspectable const&,
                winrt::Windows::Foundation::IInspectable const&)
         {
+            // One-shot: proves the XAML dispatcher on this thread is pumping.
+            static std::atomic<bool> logged{false};
+            if (!logged.exchange(true, std::memory_order_relaxed))
+                LOG_INFO("Panel dispatcher is ticking");
+
             UpdateLiveValues();
         });
     m_impl->liveTimer.Start();
