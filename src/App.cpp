@@ -408,16 +408,30 @@ void App::RenderMonitor(size_t monitorIndex)
     // (yoksa fare hareket ederken zoom bolgesi guncellenmez).
     CapturedFrame frame = capture.AcquireFrame(0);
 
-    if (frame.isNewFrame && frame.texture)
+    // Yeni frame GELMESE DE ciziyoruz.
+    //
+    // Desktop Duplication ekran icerigi degismedikce frame vermez. Eskiden
+    // sadece isNewFrame durumunda render ediliyordu; sabit bir ekranda fareyi
+    // gezdirince zoom bolgesi oldugu yerde kaliyordu. Renderer son frame'in
+    // kopyasini tuttugu icin artik focal point degistiginde onu yeniden
+    // olceklendirip sunabiliyoruz.
     {
         // ── Zoom bolgesini hesapla (monitor-local koordinatlar) ──
         const float zoom = (std::max)(mon->zoom.zoomLevel, ZoomState::kMinZoom);
 
-        const long monW = static_cast<long>(frame.width);
-        const long monH = static_cast<long>(frame.height);
+        // Yeni frame yoksa frame.width/height sifir gelir — monitor
+        // boyutuna duseriyoruz (capture zaten monitor boyutunda acildi).
+        const long monW = (frame.width  > 0) ? static_cast<long>(frame.width)  : mon->Width();
+        const long monH = (frame.height > 0) ? static_cast<long>(frame.height) : mon->Height();
 
-        const long srcW = static_cast<long>(monW / zoom);
-        const long srcH = static_cast<long>(monH / zoom);
+        if (monW <= 0 || monH <= 0)
+        {
+            capture.ReleaseFrame();
+            return;
+        }
+
+        const long srcW = (std::max)(1L, static_cast<long>(monW / zoom));
+        const long srcH = (std::max)(1L, static_cast<long>(monH / zoom));
 
         // Focal point ekran koordinatlarinda — monitor-local'a cevir
         const long focalX = mon->zoom.focalPoint.x - mon->bounds.left;
@@ -429,7 +443,18 @@ void App::RenderMonitor(size_t monitorIndex)
         srcRect.right  = srcRect.left + srcW;
         srcRect.bottom = srcRect.top  + srcH;
 
-        m_renderer.RenderFrame(frame.texture.Get(), monitorIndex, srcRect);
+        // Yeni frame varsa onu ver; yoksa nullptr = "son frame'i tekrar kullan".
+        ID3D11Texture2D* newFrame = (frame.isNewFrame && frame.texture)
+                                  ? frame.texture.Get()
+                                  : nullptr;
+
+        if (!m_renderer.RenderFrame(newFrame, monitorIndex, srcRect))
+        {
+            // Henuz hic frame gelmemis olabilir — bir sonraki turda tekrar denenir.
+            capture.ReleaseFrame();
+            return;
+        }
+
         m_renderer.Present(monitorIndex, true);
 
         // ── FPS olcumu ──
@@ -522,24 +547,52 @@ void App::OnToggleZoom()
     {
         if (monitors[i].hMonitor == target->hMonitor)
         {
+            // Kullanimdaki seviyeyi toggle'DAN ONCE oku: ToggleZoom kapatirken
+            // zoomLevel'i kMinZoom'a sifirliyor, sonra okursak 1.0 goruruz.
+            const float levelInUse = monitors[i].zoom.zoomLevel;
+            const bool  wasActive  = monitors[i].zoom.isActive;
+
             m_monitorManager.ToggleZoom(i);
 
             const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
-            if (mon && mon->zoom.isActive)
+            if (!mon)
+                return;
+
+            const auto ms = m_settings.Monitor(mon->deviceName);
+
+            if (mon->zoom.isActive)
             {
-                // Zoom acilinca 2x'ten basla (1.0x'te acmak anlamsiz)
                 // Zoom acilinca hangi seviyeden baslasin?
                 // rememberZoomLevel aciksa son kullanilan seviye, degilse
-                // minZoom'un iki kati (1.0x'te acmak anlamsiz).
-                const auto ms = m_settings.Monitor(mon->deviceName);
-                const float startZoom = m_settings.General().rememberZoomLevel
+                // minZoom'un iki kati.
+                float startZoom = m_settings.General().rememberZoomLevel
                     ? std::clamp(ms.lastZoom, ms.minZoom, ms.maxZoom)
                     : std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
+
+                // GUVENLIK AGI: 1.0x'te acmak "zoom calismiyor" demek.
+                // Bozuk/eski bir settings.ini (LastZoom=1) bu duruma yol
+                // aciyordu; kullanici dosyayi silmeden de duzelsin diye
+                // burada tabana basiyoruz.
+                if (startZoom <= ms.minZoom)
+                    startZoom = std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
+
                 m_monitorManager.SetZoom(i, startZoom);
                 m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Aktif");
             }
             else
             {
+                // Kapaniyor — kullanilan seviyeyi SIMDI sakla.
+                // Shutdown'a birakmak calismiyordu: orada zoomLevel coktan
+                // 1.0'a sifirlanmis oluyor ve LastZoom=1 diske yaziliyordu.
+                if (wasActive
+                    && m_settings.General().rememberZoomLevel
+                    && levelInUse > ms.minZoom)
+                {
+                    auto updated = ms;
+                    updated.lastZoom = std::clamp(levelInUse, ms.minZoom, ms.maxZoom);
+                    m_settings.SetMonitor(mon->deviceName, updated);
+                }
+
                 m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Pasif");
             }
             return;
@@ -897,7 +950,20 @@ void App::Shutdown()
             if (!mon)
                 continue;
 
+            // SADECE zoom acik olan monitorler icin yaz.
+            //
+            // Eskiden kosulsuz yaziliyordu; zoom kapali bir monitorde
+            // zoomLevel 1.0 oldugu icin LastZoom=1 kaydediliyordu ve bir
+            // sonraki acilista zoom 1.0x'te "aciliyordu" — yani hic
+            // buyutmuyordu. Kapatma anindaki seviye zaten OnToggleZoom'da
+            // saklaniyor.
+            if (!mon->zoom.isActive)
+                continue;
+
             auto ms = m_settings.Monitor(mon->deviceName);
+            if (mon->zoom.zoomLevel <= ms.minZoom)
+                continue;
+
             ms.lastZoom = std::clamp(mon->zoom.zoomLevel, ms.minZoom, ms.maxZoom);
             m_settings.SetMonitor(mon->deviceName, ms);
         }

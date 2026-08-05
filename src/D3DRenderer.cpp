@@ -6,7 +6,82 @@
 #include "D3DRenderer.h"
 #include "Logger.h"
 
+#include <d3dcompiler.h>
+
 namespace BetterMagnifier {
+
+namespace {
+
+// =============================================================================
+// Shader kaynagi — buyutmeyi yapan asil is burada
+// =============================================================================
+// Eski kod CopySubresourceRegion kullaniyordu; o 1:1 piksel kopyalar,
+// OLCEKLEME YAPMAZ. Sonuc: zoom seviyesi kaynak bolgeyi kucultuyordu ama
+// goruntu buyumuyordu — 2x'te ekranin sol ust ceyregine kirpilmis bir kopya.
+//
+// Dogru cozum: kaynak bolgeyi (srcRect) UV koordinatina cevirip TUM ekrani
+// kaplayan bir ucgene bilinear ornekleme ile cizmek. Boylece kucuk bolge
+// ekran boyutuna GERILIR = buyutme.
+//
+// Neden ucgen, dortgen degil?
+//   Ekrani kaplayan tek bir ucgen, iki ucgenden olusan bir quad'a gore hem
+//   daha az vertex hem de diagonal boyunca tekrar ornekleme yapmiyor.
+//   Standart "fullscreen triangle" hilesi.
+//
+// Neden vertex buffer yok?
+//   SV_VertexID = kacinci vertex oldugumuz. Uc kosenin konumunu bundan
+//   hesapliyoruz. Vertex buffer da input layout da gerekmiyor.
+//   Python analojisi: for i in range(3) icinde koordinati hesaplamak,
+//   onceden hazirlanmis bir liste okumak yerine.
+// =============================================================================
+constexpr char kShaderSource[] = R"HLSL(
+cbuffer UvParams : register(b0)
+{
+    // xy = buyutulecek bolgenin sol-ust UV'si, zw = bolgenin UV boyutu
+    float4 uvRect;
+};
+
+struct VSOut
+{
+    float4 pos : SV_POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VSOut VSMain(uint vid : SV_VertexID)
+{
+    // vid 0,1,2 -> corner (0,0), (2,0), (0,2)
+    // Ekrani tasan buyuk bir ucgen; ekran disi kisimlar kirpiliyor.
+    float2 corner = float2((vid << 1) & 2, vid & 2);
+
+    VSOut o;
+    // corner 0..2 -> NDC -1..3 (x), 1..-3 (y). Y ters cevriliyor cunku
+    // NDC'de yukari +1, texture UV'sinde asagi +1.
+    o.pos = float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    o.uv  = uvRect.xy + corner * uvRect.zw;
+    return o;
+}
+
+Texture2D    srcTex : register(t0);
+SamplerState srcSmp : register(s0);
+
+float4 PSMain(VSOut input) : SV_TARGET
+{
+    // Alpha 1.0 sabit: swap chain AlphaMode IGNORE, overlay opak.
+    return float4(srcTex.Sample(srcSmp, input.uv).rgb, 1.0);
+}
+)HLSL";
+
+// Constant buffer duzeni. D3D11 sabit tampon boyutunu 16'nin kati istiyor —
+// tek float4 tam olarak 16 bayt.
+struct UvParams
+{
+    float uvLeft;
+    float uvTop;
+    float uvWidth;
+    float uvHeight;
+};
+
+} // anonymous namespace
 
 // =============================================================================
 // Destructor
@@ -19,6 +94,12 @@ D3DRenderer::~D3DRenderer()
     // Sampler state'leri
     m_samplerLinear.Reset();
     m_samplerPoint.Reset();
+
+    // Shader hatti
+    m_rasterNoCull.Reset();
+    m_uvBuffer.Reset();
+    m_pixelShader.Reset();
+    m_vertexShader.Reset();
 
     // Context flush — bekleyen GPU komutlarini bitir
     if (m_context)
@@ -55,6 +136,9 @@ bool D3DRenderer::Initialize()
         return false;
 
     if (!CreateSamplerStates())
+        return false;
+
+    if (!CreateShaders())
         return false;
 
     LOG_INFO("D3DRenderer basariyla baslatildi (Feature Level: 0x{:X})",
@@ -242,6 +326,109 @@ bool D3DRenderer::CreateSamplerStates()
 }
 
 // =============================================================================
+// CreateShaders — buyutme hattini kur
+// =============================================================================
+// Shader'lari calisma zamaninda derliyoruz (D3DCompile). Alternatif, build
+// sirasinda fxc ile .cso uretip dosyadan okumakti; runtime derleme tek seferlik
+// birkac ms surer ve exe'nin yaninda ekstra dosya tasimayi gerektirmez.
+//
+// Python analojisi: kaynak kodu string olarak tutup exec() ile derlemek —
+// ama burada hedef GPU byte code.
+// =============================================================================
+bool D3DRenderer::CreateShaders()
+{
+    UINT compileFlags = D3DCOMPILE_ENABLE_STRICTNESS;
+#ifdef _DEBUG
+    compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#else
+    compileFlags |= D3DCOMPILE_OPTIMIZATION_LEVEL3;
+#endif
+
+    auto compileStage = [&](const char* entryPoint,
+                            const char* target,
+                            ComPtr<ID3DBlob>& blob) -> bool
+    {
+        ComPtr<ID3DBlob> errors;
+        // sizeof - 1: sondaki null terminator kaynak uzunluguna dahil degil.
+        const HRESULT compileHr = D3DCompile(
+            kShaderSource, sizeof(kShaderSource) - 1,
+            "BetterMagnifier.hlsl",
+            nullptr, nullptr,
+            entryPoint, target,
+            compileFlags, 0,
+            &blob, &errors);
+
+        if (FAILED(compileHr))
+        {
+            LOG_ERROR("Shader derlenemedi ({}): 0x{:08X} — {}",
+                entryPoint,
+                static_cast<unsigned long>(compileHr),
+                errors ? static_cast<const char*>(errors->GetBufferPointer())
+                       : "derleyici mesaj vermedi");
+            return false;
+        }
+        return true;
+    };
+
+    ComPtr<ID3DBlob> vsBlob;
+    if (!compileStage("VSMain", "vs_5_0", vsBlob))
+        return false;
+
+    ComPtr<ID3DBlob> psBlob;
+    if (!compileStage("PSMain", "ps_5_0", psBlob))
+        return false;
+
+    HRESULT hr = m_device->CreateVertexShader(
+        vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &m_vertexShader);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("CreateVertexShader basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    hr = m_device->CreatePixelShader(
+        psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_pixelShader);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("CreatePixelShader basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    // ── UV constant buffer ──
+    // Her frame UpdateSubresource ile yaziyoruz, DEFAULT usage yeterli.
+    D3D11_BUFFER_DESC cbDesc{};
+    cbDesc.ByteWidth      = sizeof(UvParams);
+    cbDesc.Usage          = D3D11_USAGE_DEFAULT;
+    cbDesc.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+    cbDesc.CPUAccessFlags = 0;
+
+    hr = m_device->CreateBuffer(&cbDesc, nullptr, &m_uvBuffer);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("UV constant buffer olusturulamadi: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    // ── Rasterizer: culling KAPALI ──
+    // Fullscreen ucgenin sarim yonu dogru olsa da, culling'i kapatmak
+    // "ekran neden siyah" sinifindan bir hata ihtimalini komple eliyor.
+    D3D11_RASTERIZER_DESC rasterDesc{};
+    rasterDesc.FillMode        = D3D11_FILL_SOLID;
+    rasterDesc.CullMode        = D3D11_CULL_NONE;
+    rasterDesc.DepthClipEnable = TRUE;
+
+    hr = m_device->CreateRasterizerState(&rasterDesc, &m_rasterNoCull);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Rasterizer state olusturulamadi: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    LOG_DEBUG("Shader hatti hazir (fullscreen ucgen + bilinear)");
+    return true;
+}
+
+// =============================================================================
 // CreateSwapChainForWindow — Overlay penceresi icin swap chain
 // =============================================================================
 //
@@ -335,29 +522,67 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
 // =============================================================================
 // RenderFrame — Captured texture'i zoom ile render et
 // =============================================================================
-void D3DRenderer::RenderFrame(
+bool D3DRenderer::RenderFrame(
     ID3D11Texture2D* srcTexture,
     size_t targetIndex,
     const RECT& srcRect)
 {
     if (targetIndex >= m_renderTargets.size())
-        return;
+        return false;
 
     auto& rt = m_renderTargets[targetIndex];
     if (!rt.swapChain || !rt.rtv)
-        return;
+        return false;
 
-    if (!srcTexture)
-        return;
+    if (!m_vertexShader || !m_pixelShader || !m_uvBuffer)
+        return false;
 
-    // NOT: Burada SRV olusturmaya CALISMIYORUZ.
-    // Desktop Duplication texture'lari D3D11_BIND_SHADER_RESOURCE flag'i
-    // OLMADAN gelir — CreateShaderResourceView her zaman basarisiz olur.
-    // Bu asamada CopySubresourceRegion kullaniyoruz, o SRV gerektirmiyor.
-    // Shader tabanli olceklendirmeye gecince (Adim 4) DD texture'i once
-    // SRV bind flag'li ara bir texture'a kopyalamak gerekecek.
+    // ── Yeni frame geldiyse kendi texture'imiza al ──
+    if (srcTexture)
+    {
+        D3D11_TEXTURE2D_DESC srcDesc{};
+        srcTexture->GetDesc(&srcDesc);
 
-    // ── Viewport ayarla ──
+        if (!EnsureSourceTexture(rt, srcDesc))
+            return false;
+
+        // Kopyalamadan once SRV bagini kes. Ayni kaynak hem shader girdisi
+        // hem kopya hedefi olamaz — D3D11 debug layer uyarir ve islem duser.
+        ID3D11ShaderResourceView* const noSrv[1] = { nullptr };
+        m_context->PSSetShaderResources(0, 1, noSrv);
+
+        m_context->CopyResource(rt.sourceTex.Get(), srcTexture);
+    }
+
+    // Hic frame gelmediyse cizecek bir sey yok (ilk karelerde olabilir).
+    if (!rt.sourceTex || !rt.sourceSrv)
+        return false;
+
+    // ── srcRect'i UV'ye cevir ──
+    // Piksel koordinati -> 0..1 arasi texture koordinati.
+    // Python analojisi: box = (l, t, r, b) piksel; UV = box / (W, H).
+    const long texW = static_cast<long>(rt.sourceWidth);
+    const long texH = static_cast<long>(rt.sourceHeight);
+    if (texW <= 0 || texH <= 0)
+        return false;
+
+    const long left   = std::clamp(srcRect.left,   0L, texW);
+    const long top    = std::clamp(srcRect.top,    0L, texH);
+    const long right  = std::clamp(srcRect.right,  left + 1, texW);
+    const long bottom = std::clamp(srcRect.bottom, top  + 1, texH);
+
+    const float fTexW = static_cast<float>(texW);
+    const float fTexH = static_cast<float>(texH);
+
+    UvParams params{};
+    params.uvLeft   = static_cast<float>(left) / fTexW;
+    params.uvTop    = static_cast<float>(top)  / fTexH;
+    params.uvWidth  = static_cast<float>(right  - left) / fTexW;
+    params.uvHeight = static_cast<float>(bottom - top)  / fTexH;
+
+    m_context->UpdateSubresource(m_uvBuffer.Get(), 0, nullptr, &params, 0, 0);
+
+    // ── Pipeline'i kur ──
     D3D11_VIEWPORT viewport{};
     viewport.TopLeftX = 0.0f;
     viewport.TopLeftY = 0.0f;
@@ -367,62 +592,124 @@ void D3DRenderer::RenderFrame(
     viewport.MaxDepth = 1.0f;
 
     m_context->RSSetViewports(1, &viewport);
+    m_context->RSSetState(m_rasterNoCull.Get());
     m_context->OMSetRenderTargets(1, rt.rtv.GetAddressOf(), nullptr);
+    m_context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    m_context->OMSetDepthStencilState(nullptr, 0);
 
-    // ── Clear ──
-    float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };  // Transparent
+    const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     m_context->ClearRenderTargetView(rt.rtv.Get(), clearColor);
 
-    // ── Source rect'ten crop + scale ──
-    // srcRect: kaynak texture'dan kesilecek bolge
-    // Bu bolge, zoom level ve focal point'e gore hesaplaniyor.
-    //
-    // Basit yaklasim: CopySubresourceRegion ile crop, sonra full-screen quad ile render.
-    // Simdilik CopySubresourceRegion + StretchRect equivalent kullaniyoruz.
-    // Shader-based render (vertex/pixel shader) ileride eklenecek.
+    // Vertex buffer ve input layout YOK — konumlar SV_VertexID'den geliyor.
+    m_context->IASetInputLayout(nullptr);
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-    // Source texture boyutlarini al
-    D3D11_TEXTURE2D_DESC srcDesc{};
-    srcTexture->GetDesc(&srcDesc);
+    m_context->VSSetShader(m_vertexShader.Get(), nullptr, 0);
+    m_context->VSSetConstantBuffers(0, 1, m_uvBuffer.GetAddressOf());
 
-    // Clamp source rect to texture bounds
-    D3D11_BOX sourceBox{};
-    sourceBox.left   = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.left), 0L, static_cast<long>(srcDesc.Width)));
-    sourceBox.top    = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.top), 0L, static_cast<long>(srcDesc.Height)));
-    sourceBox.right  = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.right), 0L, static_cast<long>(srcDesc.Width)));
-    sourceBox.bottom = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.bottom), 0L, static_cast<long>(srcDesc.Height)));
-    sourceBox.front  = 0;
-    sourceBox.back   = 1;
+    m_context->PSSetShader(m_pixelShader.Get(), nullptr, 0);
+    m_context->PSSetShaderResources(0, 1, rt.sourceSrv.GetAddressOf());
+    m_context->PSSetSamplers(0, 1, m_samplerLinear.GetAddressOf());
 
-    // Gecici texture'a crop
-    UINT cropW = sourceBox.right - sourceBox.left;
-    UINT cropH = sourceBox.bottom - sourceBox.top;
+    // Uc vertex = ekrani kaplayan tek ucgen.
+    m_context->Draw(3, 0);
 
-    if (cropW == 0 || cropH == 0)
-        return;
-
-    // Back buffer'a kopyala.
-    // ponytail: CopySubresourceRegion 1:1 kopyalar — OLCEKLEME YAPMAZ.
-    // Yani su an zoom seviyesi kirpma bolgesini kucultuyor ama goruntu
-    // buyumuyor. Gercek zoom icin shader pipeline gerekli (Adim 4):
-    // fullscreen quad + linear sampler + srcRect'i UV'ye ceviren constant buffer.
-    ComPtr<ID3D11Texture2D> backBuffer;
-    HRESULT hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-    if (SUCCEEDED(hr))
+#ifdef _DEBUG
+    // ── Tek kare dokumu (dogrulama araci) ──
+    // BM_DUMP_FRAME ayarliysa, isler oturduktan sonra bir kare diske yazilir.
+    // Present'ten ONCE, cizimden HEMEN SONRA — arada back buffer bozulmasin.
     {
-        // KRITIK: Back buffer su an render target olarak BAGLI.
-        // Bagli bir kaynaga CopySubresourceRegion yapilamaz — D3D11 debug layer
-        // "resource is bound as render target" hatasi verir ve kopya sessizce duser.
-        // Once RTV'yi cikar.
-        m_context->OMSetRenderTargets(0, nullptr, nullptr);
+        static const std::wstring dumpPath = []() -> std::wstring {
+            wchar_t buf[MAX_PATH]{};
+            const DWORD n = GetEnvironmentVariableW(L"BM_DUMP_FRAME", buf, MAX_PATH);
+            return (n > 0 && n < MAX_PATH) ? std::wstring(buf) : std::wstring{};
+        }();
 
-        m_context->CopySubresourceRegion(
-            backBuffer.Get(), 0,    // Hedef
-            0, 0, 0,                // Hedef offset
-            srcTexture, 0,          // Kaynak
-            &sourceBox              // Kaynak bolgesi
-        );
+        if (!dumpPath.empty())
+        {
+            // Kacinci karede dokulecek? BM_DUMP_AFTER ile ayarlanabilir
+            // (varsayilan 60 ~= 1 saniye). Fare takibi gibi zamana bagli
+            // davranislari dogrularken gec bir kare gerekiyor.
+            static const int dumpAtFrame = []() {
+                wchar_t buf[32]{};
+                const DWORD n = GetEnvironmentVariableW(L"BM_DUMP_AFTER", buf, 32);
+                const int parsed = (n > 0 && n < 32) ? _wtoi(buf) : 0;
+                return (parsed > 0) ? parsed : 60;
+            }();
+
+            static int frameCounter = 0;
+            if (++frameCounter == dumpAtFrame)
+                DumpBackBuffer(targetIndex, dumpPath.c_str());
+        }
     }
+#endif
+
+    return true;
+}
+
+// =============================================================================
+// EnsureSourceTexture — shader'da orneklenebilir ara texture
+// =============================================================================
+// Desktop Duplication texture'i D3D11_BIND_SHADER_RESOURCE olmadan geldigi
+// icin uzerinde SRV acilamiyor. Ayni boyut/formatta, SRV bind'li kendi
+// texture'imizi tutup her frame'i oraya kopyaliyoruz.
+//
+// Boyut degismediyse dokunmuyoruz — texture olusturmak pahali, her frame
+// yapilacak is degil.
+// =============================================================================
+bool D3DRenderer::EnsureSourceTexture(RenderTarget& rt, const D3D11_TEXTURE2D_DESC& srcDesc)
+{
+    if (rt.sourceTex && rt.sourceSrv
+        && rt.sourceWidth  == srcDesc.Width
+        && rt.sourceHeight == srcDesc.Height
+        && rt.sourceFormat == srcDesc.Format)
+    {
+        return true;
+    }
+
+    rt.sourceSrv.Reset();
+    rt.sourceTex.Reset();
+    rt.sourceWidth  = 0;
+    rt.sourceHeight = 0;
+    rt.sourceFormat = DXGI_FORMAT_UNKNOWN;
+
+    // Kaynagin tanimini temel al ama bayraklari kendimiz belirle:
+    // paylasim/staging bayraklarini tasimak istemiyoruz.
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width          = srcDesc.Width;
+    desc.Height         = srcDesc.Height;
+    desc.MipLevels      = 1;
+    desc.ArraySize      = 1;
+    desc.Format         = srcDesc.Format;
+    desc.SampleDesc     = { 1, 0 };
+    desc.Usage          = D3D11_USAGE_DEFAULT;
+    desc.BindFlags      = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = 0;
+    desc.MiscFlags      = 0;
+
+    HRESULT hr = m_device->CreateTexture2D(&desc, nullptr, &rt.sourceTex);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Ara kaynak texture'i olusturulamadi ({}x{}): 0x{:08X}",
+            srcDesc.Width, srcDesc.Height, static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    hr = m_device->CreateShaderResourceView(rt.sourceTex.Get(), nullptr, &rt.sourceSrv);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Ara texture icin SRV olusturulamadi: 0x{:08X}",
+            static_cast<unsigned long>(hr));
+        rt.sourceTex.Reset();
+        return false;
+    }
+
+    rt.sourceWidth  = srcDesc.Width;
+    rt.sourceHeight = srcDesc.Height;
+    rt.sourceFormat = srcDesc.Format;
+
+    LOG_DEBUG("Ara kaynak texture'i olusturuldu: {}x{}", srcDesc.Width, srcDesc.Height);
+    return true;
 }
 
 // =============================================================================
@@ -495,41 +782,120 @@ void D3DRenderer::RemoveRenderTarget(size_t index)
 {
     if (index < m_renderTargets.size())
     {
-        m_renderTargets[index].rtv.Reset();
-        m_renderTargets[index].swapChain.Reset();
-        m_renderTargets[index].targetWindow = nullptr;
+        auto& rt = m_renderTargets[index];
+        rt.sourceSrv.Reset();
+        rt.sourceTex.Reset();
+        rt.sourceWidth  = 0;
+        rt.sourceHeight = 0;
+        rt.sourceFormat = DXGI_FORMAT_UNKNOWN;
+        rt.rtv.Reset();
+        rt.swapChain.Reset();
+        rt.targetWindow = nullptr;
     }
 }
 
+#ifdef _DEBUG
 // =============================================================================
-// EnsureShaderResourceView
+// DumpBackBuffer — render sonucunu diske yaz (sadece Debug)
 // =============================================================================
-bool D3DRenderer::EnsureShaderResourceView(
-    ID3D11Texture2D* texture,
-    ComPtr<ID3D11ShaderResourceView>& srv)
+// Overlay penceresi ekran goruntusu araclarina gorunmez oldugu icin render'i
+// disaridan dogrulamanin tek yolu bu.
+//
+// Akis: back buffer (GPU) -> staging texture (CPU okunabilir) -> Map -> BMP.
+// GPU belleği CPU'dan dogrudan okunamaz; STAGING usage tam olarak bunun icin var.
+//
+// Python analojisi: GPU tensor'unu .cpu().numpy() ile almak.
+// =============================================================================
+bool D3DRenderer::DumpBackBuffer(size_t targetIndex, const wchar_t* path)
 {
-    if (!texture)
+    if (targetIndex >= m_renderTargets.size() || !path)
+        return false;
+
+    auto& rt = m_renderTargets[targetIndex];
+    if (!rt.swapChain)
+        return false;
+
+    ComPtr<ID3D11Texture2D> backBuffer;
+    HRESULT hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    if (FAILED(hr))
         return false;
 
     D3D11_TEXTURE2D_DESC desc{};
-    texture->GetDesc(&desc);
+    backBuffer->GetDesc(&desc);
 
-    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-    srvDesc.Format                    = desc.Format;
-    srvDesc.ViewDimension             = D3D11_SRV_DIMENSION_TEXTURE2D;
-    srvDesc.Texture2D.MostDetailedMip = 0;
-    srvDesc.Texture2D.MipLevels       = 1;
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage          = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags      = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags      = 0;
 
-    HRESULT hr = m_device->CreateShaderResourceView(texture, &srvDesc, &srv);
+    ComPtr<ID3D11Texture2D> staging;
+    hr = m_device->CreateTexture2D(&stagingDesc, nullptr, &staging);
     if (FAILED(hr))
     {
-        // Desktop Duplication texture'lari genellikle SRV bind flag'i olmadan gelir.
-        // Bu durumda ara (staging) texture'a kopyalamak gerekir.
-        // Simdilik hatayi sessizce gec — CopySubresourceRegion zaten SRV gerektirmiyor.
+        LOG_ERROR("Dump: staging texture olusturulamadi: 0x{:08X}",
+            static_cast<unsigned long>(hr));
         return false;
     }
 
-    return true;
+    m_context->CopyResource(staging.Get(), backBuffer.Get());
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr = m_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Dump: Map basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    // ── 32-bit BMP yaz ──
+    // biHeight NEGATIF = top-down satir sirasi (bizim bellek duzenimiz boyle).
+    const DWORD pixelBytes = desc.Width * desc.Height * 4u;
+
+    BITMAPFILEHEADER fileHeader{};
+    fileHeader.bfType    = 0x4D42;  // "BM"
+    fileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    fileHeader.bfSize    = fileHeader.bfOffBits + pixelBytes;
+
+    BITMAPINFOHEADER infoHeader{};
+    infoHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    infoHeader.biWidth       = static_cast<LONG>(desc.Width);
+    infoHeader.biHeight      = -static_cast<LONG>(desc.Height);
+    infoHeader.biPlanes      = 1;
+    infoHeader.biBitCount    = 32;
+    infoHeader.biCompression = BI_RGB;
+
+    bool ok = false;
+    HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        DWORD written = 0;
+        WriteFile(file, &fileHeader, sizeof(fileHeader), &written, nullptr);
+        WriteFile(file, &infoHeader, sizeof(infoHeader), &written, nullptr);
+
+        // Satir satir yaziyoruz: GPU'nun satir adimi (RowPitch) genelde
+        // genislikten buyuk (hizalama dolgusu). Dolguyu atlamak zorundayiz.
+        const auto* src = static_cast<const uint8_t*>(mapped.pData);
+        for (UINT y = 0; y < desc.Height; ++y)
+        {
+            WriteFile(file, src + static_cast<size_t>(y) * mapped.RowPitch,
+                      desc.Width * 4u, &written, nullptr);
+        }
+
+        CloseHandle(file);
+        ok = true;
+        LOG_INFO("Dump: back buffer yazildi ({}x{}) -> {}",
+            desc.Width, desc.Height, "BM_DUMP_FRAME");
+    }
+    else
+    {
+        LOG_ERROR("Dump: dosya acilamadi ({})", GetLastError());
+    }
+
+    m_context->Unmap(staging.Get(), 0);
+    return ok;
 }
+#endif // _DEBUG
 
 } // namespace BetterMagnifier

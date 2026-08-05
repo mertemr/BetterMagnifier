@@ -40,6 +40,24 @@ struct RenderTarget
     HWND                                           targetWindow = nullptr;
     UINT                                           width  = 0;
     UINT                                           height = 0;
+
+    // ── Ara kaynak texture'i ──
+    // Desktop Duplication texture'lari D3D11_BIND_SHADER_RESOURCE OLMADAN
+    // gelir, yani shader'da dogrudan ornekleneMEZ. Her frame'i once bu
+    // texture'a kopyalayip SRV'yi bunun uzerinde aciyoruz.
+    //
+    // Neden monitor BASINA? Monitorlerin cozunurlugu farkli (2560x1440 ve
+    // 1920x1080). Tek ortak texture olsaydi iki monitorde de zoom acikken
+    // her frame yeniden olusturmak gerekirdi.
+    //
+    // Ikinci gorevi: son frame'in kopyasini SAKLAMAK. Ekran degismediginde
+    // Desktop Duplication yeni frame vermez; fare hareket ettiginde zoom
+    // bolgesinin yine de kaymasi icin elimizde onceki goruntu kalmali.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>          sourceTex;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> sourceSrv;
+    UINT                                             sourceWidth  = 0;
+    UINT                                             sourceHeight = 0;
+    DXGI_FORMAT                                      sourceFormat = DXGI_FORMAT_UNKNOWN;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,11 +81,16 @@ public:
     bool CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, size_t index);
 
     // ── Rendering ──
-    // Captured texture'i zoom parametreleriyle render et.
-    // srcTexture: DXGICapture'dan gelen GPU texture
+    // srcRect bolgesini TUM ekrani kaplayacak sekilde olceklendirip cizer.
+    //
+    // srcTexture: DXGICapture'dan gelen yeni frame.
+    //             nullptr verilirse son frame tekrar kullanilir — ekran
+    //             degismedigi halde fare hareket ettiginde gerekiyor.
     // targetIndex: Hangi monitore (swap chain'e) render edilecek
-    // srcRect: Source texture'dan kesilecek bolge (zoom bolgesi)
-    void RenderFrame(
+    // srcRect: Kaynak texture'dan buyutulecek bolge (zoom bolgesi)
+    //
+    // Donus: cizim yapildiysa true. false ise Present cagrilmamali.
+    bool RenderFrame(
         ID3D11Texture2D* srcTexture,
         size_t targetIndex,
         const RECT& srcRect);
@@ -88,14 +111,29 @@ public:
     // ── Cleanup ──
     void RemoveRenderTarget(size_t index);
 
+#ifdef _DEBUG
+    // Back buffer'i BMP olarak diske yazar (Present'ten ONCE cagrilmali —
+    // FLIP_DISCARD'da Present sonrasi icerik tanimsiz).
+    //
+    // Neden var? Overlay penceresi WDA_EXCLUDEFROMCAPTURE ile korunuyor, yani
+    // ekran goruntusu araclarinda GORUNMUYOR. Render'in dogru olup olmadigini
+    // disaridan dogrulamanin baska yolu yok.
+    //
+    // BM_DUMP_FRAME ortam degiskeni bir dosya yoluna ayarlanirsa otomatik
+    // olarak tek kare dokulur.
+    bool DumpBackBuffer(size_t targetIndex, const wchar_t* path);
+#endif
+
 private:
     // ── Device Creation ──
     bool CreateDevice();
     bool CreateSamplerStates();
+    bool CreateShaders();
 
     // ── Internal Render Helpers ──
-    bool EnsureShaderResourceView(ID3D11Texture2D* texture,
-                                  Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& srv);
+    // Hedefin ara texture'ini kaynak boyut/formatina gore hazirlar.
+    // Boyut degismediyse hicbir sey yapmaz (her frame yeniden olusturmayalim).
+    bool EnsureSourceTexture(RenderTarget& rt, const D3D11_TEXTURE2D_DESC& srcDesc);
 
     // ── D3D11 Core ──
     Microsoft::WRL::ComPtr<ID3D11Device1>        m_device;
@@ -106,6 +144,15 @@ private:
     // ── Sampler States ──
     Microsoft::WRL::ComPtr<ID3D11SamplerState>    m_samplerLinear;   // Bilinear
     Microsoft::WRL::ComPtr<ID3D11SamplerState>    m_samplerPoint;    // Nearest-neighbor
+
+    // ── Shader Pipeline ──
+    // Fullscreen ucgen + bilinear ornekleme = gercek buyutme.
+    // Vertex buffer YOK: vertex shader konumlari SV_VertexID'den uretiyor,
+    // bu yuzden input layout da gerekmiyor.
+    Microsoft::WRL::ComPtr<ID3D11VertexShader>    m_vertexShader;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader>     m_pixelShader;
+    Microsoft::WRL::ComPtr<ID3D11Buffer>          m_uvBuffer;    // float4: UV bolgesi
+    Microsoft::WRL::ComPtr<ID3D11RasterizerState> m_rasterNoCull;
 
     // ── Per-Monitor Render Targets ──
     std::vector<RenderTarget> m_renderTargets;
