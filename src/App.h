@@ -1,11 +1,7 @@
 #pragma once
 
-// =============================================================================
-// App.h — Ana Uygulama Sinifi (Orkestrator)
-// =============================================================================
-// Tum component'lari (MonitorManager, DXGICapture, D3DRenderer, Overlay,
-// HotkeyManager, TrayIcon) init eden ve yoneten RAII sinifi.
-// =============================================================================
+// Application orchestrator. Owns and sequences every component; does no real
+// work itself.
 
 #ifndef BETTER_MAGNIFIER_APP_H
 #define BETTER_MAGNIFIER_APP_H
@@ -23,7 +19,6 @@
 
 #include <windows.h>
 #include <vector>
-#include <memory>
 #include <array>
 #include <chrono>
 
@@ -38,54 +33,46 @@ public:
     App(const App&) = delete;
     App& operator=(const App&) = delete;
 
-    // ── Lifecycle ──
     bool Initialize(HINSTANCE hInstance);
     int  Run();
     void Shutdown();
 
-    // GUI thread bu pointer'lari okur. App yasadigi surece gecerli.
+    // Valid for as long as App lives.
     StatusSnapshot* Status()   { return &m_status; }
     SettingsStore*  Settings() { return &m_settings; }
 
 private:
-    // ── Internal Setup ──
     bool CreateMessageWindow();
     bool InitializeComponents();
     void SetupCallbacks();
 
-    // Snapshot'in statik monitor bilgilerini doldur (init ve display change'de)
+    // Fill the snapshot's static monitor fields (init and display change).
     void PublishMonitorInfo();
 
-    // Gorunur overlay'lerin topmost'unu yeniden iddia et.
-    // Rate limit'li: EVENT_OBJECT_SHOW cok sik tetikleniyor, her seferinde
-    // SetWindowPos cagirmak z-order gurultusu yaratir.
+    // Rate-limited: EVENT_OBJECT_SHOW fires constantly and calling
+    // SetWindowPos on every one of them is z-order noise.
     void AssertOverlaysTopmost();
 
-    // ── Per-Frame ──
     void Update();
     void RenderMonitor(size_t monitorIndex);
 
-    // ── Event Handlers ──
     void OnToggleZoom();
     void OnFreeze();
-    // Zoom'u bir adim degistir. Zoom kapaliysa ve yon +1 ise ACAR;
-    // minZoom'a inildiyse ve yon -1 ise KAPATIR.
-    // Kaynaklari: Ctrl+Alt+tekerlek, Win+arti, Win+eksi.
+
+    // Turns zoom ON when it is off and direction is positive; turns it OFF
+    // when stepping down reaches minZoom.
     void OnZoomStep(int direction);
+
     void OnDisplayChange();
     void OnFocusChanged(HWND focused);
-
-    // Ayarlar degistiginde uygula (WM_APP_SETTINGS_CHANGED)
     void ApplySettings();
 
-    // wParam'i monitor indeksine cevir. kFocusedMonitor = farenin oldugu monitor.
+    // kFocusedMonitor resolves to whichever monitor holds the cursor.
     bool ResolveMonitorIndex(WPARAM wparam, size_t& outIndex) const;
 
-    // ── Message Window WndProc ──
     static LRESULT CALLBACK MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-    // ── Components ──
-    HINSTANCE                   m_hInstance = nullptr;
+    HINSTANCE                   m_hInstance   = nullptr;
     HWND                        m_messageHwnd = nullptr;
 
     MonitorManager              m_monitorManager;
@@ -97,36 +84,29 @@ private:
 
     SettingsStore               m_settings;
     InputThread                 m_inputThread;
-
-    // Fare gercekten hareket etti mi? Klavye odagi takibi ile cakismasin diye.
-    POINT m_lastCursorPos{ -1, -1 };
-
-    // GUI thread'in okudugu canli durum. Render thread her frame yazar.
     StatusSnapshot              m_status;
 
-    // FPS olcumu — monitor basina son frame zamani
+    // Did the cursor actually move? Without this the per-frame mouse tracking
+    // overwrites whatever focus tracking just set.
+    POINT m_lastCursorPos{ -1, -1 };
+
     std::array<std::chrono::steady_clock::time_point, StatusSnapshot::kMaxMonitors> m_lastFrameTime{};
 
-    // Son sunulan zoom bolgesi. Ne ekran ne de capa degismediyse yeniden
-    // cizip Present etmenin anlami yok — bos yere vSync bekleyip GPU
-    // yakiyoruz. Bu, kasma hissini azaltan ikinci parca.
+    // Last presented source region. If neither the screen nor the anchor
+    // changed there is nothing new to show, and presenting anyway just waits
+    // on vSync and burns GPU.
     std::array<RECT, StatusSnapshot::kMaxMonitors> m_lastSrcRect{};
 
-    // Bu turda herhangi bir monitore Present edildi mi? Edilmediyse loop'u
-    // vSync bloklamiyor, o yuzden elle kisa bir uyku gerekiyor.
+    // Nothing presented this tick means vSync did not pace the loop, so it
+    // needs an explicit sleep.
     bool m_presentedThisTick = false;
 
-    // Topmost'u en son ne zaman yeniden iddia ettik?
-    // Menuler bizden sonra topmost olarak olusturuldugu icin uzerimize
-    // cikiyorlar (bkz. OverlayWindow::EnsureTopmost). Her frame cagirmak
-    // gereksiz; periyodik yetiyor.
     std::chrono::steady_clock::time_point m_lastTopmostAssert{};
 
     bool m_running     = false;
     bool m_initialized = false;
 
-    // Static instance for WndProc
-    static App* s_instance;
+    static App* s_instance;   // for the static WndProc
 
     static constexpr wchar_t kMsgWindowClass[] = L"BetterMagnifierMsg";
 };

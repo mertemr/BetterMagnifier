@@ -1,26 +1,17 @@
 #pragma once
 
-// =============================================================================
-// StatusSnapshot.h — Motor -> GUI canli durum aktarimi
-// =============================================================================
-// Render thread her frame buraya yazar, GUI thread 10 Hz okur.
+// Live per-monitor state, written by the render thread every frame.
 //
-// Neden mutex degil atomic?
-//   Render thread'in hot path'inde kilit almasi frame suresini kestirilemez
-//   yapar — projenin butun amaci laggsizlik. std::atomic<float> ve
-//   std::atomic<bool> x64'te lock-free.
+// Atomics rather than a mutex: taking a lock on the render thread's hot path
+// makes frame time unpredictable, and low latency is the whole point of the
+// project. std::atomic<float> and <bool> are lock-free on x64.
 //
-// Neden 10 Hz okuma yeter?
-//   Ayar panelinde 60 Hz gostergeye kimse bakmiyor. 10 Hz'de cekisme sifira
-//   iner, insan gozu farki gormez.
+// Fields are individually atomic, the struct as a whole is not. A reader can
+// see a fresh zoomLevel next to a one-frame-old isActive. Fine for a display,
+// nothing decides anything on it.
 //
-// Tutarlilik notu: alanlar tek tek atomic, yapinin TAMAMI atomic degil.
-// Yani GUI ayni monitorun zoomLevel'ini yeni, isActive'ini bir frame eski
-// okuyabilir. Gosterge icin kabul edilebilir — kritik karar alinmiyor.
-//
-// Python analojisi: her alan icin ayri bir thread-safe kutucuk.
-// Yazan beklemez, okuyan beklemez.
-// =============================================================================
+// ponytail: nothing reads this yet. It is groundwork for the control panel
+// (see docs/superpowers/plans). Delete it if that plan is dropped.
 
 #ifndef BETTER_MAGNIFIER_STATUS_SNAPSHOT_H
 #define BETTER_MAGNIFIER_STATUS_SNAPSHOT_H
@@ -33,27 +24,21 @@ namespace BetterMagnifier {
 
 struct MonitorStatus
 {
-    // ── Canli alanlar (her frame guncellenir) ──
+    // Updated every frame
     std::atomic<float> zoomLevel{1.0f};
     std::atomic<bool>  isActive{false};
     std::atomic<bool>  isFrozen{false};
-
-    // DXGICapture::IsInitialized() && !NeedsReinit()
-    std::atomic<bool>  captureOk{false};
-
-    // SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) basarili miydi?
-    // false ise overlay kendini yakalar — feedback loop riski, panelde uyari.
-    std::atomic<bool>  captureExcluded{false};
-
+    std::atomic<bool>  captureOk{false};        // initialised && !needs reinit
+    std::atomic<bool>  captureExcluded{false};  // WDA_EXCLUDEFROMCAPTURE took
     std::atomic<float> fps{0.0f};
 
-    // ── Statik bilgi (sadece init ve WM_DISPLAYCHANGE'de guncellenir) ──
+    // Updated only on init and WM_DISPLAYCHANGE
     static constexpr size_t kNameCapacity = 64;
 
-    // deviceName atomic DEGIL: sadece WM_DISPLAYCHANGE aninda yazilir.
-    // Kotu senaryoda GUI yarim yazilmis bir isim okur — etiket bozuk gorunur,
-    // bir sonraki tick'te duzelir. Cokme riski yok: sabit boyutlu dizi,
-    // her zaman null-terminated yaziliyor (wcsncpy_s + _TRUNCATE).
+    // Not atomic: written only during WM_DISPLAYCHANGE. Worst case a reader
+    // sees a half-written name and the label looks wrong for one tick. No
+    // crash risk: fixed-size array, always null-terminated (wcsncpy_s +
+    // _TRUNCATE).
     wchar_t             deviceName[kNameCapacity]{};
 
     std::atomic<int>    width{0};
@@ -72,9 +57,9 @@ public:
     StatusSnapshot(const StatusSnapshot&) = delete;
     StatusSnapshot& operator=(const StatusSnapshot&) = delete;
 
-    // Bounds-check'li erisim. Sinir disi index son elemana duser —
-    // GUI thread'in yaris kosulunda cokmemesi icin (monitor sayisi
-    // WM_DISPLAYCHANGE ile degisebilir, GUI bir tick geride olabilir).
+    // Out-of-range index clamps to the last slot rather than being undefined:
+    // monitor count changes on WM_DISPLAYCHANGE and a reader can be a tick
+    // behind.
     MonitorStatus& Monitor(size_t i)
     {
         return m_monitors[i < kMaxMonitors ? i : kMaxMonitors - 1];
@@ -85,10 +70,9 @@ public:
         return m_monitors[i < kMaxMonitors ? i : kMaxMonitors - 1];
     }
 
-    std::atomic<size_t> monitorCount{0};
+    std::atomic<size_t>   monitorCount{0};
 
-    // HotkeyManager::Reregister sonucu. bit 0 = toggle basarisiz,
-    // bit 1 = freeze basarisiz. Panel bunu kirmizi uyari satirinda gosterecek.
+    // HotkeyManager::Reregister result. Bit 0 = toggle failed, bit 1 = freeze.
     std::atomic<unsigned> hotkeyFailedMask{0};
 
 private:

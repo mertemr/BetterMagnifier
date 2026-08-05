@@ -1,25 +1,17 @@
 #pragma once
 
-// =============================================================================
-// InputThread.h — Low-level hook'lar icin ayri thread
-// =============================================================================
+// Low-level input hooks, on their own thread.
 //
-// NEDEN AYRI THREAD (bu dosyanin butun varlik sebebi):
-//   Low-level hook'lar (WH_MOUSE_LL, WH_KEYBOARD_LL) onlari KURAN thread'in
-//   mesaj kuyrugunda cagrilir. Render thread'imiz Present(vSync) ile bir
-//   frame boyunca blokluyor. Hook orada olursa sistemdeki HER fare/tus olayi
-//   bizim frame'imizin arkasinda bekler — makinede her yerde girdi gecikmesi.
+// Why a separate thread, the whole reason this file exists: low-level hooks
+// (WH_MOUSE_LL, WH_KEYBOARD_LL) are invoked on the message queue of the thread
+// that INSTALLED them. The render thread blocks in Present for up to a frame,
+// so a hook living there puts every mouse and key event in the system behind
+// our frame. Exceed LowLevelHooksTimeout (300 ms by default) and Windows
+// silently uninstalls the hook.
 //
-//   Ustune Windows'un LowLevelHooksTimeout'u (varsayilan 300 ms) asilirsa
-//   hook'u sessizce devre disi birakiyor.
+// This thread does no real work: callbacks PostMessage and return.
 //
-//   Bu thread hicbir agir is yapmaz: hook callback'i sadece PostMessage eder
-//   ve doner. Gercek isi render thread yapar.
-//
-// Python analojisi: pynput listener'ini ayri bir thread'de calistirmak.
-// Fark: Win32'de hook'un yasadigi thread'in GetMessage loop'u olmak ZORUNDA,
-// yoksa callback hic cagrilmaz.
-// =============================================================================
+// A hook's thread MUST run a GetMessage loop or the callback is never invoked.
 
 #ifndef BETTER_MAGNIFIER_INPUT_THREAD_H
 #define BETTER_MAGNIFIER_INPUT_THREAD_H
@@ -41,24 +33,17 @@ public:
     InputThread(const InputThread&) = delete;
     InputThread& operator=(const InputThread&) = delete;
 
-    // Thread'i baslat ve hook'lari kur.
+    // targetHwnd receives the PostMessage traffic (the message window).
     //
-    // targetHwnd  : olaylarin PostMessage ile gonderilecegi pencere (mesaj penceresi)
-    // initialMode : klavye odagi takibi aktif mi
-    // hijackMagnifierKeys : Windows Magnifier kisayollarini devral
-    //
-    // Hook'lar thread ICINDE kurulur; Start() donmeden once kurulum
-    // tamamlanmis olur (promise/future ile senkron bekleme).
+    // Hooks are installed inside the thread; Start does not return until that
+    // has either succeeded or failed (promise/future handoff).
     bool Start(HWND targetHwnd, FollowMode initialMode, bool hijackMagnifierKeys);
 
-    // Thread'e WM_QUIT postala, hook'lari kaldir, join et. Idempotent.
+    // Post WM_QUIT to the thread, remove hooks, join. Idempotent.
     void Stop();
 
-    bool IsRunning() const { return m_running.load(std::memory_order_acquire); }
-
-    // ── Canli ayar degisimi (thread-safe, atomic) ──
-    // Hook'lari kur/kaldir yapmaktansa atomic bayrak okumak hem ucuz
-    // hem yaris kosulsuz.
+    // Live setting changes. Reading an atomic flag in the callback is cheaper
+    // and race-free compared to installing and removing hooks.
     void SetFollowMode(FollowMode mode);
     void SetHijackMagnifierKeys(bool enable);
 
@@ -75,11 +60,9 @@ private:
 
     std::thread        m_thread;
     std::atomic<bool>  m_running{false};
+    std::atomic<DWORD> m_threadId{0};   // Stop() posts here
 
-    // Thread'e mesaj postalamak icin — Stop() bunu kullanir
-    std::atomic<DWORD> m_threadId{0};
-
-    std::atomic<FollowMode> m_followMode{FollowMode::MouseAndFocus};
+    std::atomic<FollowMode> m_followMode{FollowMode::Mouse};
     std::atomic<bool>       m_hijackMagnifierKeys{true};
 
     HWND          m_target       = nullptr;
@@ -87,14 +70,13 @@ private:
     HHOOK         m_keyboardHook = nullptr;
     HWINEVENTHOOK m_focusHook    = nullptr;
 
-    // Menu/popup dogumunu yakalar (EVENT_SYSTEM_MENUPOPUPSTART).
-    // Ayri bir hook cunku o olay 0x0006, object olaylari 0x8002+ —
-    // tek bir aralikta birlestirmek arada kalan onlarca olayi da cekerdi.
+    // Separate hook for EVENT_SYSTEM_MENUPOPUPSTART: that event is 0x0006
+    // while the object events are 0x8002+, and one range spanning both would
+    // drag in dozens of unrelated events.
     HWINEVENTHOOK m_popupHook    = nullptr;
 
-    // Win32 hook callback'leri static olmak zorunda (calling convention).
-    // Bu yuzden global instance pointer'i tutuyoruz. Uygulamada tek
-    // InputThread var ve olmasi da gerekmiyor.
+    // Win32 hook callbacks must be static (calling convention), hence the
+    // instance pointer. There is only ever one InputThread.
     static InputThread* s_instance;
 };
 

@@ -1,11 +1,7 @@
 #pragma once
 
-// =============================================================================
-// OverlayWindow.h — Per-Monitor Transparent Overlay
-// =============================================================================
-// Her monitoru tam kaplayan, seffaf, click-through overlay penceresi.
-// Zoom aktif oldugunda gorunur, pasif oldugunda gizlenir.
-// =============================================================================
+// Full-screen click-through overlay, one per monitor. Shown while that
+// monitor's zoom is active, hidden otherwise.
 
 #ifndef BETTER_MAGNIFIER_OVERLAY_WINDOW_H
 #define BETTER_MAGNIFIER_OVERLAY_WINDOW_H
@@ -28,37 +24,26 @@ public:
     OverlayWindow(OverlayWindow&& other) noexcept;
     OverlayWindow& operator=(OverlayWindow&& other) noexcept;
 
-    // Monitor bilgileriyle overlay penceresi olustur
     bool Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, size_t monitorIndex);
 
-    // Gorunurluk
     void Show();
     void Hide();
     bool IsVisible() const;
 
-    // Boyut guncelleme (DPI/resolution degisimi)
     void Reposition(const RECT& bounds);
 
-    // ── Topmost'u yeniden iddia et ──
-    // Menuler ve popup'lar da HWND_TOPMOST ile olusturuluyor ve BIZDEN SONRA
-    // yaratildiklari icin z-order'da uzerimize cikiyorlar. Sonuc: kullanici
-    // popup'i IKI KEZ goruyor — bir kez bizim buyutulmus capture'imizin
-    // icinde, bir kez de kendi penceresi olarak buyutulmemis halde.
-    //
-    // Periyodik olarak topmost'u yeniden iddia edince ustte kaliyoruz ve
-    // popup sadece buyutulmus halde gorunuyor.
-    //
-    // SWP_NOACTIVATE sart: focus calmamaliyiz.
+    // Menus and popups are also HWND_TOPMOST and are created after us, so they
+    // end up above the overlay and the user sees them twice: once inside our
+    // magnified capture, once as their own unmagnified window. Re-asserting
+    // topmost keeps us above them.
     void EnsureTopmost();
 
     HWND GetHwnd() const { return m_hwnd; }
     size_t GetMonitorIndex() const { return m_monitorIndex; }
 
-    // SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) basarili miydi?
-    // false ise overlay kendini yakalar (feedback loop). Panelde uyari gosterilir.
+    // False means the overlay captures itself, i.e. a feedback loop.
     bool IsExcludedFromCapture() const { return m_excludedFromCapture; }
 
-    // Window class kaydi (bir kez yapilir)
     static bool RegisterWindowClass(HINSTANCE hInstance);
 
 private:

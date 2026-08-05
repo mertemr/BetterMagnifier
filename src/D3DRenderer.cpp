@@ -91,9 +91,7 @@ D3DRenderer::~D3DRenderer()
     // Render target'lari temizle (swap chain'ler dahil)
     m_renderTargets.clear();
 
-    // Sampler state'leri
     m_samplerLinear.Reset();
-    m_samplerPoint.Reset();
 
     // Shader hatti
     m_rasterNoCull.Reset();
@@ -324,15 +322,6 @@ bool D3DRenderer::CreateSamplerStates()
     if (FAILED(hr))
     {
         LOG_ERROR("Linear sampler olusturulamadi: 0x{:08X}", static_cast<unsigned long>(hr));
-        return false;
-    }
-
-    // Point sampler
-    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-    hr = m_device->CreateSamplerState(&sampDesc, &m_samplerPoint);
-    if (FAILED(hr))
-    {
-        LOG_ERROR("Point sampler olusturulamadi: 0x{:08X}", static_cast<unsigned long>(hr));
         return false;
     }
 
@@ -771,42 +760,6 @@ void D3DRenderer::Present(size_t targetIndex, bool vSync)
     }
 }
 
-// =============================================================================
-// ResizeTarget
-// =============================================================================
-void D3DRenderer::ResizeTarget(size_t targetIndex, UINT width, UINT height)
-{
-    if (targetIndex >= m_renderTargets.size())
-        return;
-
-    auto& rt = m_renderTargets[targetIndex];
-    if (!rt.swapChain)
-        return;
-
-    // RTV'yi release et (resize oncesi zorunlu)
-    rt.rtv.Reset();
-    m_context->Flush();
-
-    HRESULT hr = rt.swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
-    if (FAILED(hr))
-    {
-        LOG_ERROR("ResizeBuffers basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
-        return;
-    }
-
-    // Yeni RTV olustur
-    ComPtr<ID3D11Texture2D> backBuffer;
-    hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-    if (SUCCEEDED(hr))
-    {
-        m_device->CreateRenderTargetView(backBuffer.Get(), nullptr, &rt.rtv);
-    }
-
-    rt.width  = width;
-    rt.height = height;
-
-    LOG_DEBUG("SwapChain resize: index={}, {}x{}", targetIndex, width, height);
-}
 
 // =============================================================================
 // RemoveRenderTarget
