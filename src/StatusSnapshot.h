@@ -10,8 +10,7 @@
 // see a fresh zoomLevel next to a one-frame-old isActive. Fine for a display,
 // nothing decides anything on it.
 //
-// ponytail: nothing reads this yet. It is groundwork for the control panel
-// (see docs/superpowers/plans). Delete it if that plan is dropped.
+// The reader is ControlPanel, on its own thread, at 10 Hz.
 
 #ifndef BETTER_MAGNIFIER_STATUS_SNAPSHOT_H
 #define BETTER_MAGNIFIER_STATUS_SNAPSHOT_H

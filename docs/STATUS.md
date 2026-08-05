@@ -32,7 +32,11 @@ Runtime shortcuts: `Ctrl+Alt+Z` toggle, `Ctrl+Alt+X` freeze, `Win+Plus` /
 `Win+Minus` step, `Ctrl+Alt+wheel` step, `Win+middle-click` freeze,
 **`Ctrl+Alt+Shift+Q` panic exit**.
 
-Settings live at `%APPDATA%\BetterMagnifier\settings.ini`.
+Settings live at `%APPDATA%\BetterMagnifier\settings.ini` and are editable at
+runtime from the control panel: **tray icon, right-click, Settings**.
+
+The build now needs `/restore`, because the control panel pulls in the Windows
+App SDK through `PackageReference`. `bm.ps1` passes it.
 
 ## Architecture
 
@@ -44,11 +48,16 @@ RENDER THREAD (main, MTA)
   the hidden message window, RegisterHotKey.
         ▲ PostMessage (WM_APP_*)          │ atomic writes
         │                                 ▼
-  INPUT THREAD                      StatusSnapshot
-  WH_MOUSE_LL, WH_KEYBOARD_LL,      (lock-free, nothing reads it yet)
+  INPUT THREAD                      StatusSnapshot  ◄── read at 10 Hz
+  WH_MOUSE_LL, WH_KEYBOARD_LL,      (lock-free)         by the GUI thread
   EVENT_OBJECT_FOCUS / _SHOW,
   EVENT_SYSTEM_MENUPOPUPSTART,
   its own GetMessage loop.
+
+  GUI THREAD (STA)
+  WinUI 3 XAML island in a Win32 host window. Application::Start owns this
+  thread's message loop, so work is handed to it with
+  DispatcherQueue.TryEnqueue, never PostThreadMessage.
 ```
 
 **Why the input thread exists:** low-level hooks run on the message queue of
@@ -84,6 +93,8 @@ also stays in bounds for every anchor position by construction.
 - `Ctrl+Alt+Shift+Q` panic exit
 - Elevation manifest (verified with `mt.exe` against the built exe)
 - Recovery after locking the workstation (see below)
+- The control panel's XAML island comes up inside the real, elevated app
+  (`Control panel opened` in the log, on its own thread, no warnings)
 
 ### Works, not verified by me
 
@@ -92,6 +103,17 @@ Visual or interactive behaviour that cannot be checked from a script:
 - Click alignment while zoomed
 - `Win+middle-click` freeze
 - Whether elevation now lets the hook swallow `Win+Plus`
+- **Everything the control panel does after opening**: whether the cards read
+  correctly, whether the sliders and toggles drive the right monitor, whether a
+  settings change survives a restart, and whether closing the app with the panel
+  open still exits cleanly. See [Control panel](#control-panel).
+
+Automated testing hits a wall here, and it is worth writing down: the app
+requires administrator rights, so a script in a normal shell cannot reach its
+windows. `PostMessage` is dropped by UIPI, and on this machine `FindWindow`
+could not see the app's windows even for a non-elevated build, while
+`EnumWindows` could. `BM_OPEN_PANEL` exists to get around all of it - the app
+opens the panel itself and reports through its own log.
 
 ### Known broken or unresolved
 
@@ -114,6 +136,56 @@ the user's call, not something this project changes.
 vSync in layered mode. The panic exit exists because of it. If it recurs, the
 next step is instrumentation, not guessing: time `Present` and log the
 durations.
+
+## Control panel
+
+WinUI 3, built in code, hosted as a XAML island on its own STA thread. Two tabs.
+
+**Status tab** - one card per monitor, refreshed at 10 Hz from `StatusSnapshot`:
+device name, resolution, refresh rate, DPI, an on/off switch, a zoom slider, the
+live zoom factor, FPS, capture health and a freeze button. The switch, slider and
+freeze button drive that monitor only, which is what per-monitor zoom is for.
+
+**Settings tab** - everything in `settings.ini`, applied without a restart: both
+hotkeys, the Magnifier-shortcut takeover, follow mode, zoom minimum/maximum/step,
+start-with-Windows, remember-zoom. It also shows the INI's path and has a *Reload
+from disk* button, so the file can be edited by hand and picked up live.
+
+Order matters on the way out: the panel writes `SettingsStore`, saves it, and only
+then posts `WM_APP_SETTINGS_CHANGED`. Reversed, the engine would read values that
+had not been written yet.
+
+Three things in here are not what the plan said, because the plan was written
+before the spike was fixed. All three are load-bearing:
+
+- `Application::Start` is called, and its callback constructs an `Application`.
+  Constructing one directly gives `RPC_E_WRONG_THREAD`, and skipping the
+  construction makes `Application::Current()` null - then the first call on it is
+  an access violation with no message.
+- `XamlControlsResources` is **not** assigned. WinUI 3 already has the default
+  theme dictionary; assigning that object replaces the dictionary and wipes the
+  brushes it references itself.
+- `MddBootstrapInitialize` is **not** called. `WindowsPackageType=None` puts the
+  SDK's auto-initializer in the binary and it runs at module load.
+
+Because `Application::Start` owns the thread's message loop, the panel cannot be
+driven with `PostThreadMessage`; `DispatcherQueue.TryEnqueue` is the only channel.
+`Application::Start` is also once-per-process, so a panel that failed to start
+cannot be retried, and closing the window hides it rather than destroying it.
+
+`Stop()` waits on the thread's own promise with a three-second deadline instead of
+joining flat, and abandons the thread if that expires. If `Application::Exit()`
+ever fails to end the loop, that is a three-second delay on exit rather than the
+hang that already cost this project a trip to Task Manager once.
+
+Known rough edges:
+
+- The build prints `MSB8027` and `LNK4042` for `WindowsAppRuntimeAutoInitializer.cpp`,
+  which two SDK sub-packages both contribute. Warnings only, output is correct.
+- Start-with-Windows writes an HKCU `Run` entry, and Windows may refuse to launch
+  an elevation-requiring entry at logon. The panel says so in a hint; the reliable
+  route is a Task Scheduler task with highest privileges, which is not built.
+- Zoom limits are one set for all monitors. Per-monitor limits would need a picker.
 
 ## Requested: edge-push panning
 
@@ -224,6 +296,18 @@ Kept deliberately, for testing across machines.
 | `BM_ALLOW_INJECTED=1` | Let synthetic (SendInput) events drive the app |
 | `BM_DUMP_FRAME=<path>` | Dump one back buffer to BMP; the overlay is excluded from capture, so this is the only outside view of the render |
 | `BM_DUMP_AFTER=<n>` | Which frame to dump (default 60) |
+| `BM_OPEN_PANEL=1` | Open the control panel during startup, so a script can reach it at all |
+
+**These have to be set persistently now.** Elevation broke the obvious way of
+using them: a process elevated through UAC gets a fresh environment built from
+the user's registry, not the launching process' in-memory one, so
+`$env:BM_X = '1'; Start-Process ...` silently has no effect. Use:
+
+```powershell
+[Environment]::SetEnvironmentVariable('BM_OPEN_PANEL', '1', 'User')
+```
+
+and clear it the same way with `$null` afterwards.
 
 ## Remaining work
 
@@ -247,14 +331,17 @@ it explains what the code does, which the code already says. Shorter diff, less
 to maintain.
 
 **Feature work,** from `docs/superpowers/plans/2026-08-04-control-panel-gui.md`:
-Tasks 1 to 4 are done. Tasks 5 to 9 build the WinUI 3 control panel, and the
-spike that gates them now passes.
-
-**`StatusSnapshot` is written every frame but nothing reads it.** It is
-groundwork for that control panel. Delete it if the plan is dropped.
+all of it is now in. Tasks 1 to 4 were done earlier; 5, 6 and 7 are the control
+panel described above. Tasks 8 and 9 were overtaken by work done in between -
+focus following exists as `FollowMode::MouseAndFocus`, and the `Win+Z` takeover
+became the broader `hijackMagnifierKeys`, which covers `Win+Plus`/`Win+Minus`,
+`Ctrl+Alt+wheel` and `Win+middle-click`.
 
 ## Decisions waiting on the user
 
+0. First: open the panel and use it. Everything in
+   [Control panel](#control-panel) past "the window appears" is unverified, and
+   it is a five-minute check that no script here can do.
 1. Which popup mode becomes the default
 2. Whether `Win+Plus` still double-triggers under elevation, which decides
    whether the OS Magnifier shortcut has to be turned off

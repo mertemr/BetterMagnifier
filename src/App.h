@@ -16,6 +16,7 @@
 #include "StatusSnapshot.h"
 #include "SettingsStore.h"
 #include "InputThread.h"
+#include "ControlPanel.h"
 
 #include <windows.h>
 #include <vector>
@@ -56,8 +57,14 @@ private:
     void Update();
     void RenderMonitor(size_t monitorIndex);
 
+    // Act on whichever monitor holds the cursor.
     void OnToggleZoom();
     void OnFreeze();
+
+    // Same, on a named monitor: the control panel drives one card at a time.
+    void ToggleZoomOnMonitor(size_t monitorIndex);
+
+    void OnShowPanel();
 
     // Turns zoom ON when it is off and direction is positive; turns it OFF
     // when stepping down reaches minZoom.
@@ -91,6 +98,7 @@ private:
     SettingsStore               m_settings;
     InputThread                 m_inputThread;
     StatusSnapshot              m_status;
+    ControlPanel                m_controlPanel;
 
     // Did the cursor actually move? Without this the per-frame mouse tracking
     // overwrites whatever focus tracking just set.

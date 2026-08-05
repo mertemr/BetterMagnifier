@@ -38,6 +38,87 @@ namespace BetterMagnifier {
 
 App* App::s_instance = nullptr;
 
+namespace {
+
+// BM_OPEN_PANEL=1 opens the control panel during startup.
+//
+// This exists because the app requires administrator rights, and a script in a
+// normal shell cannot reach a high-integrity window: UIPI drops the PostMessage
+// and the tray menu needs a real click. Without this switch the panel cannot be
+// exercised from a test at all.
+bool OpenPanelOnStartup()
+{
+    static const bool open = []() {
+        wchar_t buf[8]{};
+        const DWORD n = GetEnvironmentVariableW(L"BM_OPEN_PANEL", buf, 8);
+        return (n > 0 && n < 8 && buf[0] == L'1');
+    }();
+    return open;
+}
+
+// =============================================================================
+// ApplyStartWithWindows — HKCU Run anahtari
+// =============================================================================
+// HKCU, HKLM degil: HKLM admin ister ve makine genelinde yazar. Exe yolu
+// degisirse anahtar bayatlar, ama her ayar degisiminde yeniden yaziyoruz.
+//
+// DIKKAT: uygulama requireAdministrator ile derleniyor. Windows, Run altindaki
+// yukseltme isteyen bir girdiyi oturum acilisinda sessizce atlayabilir —
+// guvenilir yol "en yuksek ayricaliklarla" bir Zamanlanmis Gorev. Panel bunu
+// ipucu metninde soyluyor; burada basit olan yapiliyor.
+// =============================================================================
+bool ApplyStartWithWindows(bool enable)
+{
+    constexpr wchar_t kRunKey[]    = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    constexpr wchar_t kValueName[] = L"BetterMagnifier";
+
+    HKEY key = nullptr;
+    LSTATUS st = RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key);
+    if (st != ERROR_SUCCESS)
+    {
+        LOG_ERROR("Run anahtari acilamadi: {}", st);
+        return false;
+    }
+
+    bool ok = false;
+
+    if (enable)
+    {
+        wchar_t exePath[MAX_PATH]{};
+        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0)
+        {
+            LOG_ERROR("GetModuleFileNameW basarisiz: {}", GetLastError());
+            RegCloseKey(key);
+            return false;
+        }
+
+        // Yol bosluk icerebilir; tirnaklamazsak Windows ilk bosluktan keser.
+        const std::wstring quoted = L"\"" + std::wstring(exePath) + L"\"";
+
+        st = RegSetValueExW(key, kValueName, 0, REG_SZ,
+                reinterpret_cast<const BYTE*>(quoted.c_str()),
+                static_cast<DWORD>((quoted.size() + 1) * sizeof(wchar_t)));
+        ok = (st == ERROR_SUCCESS);
+
+        if (!ok)
+            LOG_ERROR("Run degeri yazilamadi: {}", st);
+    }
+    else
+    {
+        st = RegDeleteValueW(key, kValueName);
+        // Deger zaten yoksa istenen son durum saglanmis sayilir.
+        ok = (st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND);
+
+        if (!ok)
+            LOG_ERROR("Run degeri silinemedi: {}", st);
+    }
+
+    RegCloseKey(key);
+    return ok;
+}
+
+} // anonymous namespace
+
 // =============================================================================
 // Destructor
 // =============================================================================
@@ -264,6 +345,9 @@ bool App::InitializeComponents()
     // ── 6. Statik monitor bilgilerini snapshot'a yaz ──
     PublishMonitorInfo();
 
+    if (OpenPanelOnStartup())
+        OnShowPanel();
+
     return true;
 }
 
@@ -280,6 +364,7 @@ void App::SetupCallbacks()
     // Scroll artik InputThread'den WM_APP_SCROLL_ZOOM olarak geliyor.
 
     m_trayIcon.SetToggleCallback([this] { OnToggleZoom(); });
+    m_trayIcon.SetSettingsCallback([this] { OnShowPanel(); });
     m_trayIcon.SetExitCallback([] { PostQuitMessage(0); });
 }
 
@@ -709,72 +794,69 @@ void App::PublishMonitorInfo()
 // her monitorde BAGIMSIZ zoom.
 void App::OnToggleZoom()
 {
-    POINT cursor{};
-    GetCursorPos(&cursor);
-
-    const MonitorInfo* target = m_monitorManager.FindByPoint(cursor);
-    if (!target)
+    size_t index = 0;
+    if (!ResolveMonitorIndex(kFocusedMonitor, index))
     {
         LOG_WARN("Fare hicbir monitorde bulunamadi, toggle atlandi");
         return;
     }
 
-    // FindByPoint pointer donuyor, bize index lazim — handle ile esle
-    const auto& monitors = m_monitorManager.GetMonitors();
-    for (size_t i = 0; i < monitors.size(); ++i)
+    ToggleZoomOnMonitor(index);
+}
+
+void App::ToggleZoomOnMonitor(size_t i)
+{
+    const MonitorInfo* before = m_monitorManager.GetMonitor(i);
+    if (!before)
+        return;
+
+    // Kullanimdaki seviyeyi toggle'DAN ONCE oku: ToggleZoom kapatirken
+    // zoomLevel'i kMinZoom'a sifirliyor, sonra okursak 1.0 goruruz.
+    const float levelInUse = before->zoom.zoomLevel;
+    const bool  wasActive  = before->zoom.isActive;
+
+    m_monitorManager.ToggleZoom(i);
+
+    const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
+    if (!mon)
+        return;
+
+    const auto ms = m_settings.Monitor(mon->deviceName);
+
+    if (mon->zoom.isActive)
     {
-        if (monitors[i].hMonitor == target->hMonitor)
+        // Zoom acilinca hangi seviyeden baslasin?
+        // rememberZoomLevel aciksa son kullanilan seviye, degilse
+        // minZoom'un iki kati.
+        float startZoom = m_settings.General().rememberZoomLevel
+            ? std::clamp(ms.lastZoom, ms.minZoom, ms.maxZoom)
+            : std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
+
+        // GUVENLIK AGI: 1.0x'te acmak "zoom calismiyor" demek.
+        // Bozuk/eski bir settings.ini (LastZoom=1) bu duruma yol
+        // aciyordu; kullanici dosyayi silmeden de duzelsin diye
+        // burada tabana basiyoruz.
+        if (startZoom <= ms.minZoom)
+            startZoom = std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
+
+        m_monitorManager.SetZoom(i, startZoom);
+        m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Aktif");
+    }
+    else
+    {
+        // Kapaniyor — kullanilan seviyeyi SIMDI sakla.
+        // Shutdown'a birakmak calismiyordu: orada zoomLevel coktan
+        // 1.0'a sifirlanmis oluyor ve LastZoom=1 diske yaziliyordu.
+        if (wasActive
+            && m_settings.General().rememberZoomLevel
+            && levelInUse > ms.minZoom)
         {
-            // Kullanimdaki seviyeyi toggle'DAN ONCE oku: ToggleZoom kapatirken
-            // zoomLevel'i kMinZoom'a sifirliyor, sonra okursak 1.0 goruruz.
-            const float levelInUse = monitors[i].zoom.zoomLevel;
-            const bool  wasActive  = monitors[i].zoom.isActive;
-
-            m_monitorManager.ToggleZoom(i);
-
-            const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
-            if (!mon)
-                return;
-
-            const auto ms = m_settings.Monitor(mon->deviceName);
-
-            if (mon->zoom.isActive)
-            {
-                // Zoom acilinca hangi seviyeden baslasin?
-                // rememberZoomLevel aciksa son kullanilan seviye, degilse
-                // minZoom'un iki kati.
-                float startZoom = m_settings.General().rememberZoomLevel
-                    ? std::clamp(ms.lastZoom, ms.minZoom, ms.maxZoom)
-                    : std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
-
-                // GUVENLIK AGI: 1.0x'te acmak "zoom calismiyor" demek.
-                // Bozuk/eski bir settings.ini (LastZoom=1) bu duruma yol
-                // aciyordu; kullanici dosyayi silmeden de duzelsin diye
-                // burada tabana basiyoruz.
-                if (startZoom <= ms.minZoom)
-                    startZoom = std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
-
-                m_monitorManager.SetZoom(i, startZoom);
-                m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Aktif");
-            }
-            else
-            {
-                // Kapaniyor — kullanilan seviyeyi SIMDI sakla.
-                // Shutdown'a birakmak calismiyordu: orada zoomLevel coktan
-                // 1.0'a sifirlanmis oluyor ve LastZoom=1 diske yaziliyordu.
-                if (wasActive
-                    && m_settings.General().rememberZoomLevel
-                    && levelInUse > ms.minZoom)
-                {
-                    auto updated = ms;
-                    updated.lastZoom = std::clamp(levelInUse, ms.minZoom, ms.maxZoom);
-                    m_settings.SetMonitor(mon->deviceName, updated);
-                }
-
-                m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Pasif");
-            }
-            return;
+            auto updated = ms;
+            updated.lastZoom = std::clamp(levelInUse, ms.minZoom, ms.maxZoom);
+            m_settings.SetMonitor(mon->deviceName, updated);
         }
+
+        m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Pasif");
     }
 }
 
@@ -1013,6 +1095,19 @@ void App::ApplySettings()
         else if (mon->zoom.zoomLevel < ms.minZoom)
             m_monitorManager.SetZoom(i, ms.minZoom);
     }
+
+    ApplyStartWithWindows(g.startWithWindows);
+}
+
+// =============================================================================
+// OnShowPanel — kontrol panelini goster
+// =============================================================================
+// Panel kendi STA thread'inde yasiyor; ilk cagri thread'i kuruyor. Windows App
+// Runtime yoksa panel acilmaz, cekirdek etkilenmez (bkz. ControlPanel.h).
+// =============================================================================
+void App::OnShowPanel()
+{
+    m_controlPanel.Show(m_messageHwnd, &m_settings, &m_status);
 }
 
 // =============================================================================
@@ -1071,6 +1166,7 @@ void App::OnDisplayChange()
 
     // Yeni monitor bilgilerini snapshot'a yaz — panel basliklari guncellensin
     PublishMonitorInfo();
+    m_controlPanel.NotifyDisplayChange();
 
     LOG_INFO("Pipeline yeniden kuruldu ({} monitor)", m_overlays.size());
 }
@@ -1136,17 +1232,30 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
     case WM_APP_TOGGLE_ZOOM:
         if (s_instance)
-            s_instance->OnToggleZoom();
+        {
+            size_t index = 0;
+            if (s_instance->ResolveMonitorIndex(wParam, index))
+                s_instance->ToggleZoomOnMonitor(index);
+        }
         return 0;
 
     case WM_APP_TOGGLE_FREEZE:
         if (s_instance)
-            s_instance->OnFreeze();
+        {
+            size_t index = 0;
+            if (s_instance->ResolveMonitorIndex(wParam, index))
+                s_instance->m_monitorManager.ToggleFreezeOnMonitor(index);
+        }
         return 0;
 
     case WM_APP_ASSERT_TOPMOST:
         if (s_instance)
             s_instance->AssertOverlaysTopmost();
+        return 0;
+
+    case WM_APP_SHOW_PANEL:
+        if (s_instance)
+            s_instance->OnShowPanel();
         return 0;
 
     case WM_WTSSESSION_CHANGE:
@@ -1181,7 +1290,11 @@ void App::Shutdown()
 
     m_running = false;
 
-    // 1. Input thread'i once durdur — hook'lar kalkmadan mesaj penceresini
+    // 0. GUI thread'i once durdur — panel m_settings ve m_status'a pointer
+    // tutuyor, onlar gecersizlesmeden thread'in gitmesi lazim.
+    m_controlPanel.Stop();
+
+    // 1. Input thread'i sonra durdur — hook'lar kalkmadan mesaj penceresini
     // yikmak, yolda olan bir PostMessage'in olu HWND'ye gitmesi demek.
     m_inputThread.Stop();
 

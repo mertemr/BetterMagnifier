@@ -34,7 +34,9 @@ if (-not (Test-Path $MSBuild)) {
 
 function Invoke-Build([string]$Config) {
     Write-Host "==> $Config x64 derleniyor..." -ForegroundColor Cyan
-    & $MSBuild .\BetterMagnifier.sln /p:Configuration=$Config /p:Platform=x64 /v:minimal /nologo
+    # /restore: the control panel pulls the Windows App SDK in via
+    # PackageReference, and without a restore the WinRT projection is not there.
+    & $MSBuild .\BetterMagnifier.sln /restore /p:Configuration=$Config /p:Platform=x64 /v:minimal /nologo
     if ($LASTEXITCODE -ne 0) {
         Write-Host "==> DERLEME BASARISIZ (exit $LASTEXITCODE)" -ForegroundColor Red
         exit $LASTEXITCODE

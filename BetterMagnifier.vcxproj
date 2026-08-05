@@ -26,6 +26,28 @@
     <ProjectGuid>{ecc887c3-bba1-464a-a2d4-79c18a7dc563}</ProjectGuid>
     <RootNamespace>BetterMagnifier</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+
+    <!-- ── Windows App SDK / WinUI 3, for the control panel only ──
+         Every one of these was needed to get an XAML island up; the reasoning
+         is recorded in spike/xaml-island-thread/FINDINGS.md.
+
+         ResolveNuGetPackages=false: PackageReference in a C++ project drags in
+         the old ResolveNuGetPackageAssets task, which looks for a managed
+         TargetFramework in project.assets.json and fails with "the sequence
+         contains no elements". The .props/.targets we actually need are
+         imported separately.
+
+         WindowsPackageType=None: turns on the SDK auto-initializer, which runs
+         the bootstrapper in the right order while the module loads. Calling
+         MddBootstrapInitialize by hand resolves the framework package but does
+         not finish initialising WinUI.
+
+         UseWinUI: enables the WinUI targets and resources.pri generation. -->
+    <ResolveNuGetPackages>false</ResolveNuGetPackages>
+    <WindowsPackageType>None</WindowsPackageType>
+    <AppxPackage>false</AppxPackage>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
   </PropertyGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -89,6 +111,22 @@
     <IntDir>$(ProjectDir)obj\$(Configuration)-$(Platform)\</IntDir>
   </PropertyGroup>
 
+  <!-- The bootstrap import library lives in the foundation sub-package, whose
+       version differs from the main package and is chosen transitively. That
+       package's .props adds the include path but NOT the lib path, so we point
+       at it by hand. Bump this when the Microsoft.WindowsAppSDK version below
+       changes: windowsappsdk 1.8.250916003 -> foundation 1.8.250906002.
+       (A glob was tried: item lists inside ItemDefinitionGroup are illegal,
+       MSB4164.) WasdkPlatform maps MSBuild's "Win32" onto the package's "x86".
+       This has to sit AFTER Microsoft.Cpp.props: NuGetPackageRoot comes from the
+       generated nuget props and is still empty before that import. -->
+  <PropertyGroup>
+    <WasdkFoundationVersion>1.8.250906002</WasdkFoundationVersion>
+    <WasdkPlatform Condition="'$(Platform)'=='Win32'">x86</WasdkPlatform>
+    <WasdkPlatform Condition="'$(WasdkPlatform)'==''">$(Platform)</WasdkPlatform>
+    <WasdkLibDir>$(NuGetPackageRoot)microsoft.windowsappsdk.foundation\$(WasdkFoundationVersion)\lib\native\$(WasdkPlatform)</WasdkLibDir>
+  </PropertyGroup>
+
   <!-- Debug Win32 -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -109,7 +147,10 @@
            level degerini birlestiremiyor (c1010001). Bkz. src\app.manifest -->
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- windowsapp.lib: C++/WinRT runtime.
+           Microsoft.WindowsAppRuntime.Bootstrap.lib: the auto-initializer. -->
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;dwmapi.lib;windowsapp.lib;Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(WasdkLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
 
@@ -137,7 +178,10 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- windowsapp.lib: C++/WinRT runtime.
+           Microsoft.WindowsAppRuntime.Bootstrap.lib: the auto-initializer. -->
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;dwmapi.lib;windowsapp.lib;Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(WasdkLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
 
@@ -161,7 +205,10 @@
            level degerini birlestiremiyor (c1010001). Bkz. src\app.manifest -->
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- windowsapp.lib: C++/WinRT runtime.
+           Microsoft.WindowsAppRuntime.Bootstrap.lib: the auto-initializer. -->
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;dwmapi.lib;windowsapp.lib;Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(WasdkLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
 
@@ -189,7 +236,10 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- windowsapp.lib: C++/WinRT runtime.
+           Microsoft.WindowsAppRuntime.Bootstrap.lib: the auto-initializer. -->
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;dwmapi.lib;windowsapp.lib;Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(WasdkLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
 
@@ -208,7 +258,31 @@
     <ClCompile Include="src\TrayIcon.cpp" />
     <ClCompile Include="src\SettingsStore.cpp" />
     <ClCompile Include="src\InputThread.cpp" />
+    <ClCompile Include="src\ControlPanel.cpp" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pinned to the 1.8 line on purpose: 2.3.1 access-violated inside
+         Application::Start, and the runtime installed on the dev machine is
+         Microsoft.WindowsAppRuntime.1.8. A newer package raises the minimum
+         version the auto-initializer asks for, and then no runtime is found. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.250916003" />
+    <PackageReference Include="Microsoft.Windows.CppWinRT" Version="3.0.260715.1" />
+  </ItemGroup>
+
+  <!-- Anything C++/WinRT generates is compiled without our precompiled header
+       and without warnings-as-error: it neither includes pch.h nor was written
+       to survive Level4. Our own files still have to be clean.
+       A Condition on %(Filename) inside ItemDefinitionGroup is illegal here
+       (MSB4190), so the metadata is stamped on just before the compile. -->
+  <Target Name="RelaxGeneratedWinRTSources" BeforeTargets="ClCompile">
+    <ItemGroup>
+      <ClCompile Condition="$([System.String]::Copy('%(Identity)').Contains('Generated Files'))">
+        <TreatWarningAsError>false</TreatWarningAsError>
+        <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      </ClCompile>
+    </ItemGroup>
+  </Target>
 
   <!-- Manifest — yonetici yetkisi zorunlu (bkz. src\app.manifest) -->
   <ItemGroup>
@@ -230,6 +304,7 @@
     <ClInclude Include="src\OverlayWindow.h" />
     <ClInclude Include="src\HotkeyManager.h" />
     <ClInclude Include="src\TrayIcon.h" />
+    <ClInclude Include="src\ControlPanel.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

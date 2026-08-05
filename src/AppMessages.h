@@ -51,6 +51,11 @@ inline constexpr UINT WM_APP_FOCUS_CHANGED    = WM_APP + 7;
 // well under a poll interval, and the popup shows twice until the next tick.
 inline constexpr UINT WM_APP_ASSERT_TOPMOST   = WM_APP + 8;
 
+// Open the control panel. The tray menu calls App::OnShowPanel directly; this
+// exists so the panel can also be opened from outside, which is the only way to
+// reach it without clicking a tray icon.
+inline constexpr UINT WM_APP_SHOW_PANEL       = WM_APP + 9;
+
 // wParam sentinel: not a specific monitor, whichever one holds the cursor.
 inline constexpr WPARAM kFocusedMonitor = static_cast<WPARAM>(-1);
 

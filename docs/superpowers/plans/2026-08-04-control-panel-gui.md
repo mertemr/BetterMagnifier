@@ -1,6 +1,6 @@
 # BetterMagnifier Kontrol Paneli Implementation Plan
 
-> ## DURUM — 2026-08-05
+> ## DURUM — 2026-08-05 (plan tamamlandı)
 >
 > | Task | Durum |
 > |---|---|
@@ -8,19 +8,31 @@
 > | 2 — AppMessages + StatusSnapshot | Tamam, doğrulandı |
 > | 3 — SettingsStore | Tamam, 11 assert geçti |
 > | 4 — InputThread | Tamam, thread ayrımı log'dan doğrulandı |
-> | 5-9 — GUI | **SIRADA** — engel kalmadı |
+> | 5 — ControlPanel iskeleti | Tamam, `Control panel opened` log'da |
+> | 6 — Durum sekmesi | Tamam, elle test bekliyor |
+> | 7 — Ayarlar sekmesi | Tamam, elle test bekliyor |
+> | 8 — Odak takibi | **Bu plan dışında yapıldı** — `FollowMode::MouseAndFocus` |
+> | 9 — `Win+Z` ele geçirme | **Kapsam değişti** — `hijackMagnifierKeys` (Win+artı/eksi, Ctrl+Alt+tekerlek, Win+orta tık) |
 >
-> Island ikincil STA thread'de çalışıyor, ana thread MTA kalıyor, tema stilleri
-> uygulanıyor. Spec bölüm 9'daki geri dönüş yollarına (ayrı process + IPC,
-> Dear ImGui) gerek yok.
+> **Task 5-7'de plandan bilinçli üç sapma var**, üçü de spike düzeltildikten
+> sonra öğrenildi ve gerekli:
+>
+> 1. `Application::Start` ÇAĞRILIYOR ve callback'i bir `Application` örneği
+>    oluşturuyor. Doğrudan `Application app{}` kurmak `RPC_E_WRONG_THREAD`
+>    veriyor. Bunun sonucu: mesaj loop'u Start'a ait, GUI thread'e iş
+>    `PostThreadMessage` ile değil `DispatcherQueue.TryEnqueue` ile geçiyor.
+> 2. `XamlControlsResources` ATANMIYOR — atamak tema sözlüğünü siliyor.
+> 3. `MddBootstrapInitialize` ÇAĞRILMIYOR — `WindowsPackageType=None`
+>    auto-initializer'ı hallediyor.
+>
+> Ayrıca planın Step 2'sindeki `ItemDefinitionGroup` + `%(Filename)` koşulu
+> MSBuild'de yasak (MSB4190); yerine `BeforeTargets="ClCompile"` bir target var.
+> `WasdkLibDir` de `Microsoft.Cpp.props`'tan SONRA tanımlanmak zorunda, yoksa
+> `NuGetPackageRoot` henüz boş.
+>
+> Güncel durum ve kalan işler: [`docs/STATUS.md`](../../STATUS.md).
 >
 > **Pinlenen sürüm: Windows App SDK `1.8.250916003`** (2.3.1 değil).
->
-> 2026-08-04'teki `0xC0000005`'in sebebi MTA/STA değilmiş; iki kod hatasıymış:
-> `Application::Start` callback'i bir `Application` örneği oluşturmuyordu, ve
-> `XamlControlsResources` WinUI 3'te elle atanmamalıymış. Ayrıntı FINDINGS.md'de.
->
-> **Task 5'e geçilebilir.**
 >
 > ### Ortam notu — toolset
 >
