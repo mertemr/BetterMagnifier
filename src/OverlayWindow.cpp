@@ -85,17 +85,26 @@ bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
 // Create — Overlay penceresi olustur
 // =============================================================================
 //
-// NEDEN WS_EX_LAYERED KULLANMIYORUZ (onemli mimari karar):
-//   DXGI flip-model swap chain (DXGI_SWAP_EFFECT_FLIP_DISCARD) layered pencerede
-//   CALISMAZ — CreateSwapChainForHwnd DXGI_ERROR_INVALID_CALL doner.
-//   Layered + D3D icin DirectComposition kurmak gerekirdi.
+// NEDEN WS_EX_LAYERED SART (onemli mimari karar, bir kez YANLIS yapildi):
+//   Bir ara flip-model swap chain'i calistirmak icin WS_EX_LAYERED kaldirildi
+//   ve "tam ekran magnifier'a seffaflik gerekmez" diye gerekcelendirildi.
+//   Gorsel olarak dogruydu, GIRDI olarak yikiciydi: overlay butun tiklamalari
+//   yutmaya basladi, zoom acikken Windows kullanilamaz hale geldi.
 //
-//   Ama gerek yok: bu bir TAM EKRAN magnifier. Buyutulmus goruntu monitorun
-//   tamamini kapliyor, altinda hicbir sey gorunmeyecek — yani seffafliga
-//   ihtiyacimiz yok. Overlay opak olabilir, swap chain dogrudan calisir.
-//   (Kismi ekran "lens" modu eklenirse o zaman DirectComposition gerekir.)
+//   Sebep: WS_EX_TRANSPARENT tek basina ve WM_NCHITTEST'ten HTTRANSPARENT
+//   dondurmek click-through icin YETMIYOR. Guvenilir recete LAYERED |
+//   TRANSPARENT ikilisi.
+//
+//   Bedeli: flip-model layered pencereyi reddediyor, blt modeline dusuyoruz
+//   (bkz. D3DRenderer::CreateSwapChainForWindow). Latency biraz artiyor ama
+//   calisan bir girdi, daha hizli bir kullanilamazliktan iyidir.
+//
+//   SetLayeredWindowAttributes ile layered yapilan pencere normal redirection
+//   surface'ini KORUR, yani D3D cizimi calisir. UpdateLayeredWindow yolu
+//   olsaydi calismazdi — aradaki fark kritik.
 //
 // Window Styles Aciklamasi:
+//   WS_EX_LAYERED      — TRANSPARENT ile birlikte gercek click-through saglar
 //   WS_EX_TRANSPARENT  — Mouse olaylari bu pencereden gecer (click-through)
 //   WS_EX_TOPMOST      — Her zaman ustte (diger pencerelerin uzerinde)
 //   WS_EX_NOACTIVATE   — Tiklayinca focus almasin (calisan uygulama focus'unu kaybetmesin)
@@ -118,6 +127,12 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
                   | WS_EX_TOPMOST
                   | WS_EX_NOACTIVATE
                   | WS_EX_TOOLWINDOW;
+
+    // Layered mod (varsayilan): click-through icin sart.
+    // BM_OVERLAY_FLIP=1 ile eski flip-model davranisina donulur — girdi
+    // gecmez, sadece karsilastirma icin.
+    if (!UseFlipOverlay())
+        exStyle |= WS_EX_LAYERED;
 
     DWORD style = WS_POPUP;
 
@@ -142,6 +157,18 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
     {
         LOG_ERROR("Overlay window olusturulamadi (monitor {}): {}", monitorIndex, GetLastError());
         return false;
+    }
+
+    // ── Layered pencereyi tam opak yap ──
+    // Layered olmasinin sebebi girdi seffafligi, GORSEL seffaflik degil —
+    // alpha 255 (tam opak). Bu cagri olmadan layered pencere HIC cizilmez.
+    if (!UseFlipOverlay())
+    {
+        if (!SetLayeredWindowAttributes(m_hwnd, 0, 255, LWA_ALPHA))
+        {
+            LOG_ERROR("SetLayeredWindowAttributes basarisiz: {} — overlay gorunmeyebilir",
+                GetLastError());
+        }
     }
 
     // ── FEEDBACK LOOP ONLEME (kritik!) ──

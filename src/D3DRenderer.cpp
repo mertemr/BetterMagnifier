@@ -482,11 +482,30 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
     swapDesc.Format      = DXGI_FORMAT_B8G8R8A8_UNORM;  // BGRA — Direct2D uyumlu
     swapDesc.SampleDesc  = { 1, 0 };                     // No MSAA (overlay'de gerek yok)
     swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    swapDesc.BufferCount = 2;                             // Double buffering
-    swapDesc.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD; // Modern flip model
+    // ── Swap effect: layered pencere flip modeli KABUL ETMIYOR ──
+    // Overlay'in click-through olmasi icin WS_EX_LAYERED sart (bkz.
+    // OverlayWindow.cpp). Flip model (FLIP_DISCARD) layered pencerede
+    // CreateSwapChainForHwnd'i DXGI_ERROR_INVALID_CALL ile dusuruyor.
+    // Bu yuzden blt modeline (DISCARD) geciyoruz.
+    //
+    // Bedeli: blt modelde DWM fazladan bir kopya yapiyor, latency biraz artiyor.
+    // Kazanci: girdi calisiyor. Uygulamanin butun amaci bu.
+    //
+    // BufferCount: blt DISCARD icin 1 yeterli ve standart.
+    if (UseFlipOverlay())
+    {
+        swapDesc.BufferCount = 2;
+        swapDesc.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    }
+    else
+    {
+        swapDesc.BufferCount = 1;
+        swapDesc.SwapEffect  = DXGI_SWAP_EFFECT_DISCARD;
+    }
+
     // HWND swap chain'de PREMULTIPLIED alpha DESTEKLENMEZ — sadece
     // CreateSwapChainForComposition (DirectComposition) kabul eder.
-    // Overlay opak oldugu icin IGNORE dogru secim (bkz. OverlayWindow.cpp).
+    // Overlay gorsel olarak opak oldugu icin IGNORE dogru secim.
     swapDesc.AlphaMode   = DXGI_ALPHA_MODE_IGNORE;
     swapDesc.Flags       = 0;
 

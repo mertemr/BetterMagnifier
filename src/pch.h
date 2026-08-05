@@ -182,6 +182,41 @@ inline std::string ToUtf8(std::wstring_view ws)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// OVERLAY MODU — girdi şeffaflığı mı, flip-model mi?
+// ─────────────────────────────────────────────────────────────────────────────
+// Bu iki şey Win32'de birlikte olamıyor ve seçim iki dosyayı birden etkiliyor
+// (OverlayWindow pencere stilini, D3DRenderer swap effect'i kurar). Tek karar
+// noktası olsun diye buraya koydu.
+//
+// LAYERED (varsayılan):
+//   Pencere WS_EX_LAYERED | WS_EX_TRANSPARENT  -> tıklamalar ALTA GEÇER
+//   Swap chain DXGI_SWAP_EFFECT_DISCARD (blt)  -> layered pencerede çalışır
+//
+//   Neden layered şart: WS_EX_TRANSPARENT tek başına ve WM_NCHITTEST'ten
+//   HTTRANSPARENT döndürmek click-through için YETMİYOR. Güvenilir reçete
+//   LAYERED | TRANSPARENT ikilisi. LAYERED'ı kaldırdığımızda overlay bütün
+//   girdiyi yutmaya başladı — uygulamanın tüm amacı çöktü.
+//
+//   Neden blt: flip-model (FLIP_DISCARD) layered pencereyi reddeder,
+//   CreateSwapChainForHwnd DXGI_ERROR_INVALID_CALL döner.
+//
+//   SetLayeredWindowAttributes ile layered yapılan pencere normal redirection
+//   surface'ini KORUR, yani D3D çizimi çalışmaya devam eder. UpdateLayeredWindow
+//   yolu olsaydı çalışmazdı — aradaki fark kritik.
+//
+// FLIP (BM_OVERLAY_FLIP=1 ile):
+//   Eski davranış. Daha düşük latency ama girdi geçmiyor. Karşılaştırma için.
+inline bool UseFlipOverlay()
+{
+    static const bool flip = []() {
+        wchar_t buf[8]{};
+        const DWORD n = GetEnvironmentVariableW(L"BM_OVERLAY_FLIP", buf, 8);
+        return (n > 0 && n < 8 && buf[0] == L'1');
+    }();
+    return flip;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SAFE RELEASE HELPER (ComPtr kullanmadığımız nadir durumlar için)
 // ─────────────────────────────────────────────────────────────────────────────
 template<typename T>

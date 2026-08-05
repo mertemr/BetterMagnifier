@@ -349,6 +349,46 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
                     return 1;
                 }
             }
+
+            // ── PANIK CIKISI: Ctrl+Alt+Shift+Q ──
+            //
+            // Neden gerekli: overlay tam ekran, topmost ve opak. Render thread
+            // herhangi bir sebeple bloklanirsa mesaj pompalamayi birakir,
+            // WM_HOTKEY islenmez ve kullanici ekranin arkasinda mahsur kalir —
+            // gorev yoneticisinden kapatmak zorunda kalindi, bir kez oldu.
+            //
+            // Bu tus INPUT thread'de isleniyor; o thread hicbir zaman
+            // bloklanmiyor (hook callback'leri sadece PostMessage edip donuyor).
+            // Yani render thread olmus olsa bile bu yol calisir.
+            //
+            // NEDEN ShowWindow ILE OVERLAY'LERI GIZLEMIYORUZ: pencereler render
+            // thread'e ait. Baska thread'den gizlemek o thread'in isbirligini
+            // gerektiriyor — wedge durumunda tam da olmayan sey bu.
+            // Kesin calisan tek sey process'i bitirmek.
+            if (kb->vkCode == 'Q'
+                && (GetAsyncKeyState(VK_CONTROL) & 0x8000)
+                && (GetAsyncKeyState(VK_MENU)    & 0x8000)
+                && (GetAsyncKeyState(VK_SHIFT)   & 0x8000))
+            {
+                // Iki kez tetiklenmesin (tus tekrari)
+                static std::atomic<bool> panicStarted{false};
+                if (!panicStarted.exchange(true, std::memory_order_relaxed))
+                {
+                    LOG_WARN("PANIK CIKISI (Ctrl+Alt+Shift+Q) — nazik kapatma deneniyor");
+
+                    // 1. Nazik yol: mesaj penceresine WM_CLOSE.
+                    PostMessageW(s_instance->m_target, WM_CLOSE, 0, 0);
+
+                    // 2. Hook icinde BEKLEMEK YASAK (LowLevelHooksTimeout).
+                    //    Ayri, detached bir thread bekleyip gerekirse zorlar.
+                    std::thread([]{
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                        LOG_ERROR("Nazik kapatma 1.5 sn'de tamamlanmadi — TerminateProcess");
+                        TerminateProcess(GetCurrentProcess(), 1);
+                    }).detach();
+                }
+                return 1;   // Q'yu yut
+            }
         }
     }
 

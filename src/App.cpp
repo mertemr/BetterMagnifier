@@ -528,7 +528,17 @@ void App::RenderMonitor(size_t monitorIndex)
             return;
         }
 
-        m_renderer.Present(monitorIndex, true);
+        // ── vSync SADECE flip modda ──
+        // Layered pencerede Present, DWM'in layered surface'ini guncellemesini
+        // gerektiriyor; 2560x1440'ta bu pahali. Ustune vblank beklemesi
+        // eklenince render thread yuz milisaniyelerce bloklanip mesaj
+        // pompalamayi birakiyor — WM_HOTKEY islenmiyor, uygulama donuyor.
+        // Gozlenen davranis buydu: tuslar bir sure calisti, sonra tamamen sustu.
+        //
+        // Layered modda vSync KAPALI. Tearing riski var ama donan bir
+        // uygulamadan iyidir. Frame hizini "degisen yok -> cizme" mantigi ve
+        // asagidaki Sleep zaten sinirliyor.
+        m_renderer.Present(monitorIndex, UseFlipOverlay());
         m_presentedThisTick = true;
 
         // ── FPS olcumu ──
