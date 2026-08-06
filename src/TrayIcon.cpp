@@ -107,10 +107,14 @@ void TrayIcon::ShowContextMenu()
     HMENU hMenu = CreatePopupMenu();
     if (!hMenu) return;
 
-    AppendMenuW(hMenu, MF_STRING, kMenuToggle,   L"Toggle Zoom (Ctrl+Alt+Z)");
-    AppendMenuW(hMenu, MF_STRING, kMenuSettings, L"Settings...");
+    AppendMenuW(hMenu, MF_STRING, kMenuToggle, L"Toggle Zoom (Ctrl+Alt+Z)");
+
+    // Only when something is wired up: the control panel is behind BM_PANEL=1.
+    if (m_onSettings)
+        AppendMenuW(hMenu, MF_STRING, kMenuSettings, L"Settings...");
+
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(hMenu, MF_STRING, kMenuExit,     L"Exit");
+    AppendMenuW(hMenu, MF_STRING, kMenuExit, L"Exit");
 
     // Menunun dogru pozisyonda acilmasi icin
     POINT pt;

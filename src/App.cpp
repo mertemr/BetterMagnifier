@@ -40,20 +40,25 @@ App* App::s_instance = nullptr;
 
 namespace {
 
-// BM_OPEN_PANEL=1 opens the control panel during startup.
+// The control panel is OFF unless BM_PANEL=1.
 //
-// This exists because the app requires administrator rights, and a script in a
-// normal shell cannot reach a high-integrity window: UIPI drops the PostMessage
-// and the tray menu needs a real click. Without this switch the panel cannot be
-// exercised from a test at all.
-bool OpenPanelOnStartup()
+// It is not finished: a XAML TextBox in the island takes the whole process down
+// with a stowed exception, and the tree is only partly verified without one.
+// The magnifier itself does not need it, so it stays behind a switch instead of
+// shipping a window that can kill the app. Details: docs/PANEL-BLANK.md.
+//
+// With the switch on, the panel also opens at startup. The app requires
+// administrator rights, so a script in a normal shell cannot click the tray or
+// post it a message - UIPI drops both - and this is the only way to reach it
+// from a test.
+bool PanelEnabled()
 {
-    static const bool open = []() {
+    static const bool enabled = []() {
         wchar_t buf[8]{};
-        const DWORD n = GetEnvironmentVariableW(L"BM_OPEN_PANEL", buf, 8);
+        const DWORD n = GetEnvironmentVariableW(L"BM_PANEL", buf, 8);
         return (n > 0 && n < 8 && buf[0] == L'1');
     }();
-    return open;
+    return enabled;
 }
 
 // =============================================================================
@@ -345,7 +350,7 @@ bool App::InitializeComponents()
     // ── 6. Statik monitor bilgilerini snapshot'a yaz ──
     PublishMonitorInfo();
 
-    if (OpenPanelOnStartup())
+    if (PanelEnabled())
         OnShowPanel();
 
     return true;
@@ -364,8 +369,12 @@ void App::SetupCallbacks()
     // Scroll artik InputThread'den WM_APP_SCROLL_ZOOM olarak geliyor.
 
     m_trayIcon.SetToggleCallback([this] { OnToggleZoom(); });
-    m_trayIcon.SetSettingsCallback([this] { OnShowPanel(); });
     m_trayIcon.SetExitCallback([] { PostQuitMessage(0); });
+
+    // No callback, no menu entry: a Settings item that cannot open anything is
+    // worse than no item.
+    if (PanelEnabled())
+        m_trayIcon.SetSettingsCallback([this] { OnShowPanel(); });
 }
 
 // =============================================================================

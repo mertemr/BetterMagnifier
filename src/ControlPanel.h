@@ -87,6 +87,7 @@ private:
     std::thread        m_thread;
     std::atomic<bool>  m_running{false};
     std::atomic<bool>  m_stopping{false};
+    std::atomic<DWORD> m_threadId{0};
 
     // Lets Stop() wait for the thread with a deadline. Joining unconditionally
     // would hang shutdown if the XAML loop ever refused to end.

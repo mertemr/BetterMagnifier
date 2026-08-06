@@ -53,17 +53,6 @@ constexpr int kPanelHeight = 680;
 constexpr int kPanelMinW   = 440;
 constexpr int kPanelMinH   = 480;
 
-// Application::Start does NOT create an Application for you; it expects the
-// callback to. Without this type, Application::Current() returns null and the
-// first method call on it is an access violation with no message, because
-// C++/WinRT does not null-check projected types.
-//
-// This is what the "App" class in a WinUI 3 project template is. Without the
-// XAML compiler there is no markup, so it is empty.
-struct PanelApp : WUX::ApplicationT<PanelApp>
-{
-};
-
 LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
@@ -170,8 +159,6 @@ struct ControlPanel::Impl
     std::vector<MonitorCard> cards;
 
     // Settings tab
-    WUXC::TextBox     toggleHotkeyBox{ nullptr };
-    WUXC::TextBox     freezeHotkeyBox{ nullptr };
     WUXC::TextBlock   hotkeyWarning{ nullptr };
     WUXC::CheckBox    hijackBox{ nullptr };
     WUXC::RadioButton followMouseRadio{ nullptr };
@@ -183,10 +170,6 @@ struct ControlPanel::Impl
     WUXC::CheckBox    rememberZoomBox{ nullptr };
 
     bool suppressSettingsEvents = false;
-
-    // A hotkey text box held invalid input; keeps UpdateLiveValues from wiping
-    // that message with its own RegisterHotKey report.
-    bool parseWarningShown = false;
 };
 
 ControlPanel::ControlPanel()
@@ -246,6 +229,8 @@ void ControlPanel::Show(HWND engineHwnd, SettingsStore* settings, StatusSnapshot
 // =============================================================================
 void ControlPanel::ThreadMain()
 {
+    m_threadId.store(GetCurrentThreadId(), std::memory_order_release);
+
     bool cameUp = false;
 
     try
@@ -258,52 +243,50 @@ void ControlPanel::ThreadMain()
         // SDK's auto-initializer in the binary, and it runs at module load in
         // the right order; calling MddBootstrapInitialize as well resolves the
         // framework package but leaves WinUI half-initialised.
+
+        // The DispatcherQueue has to exist before the XAML runtime, and it binds
+        // itself to this thread's message loop - which is why TryEnqueue works
+        // below without any extra plumbing.
+        auto controller =
+            winrt::Microsoft::UI::Dispatching::DispatcherQueueController::CreateOnCurrentThread();
+
+        // THIS is what brings XAML up on this thread, and its absence is why the
+        // island used to render nothing: Application::Start ran a message loop
+        // but never gave this thread a XAML runtime, so Content() was accepted
+        // and then simply never laid out or composited.
         //
-        // Application::Start, not "Application app{}": direct activation fails
-        // with RPC_E_WRONG_THREAD. Start creates the XAML runtime and the
-        // DispatcherQueue, invokes the callback, then runs the message loop
-        // itself and does not return until the application exits.
-        WUX::Application::Start([this](WUX::ApplicationInitializationCallbackParams const&)
+        // XamlControlsResources is still deliberately not assigned: the default
+        // theme dictionary is already loaded and assigning that object replaces
+        // it, wiping the brushes it references itself.
+        auto xamlManager = WUX::Hosting::WindowsXamlManager::InitializeForCurrentThread();
+
+        BuildUi();
+
+        // Our own loop, so the panel is reachable with PostThreadMessage again
+        // and there is no once-per-process restriction to work around.
+        MSG msg{};
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0)
         {
-            try
-            {
-                // This line is mandatory - see PanelApp above.
-                auto app = winrt::make<PanelApp>();
-
-                // Closing the last XAML window must not end the loop; the panel
-                // hides instead of being destroyed and gets reopened later.
-                app.DispatcherShutdownMode(WUX::DispatcherShutdownMode::OnExplicitShutdown);
-
-                // A XAML exception raised during layout or render lands here, not
-                // in the catch below: those passes run after this callback returns.
-                app.UnhandledException(
-                    [](winrt::Windows::Foundation::IInspectable const&,
-                       WUX::UnhandledExceptionEventArgs const& e)
-                    {
-                        LOG_ERROR("XAML unhandled exception: 0x{:08X} - {}",
-                            static_cast<unsigned long>(e.Exception().value),
-                            ToUtf8(e.Message()));
-                    });
-
-                // XamlControlsResources is deliberately NOT assigned. WinUI 3
-                // already has the default theme dictionary loaded, and assigning
-                // that object REPLACES the dictionary, wiping the brushes it
-                // internally references (E_FAIL, "cannot find a resource with
-                // the given key: AcrylicBackgroundFillColorDefaultBrush"). That
-                // assignment was the cause, not the cure.
-
-                BuildUi();
-            }
-            catch (winrt::hresult_error const& e)
-            {
-                LOG_ERROR("Control panel UI could not be built: 0x{:08X} - {}",
-                    static_cast<unsigned long>(e.code().value),
-                    ToUtf8(e.message()));
-            }
-        });
+            // No PreTranslateMessage call: WinUI 3 does not expose one, the
+            // island routes its own keyboard input through the content site.
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
 
         cameUp = true;
         LOG_INFO("Control panel closed");
+
+        if (m_impl->liveTimer)
+            m_impl->liveTimer.Stop();
+        if (m_impl->source)
+            m_impl->source.Close();
+        if (m_impl->host)
+        {
+            DestroyWindow(m_impl->host);
+            m_impl->host = nullptr;
+        }
+        xamlManager.Close();
+        controller.ShutdownQueueAsync();
     }
     catch (winrt::hresult_error const& e)
     {
@@ -382,37 +365,27 @@ void ControlPanel::BuildUi()
     m_impl->source.SiteBridge().ResizePolicy(
         winrt::Microsoft::UI::Content::ContentSizePolicy::ResizeContentToParentWindow);
 
-    WUXC::TabView tabs{};
-    tabs.IsAddTabButtonVisible(false);
-    tabs.CanReorderTabs(false);
-    tabs.CanDragTabs(false);
+    // One scrolling page, not a TabView. Two tabs were the original plan, but a
+    // TabView is a heavy templated control and the panel showed nothing while it
+    // was in the tree - the XAML dispatcher stopped ticking as soon as it was
+    // there, while the same island rendered fine with plain panels. A single
+    // page carries the same information for a window this small.
+    WUXC::ScrollViewer scroller{};
+    WUXC::StackPanel page{};
+    page.Padding(WUX::ThicknessHelper::FromUniformLength(16));
+    page.Spacing(12);
 
-    WUXC::TabViewItem statusTab{};
-    statusTab.Header(winrt::box_value(L"Status"));
-    statusTab.IsClosable(false);
-    {
-        WUXC::ScrollViewer sv{};
-        m_impl->statusPanel = WUXC::StackPanel{};
-        m_impl->statusPanel.Padding(WUX::ThicknessHelper::FromUniformLength(16));
-        m_impl->statusPanel.Spacing(12);
-        sv.Content(m_impl->statusPanel);
-        statusTab.Content(sv);
-    }
+    m_impl->statusPanel = WUXC::StackPanel{};
+    m_impl->statusPanel.Spacing(12);
 
-    WUXC::TabViewItem settingsTab{};
-    settingsTab.Header(winrt::box_value(L"Settings"));
-    settingsTab.IsClosable(false);
-    {
-        WUXC::ScrollViewer sv{};
-        m_impl->settingsPanel = WUXC::StackPanel{};
-        m_impl->settingsPanel.Padding(WUX::ThicknessHelper::FromUniformLength(16));
-        m_impl->settingsPanel.Spacing(8);
-        sv.Content(m_impl->settingsPanel);
-        settingsTab.Content(sv);
-    }
+    m_impl->settingsPanel = WUXC::StackPanel{};
+    m_impl->settingsPanel.Spacing(8);
 
-    tabs.TabItems().Append(statusTab);
-    tabs.TabItems().Append(settingsTab);
+    page.Children().Append(MakeHeader(L"Monitors"));
+    page.Children().Append(m_impl->statusPanel);
+    page.Children().Append(m_impl->settingsPanel);
+
+    scroller.Content(page);
 
     WUXC::Grid root{};
 
@@ -421,7 +394,7 @@ void ControlPanel::BuildUi()
     // panel looked empty.
     root.RequestedTheme(WUX::ElementTheme::Dark);
     root.Background(Brush(32, 32, 32));
-    root.Children().Append(tabs);
+    root.Children().Append(scroller);
 
     // Loaded proves the tree is attached to a live island; SizeChanged proves it
     // got a non-zero layout slot. Blank window with neither firing means the
@@ -440,33 +413,6 @@ void ControlPanel::BuildUi()
 
     m_impl->source.Content(root);
 
-    // BM_PANEL_PROBE=1 swaps the real UI for the exact content the spike used, to
-    // separate "the island does not render" from "this control does not render".
-    // It is currently blank too - see docs/PANEL-BLANK.md.
-    {
-        wchar_t buf[8]{};
-        if (GetEnvironmentVariableW(L"BM_PANEL_PROBE", buf, 8) > 0 && buf[0] == L'1')
-        {
-            WUXC::StackPanel probe{};
-            probe.Padding(WUX::ThicknessHelper::FromUniformLength(24));
-            probe.Spacing(8);
-            probe.RequestedTheme(WUX::ElementTheme::Light);
-            probe.Background(Brush(255, 255, 255));
-
-            WUXC::TextBlock t{};
-            t.Text(L"probe: island is rendering");
-            t.FontSize(18.0);
-            probe.Children().Append(t);
-
-            WUXC::Button b{};
-            b.Content(winrt::box_value(L"probe button"));
-            probe.Children().Append(b);
-
-            m_impl->source.Content(probe);
-            LOG_INFO("Panel probe content installed");
-        }
-    }
-
     m_impl->source.SiteBridge().Show();
 
     RebuildMonitorCards();
@@ -475,6 +421,18 @@ void ControlPanel::BuildUi()
 
     ShowWindow(host, SW_SHOW);
     SetForegroundWindow(host);
+
+    // XamlRoot is the decisive check: an element attached to a live island has
+    // one, with a size. Null means Content() was accepted but nothing hosts it.
+    if (auto xr = root.XamlRoot())
+    {
+        LOG_INFO("Panel XamlRoot present, size {}x{}",
+            static_cast<int>(xr.Size().Width), static_cast<int>(xr.Size().Height));
+    }
+    else
+    {
+        LOG_ERROR("Panel XamlRoot is NULL - the island is not hosting the tree");
+    }
 
     m_running.store(true, std::memory_order_release);
     LOG_INFO("Control panel opened");
@@ -732,7 +690,7 @@ void ControlPanel::UpdateLiveValues()
 
     // A hotkey that RegisterHotKey rejected has to be visible here. Logging it
     // only leaves the user pressing a key and wondering why nothing happens.
-    if (m_impl->hotkeyWarning && m_settings && !m_impl->parseWarningShown)
+    if (m_impl->hotkeyWarning && m_settings)
     {
         const unsigned mask = m_status->hotkeyFailedMask.load(std::memory_order_acquire);
 
@@ -781,19 +739,28 @@ void ControlPanel::BuildSettingsTab()
     // ── Hotkeys ──
     panel.Children().Append(MakeHeader(L"Hotkeys"));
 
-    m_impl->toggleHotkeyBox = WUXC::TextBox{};
-    m_impl->toggleHotkeyBox.Header(winrt::box_value(L"Toggle zoom"));
-    m_impl->toggleHotkeyBox.Text(FormatHotkey(g.toggleModifiers, g.toggleVk));
-    panel.Children().Append(m_impl->toggleHotkeyBox);
-
-    m_impl->freezeHotkeyBox = WUXC::TextBox{};
-    m_impl->freezeHotkeyBox.Header(winrt::box_value(L"Freeze"));
-    m_impl->freezeHotkeyBox.Text(FormatHotkey(g.freezeModifiers, g.freezeVk));
-    panel.Children().Append(m_impl->freezeHotkeyBox);
+    // Read-only on purpose. A XAML TextBox kills this process: put one in the
+    // island and the first layout pass ends in a stowed exception (0xC000027B),
+    // bisected down to exactly this control while every other control here is
+    // fine. Text input services do not come up for an island on a secondary STA
+    // thread in an unpackaged, elevated process.
+    //
+    // Hotkeys are edited in settings.ini and picked up with Reload below. Key
+    // capture through the low-level hook we already own would be nicer, and is
+    // the upgrade path if typing a hotkey in the file gets tiring.
+    {
+        WUXC::TextBlock bindings{};
+        bindings.Text(winrt::hstring{
+            L"Toggle zoom:  " + FormatHotkey(g.toggleModifiers, g.toggleVk) +
+            L"\nFreeze:       " + FormatHotkey(g.freezeModifiers, g.freezeVk) });
+        bindings.FontFamily(WUX::Media::FontFamily{ L"Consolas" });
+        bindings.IsTextSelectionEnabled(true);
+        panel.Children().Append(bindings);
+    }
 
     panel.Children().Append(MakeHint(
-        L"Format: Ctrl+Alt+Z. Modifiers: Ctrl, Alt, Shift, Win. Keys: A-Z, 0-9, F1-F24. "
-        L"Applied when the box loses focus; invalid text keeps the current binding."));
+        L"Edit these in settings.ini and press Reload below. "
+        L"Format: Ctrl+Alt+Z. Modifiers: Ctrl, Alt, Shift, Win. Keys: A-Z, 0-9, F1-F24."));
 
     m_impl->hotkeyWarning = WUXC::TextBlock{};
     m_impl->hotkeyWarning.FontSize(12.0);
@@ -934,11 +901,6 @@ void ControlPanel::BuildSettingsTab()
     m_impl->rememberZoomBox.Checked(onChanged);
     m_impl->rememberZoomBox.Unchecked(onChanged);
 
-    // Text boxes apply on LostFocus rather than per keystroke: "Ctrl+Alt+" is
-    // invalid halfway through, and complaining at every letter is noise.
-    m_impl->toggleHotkeyBox.LostFocus(onChanged);
-    m_impl->freezeHotkeyBox.LostFocus(onChanged);
-
     auto onNumberChanged = [this](WUXC::NumberBox const&,
                                   WUXC::NumberBoxValueChangedEventArgs const&)
     {
@@ -962,27 +924,7 @@ void ControlPanel::PushSettings()
 
     auto& g = m_settings->MutableGeneral();
 
-    // ParseHotkey leaves its outputs untouched on failure, so an unreadable box
-    // keeps the binding that works and only earns a warning.
-    std::wstring warning;
-    {
-        const std::wstring text = m_impl->toggleHotkeyBox.Text().c_str();
-        if (!ParseHotkey(text, g.toggleModifiers, g.toggleVk))
-            warning += L"Could not read the zoom hotkey: \"" + text + L"\". ";
-    }
-    {
-        const std::wstring text = m_impl->freezeHotkeyBox.Text().c_str();
-        if (!ParseHotkey(text, g.freezeModifiers, g.freezeVk))
-            warning += L"Could not read the freeze hotkey: \"" + text + L"\". ";
-    }
-
-    m_impl->parseWarningShown = !warning.empty();
-    if (m_impl->parseWarningShown)
-    {
-        m_impl->hotkeyWarning.Text(winrt::hstring{ warning });
-        m_impl->hotkeyWarning.Visibility(WUX::Visibility::Visible);
-    }
-
+    // Hotkeys are not edited here; they come from settings.ini untouched.
     g.hijackMagnifierKeys = IsCheckedTrue(m_impl->hijackBox);
     g.startWithWindows    = IsCheckedTrue(m_impl->startWithWindowsBox);
     g.rememberZoomLevel   = IsCheckedTrue(m_impl->rememberZoomBox);
@@ -1082,21 +1024,11 @@ void ControlPanel::Stop()
 
     m_stopping.store(true, std::memory_order_release);
 
-    auto queue = m_impl->queue;
-    if (queue)
-    {
-        queue.TryEnqueue([this]()
-        {
-            if (m_impl->liveTimer)
-                m_impl->liveTimer.Stop();
-
-            // Ends Application::Start's message loop, which is what makes the
-            // thread return. DispatcherShutdownMode is OnExplicitShutdown, so
-            // nothing else would.
-            if (auto app = WUX::Application::Current())
-                app.Exit();
-        });
-    }
+    // The loop is ours now, so WM_QUIT ends it. Cleanup happens on that thread
+    // right after the loop, where the XAML objects belong.
+    const DWORD tid = m_threadId.load(std::memory_order_acquire);
+    if (tid != 0)
+        PostThreadMessageW(tid, WM_QUIT, 0, 0);
 
     // ponytail: waiting on the thread's own promise rather than joining flat. If
     // Exit ever fails to end the XAML loop, a plain join would hang shutdown -

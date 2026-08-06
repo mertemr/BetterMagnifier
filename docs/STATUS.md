@@ -139,14 +139,16 @@ durations.
 
 ## Control panel
 
-> **BROKEN: the panel opens as a blank white window.** The host window and its
-> dark title bar are right, every XAML call succeeds, and nothing renders. The
-> island never comes alive: no bridge child window, `Loaded` never fires, the
-> dispatcher never ticks. Measurements and the ranked list of things to try are
-> in [`PANEL-BLANK.md`](PANEL-BLANK.md). Diagnostics live on branch
-> `wip/panel-blank-island`.
+> **OFF by default, unfinished.** Set `BM_PANEL=1` to enable it; the tray's
+> Settings entry only appears when it is on. The blank-window bug is fixed - the
+> island needed `WindowsXamlManager::InitializeForCurrentThread()` - but a XAML
+> `TextBox` in the island takes the whole process down with a stowed exception,
+> and the rest of the tree is only partly verified without one. Full measurements
+> in [`PANEL-BLANK.md`](PANEL-BLANK.md).
 
-WinUI 3, built in code, hosted as a XAML island on its own STA thread. Two tabs.
+WinUI 3, built in code, hosted as a XAML island on its own STA thread. One
+scrolling page (TabView was dropped: heavy templated control, same information
+fits on a single page).
 
 **Status tab** - one card per monitor, refreshed at 10 Hz from `StatusSnapshot`:
 device name, resolution, refresh rate, DPI, an on/off switch, a zoom slider, the
@@ -303,7 +305,7 @@ Kept deliberately, for testing across machines.
 | `BM_ALLOW_INJECTED=1` | Let synthetic (SendInput) events drive the app |
 | `BM_DUMP_FRAME=<path>` | Dump one back buffer to BMP; the overlay is excluded from capture, so this is the only outside view of the render |
 | `BM_DUMP_AFTER=<n>` | Which frame to dump (default 60) |
-| `BM_OPEN_PANEL=1` | Open the control panel during startup, so a script can reach it at all |
+| `BM_PANEL=1` | Enable the control panel: adds the tray entry and opens it at startup |
 
 **These have to be set persistently now.** Elevation broke the obvious way of
 using them: a process elevated through UAC gets a fresh environment built from
@@ -346,10 +348,9 @@ became the broader `hijackMagnifierKeys`, which covers `Win+Plus`/`Win+Minus`,
 
 ## Decisions waiting on the user
 
-0. First: get the panel to render at all. It opens blank; the measurements and
-   the ranked list of suspects are in [`PANEL-BLANK.md`](PANEL-BLANK.md). The
-   strongest concrete lead is the PMv2 DPI awareness that `main.cpp` sets and the
-   working spike never did.
+0. The panel is off by default and stays that way until the `TextBox` crash is
+   understood and the rest of its tree is verified control by control. See
+   [`PANEL-BLANK.md`](PANEL-BLANK.md); the magnifier does not depend on it.
 1. Which popup mode becomes the default
 2. Whether `Win+Plus` still double-triggers under elevation, which decides
    whether the OS Magnifier shortcut has to be turned off
