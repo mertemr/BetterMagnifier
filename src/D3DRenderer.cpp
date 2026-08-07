@@ -637,10 +637,34 @@ bool D3DRenderer::RenderFrame(
     m_context->Draw(3, 0);
 
 #ifdef _DEBUG
-    // ── Tek kare dokumu (dogrulama araci) ──
-    // BM_DUMP_FRAME ayarliysa, isler oturduktan sonra bir kare diske yazilir.
-    // Present'ten ONCE, cizimden HEMEN SONRA — arada back buffer bozulmasin.
+    // ── Frame dump (verification tool) ──
+    //
+    // The overlay is WDA_EXCLUDEFROMCAPTURE, so a screenshot cannot show what
+    // we render. Dumping the back buffer before Present is the only outside
+    // view of it.
+    //
+    // A sequence rather than a single frame, because the question this exists
+    // for is whether something MOVES between frames: an occluded popup that
+    // keeps repainting shows a menu highlight that tracks the mouse, a frozen
+    // one does not. One frame cannot tell those apart.
+    //
+    // BM_DUMP_FRAME    path prefix; files are <prefix>.NNN.bmp
+    // BM_DUMP_AFTER    first frame to dump (default 60)
+    // BM_DUMP_COUNT    how many to dump (default 1)
+    // BM_DUMP_EVERY    frames between dumps (default 30)
+    // BM_DUMP_MONITOR  which monitor to dump (default 0)
+    //
+    // The monitor filter matters: Render runs once per monitor per frame, so
+    // without it a multi-frame dump alternates displays and the sequence is
+    // uninterpretable.
     {
+        static const auto readInt = [](const wchar_t* name, int fallback) {
+            wchar_t buf[32]{};
+            const DWORD n = GetEnvironmentVariableW(name, buf, 32);
+            const int parsed = (n > 0 && n < 32) ? _wtoi(buf) : 0;
+            return (parsed > 0) ? parsed : fallback;
+        };
+
         static const std::wstring dumpPath = []() -> std::wstring {
             wchar_t buf[MAX_PATH]{};
             const DWORD n = GetEnvironmentVariableW(L"BM_DUMP_FRAME", buf, MAX_PATH);
@@ -649,19 +673,30 @@ bool D3DRenderer::RenderFrame(
 
         if (!dumpPath.empty())
         {
-            // Kacinci karede dokulecek? BM_DUMP_AFTER ile ayarlanabilir
-            // (varsayilan 60 ~= 1 saniye). Fare takibi gibi zamana bagli
-            // davranislari dogrularken gec bir kare gerekiyor.
-            static const int dumpAtFrame = []() {
-                wchar_t buf[32]{};
-                const DWORD n = GetEnvironmentVariableW(L"BM_DUMP_AFTER", buf, 32);
-                const int parsed = (n > 0 && n < 32) ? _wtoi(buf) : 0;
-                return (parsed > 0) ? parsed : 60;
-            }();
+            static const int dumpAtFrame  = readInt(L"BM_DUMP_AFTER",   60);
+            static const int dumpCount    = readInt(L"BM_DUMP_COUNT",    1);
+            static const int dumpEvery    = readInt(L"BM_DUMP_EVERY",   30);
+            static const size_t dumpMonitor =
+                static_cast<size_t>(readInt(L"BM_DUMP_MONITOR", 0));
 
-            static int frameCounter = 0;
-            if (++frameCounter == dumpAtFrame)
-                DumpBackBuffer(targetIndex, dumpPath.c_str());
+            if (targetIndex == dumpMonitor)
+            {
+                static int frameCounter = 0;
+                static int dumpsDone    = 0;
+
+                ++frameCounter;
+                if (dumpsDone < dumpCount &&
+                    frameCounter >= dumpAtFrame &&
+                    ((frameCounter - dumpAtFrame) % dumpEvery) == 0)
+                {
+                    wchar_t path[MAX_PATH]{};
+                    swprintf_s(path, L"%ls.%03d.bmp", dumpPath.c_str(), dumpsDone);
+                    if (DumpBackBuffer(targetIndex, path))
+                        LOG_INFO("Dump {}/{} at frame {}", dumpsDone + 1, dumpCount,
+                                 frameCounter);
+                    ++dumpsDone;
+                }
+            }
         }
     }
 #endif
