@@ -364,4 +364,26 @@ private:
     #define LOG_DEBUG(fmt, ...) ((void)0)
 #endif
 
+// ── BM_SELFCHECK — assertion for the scriptable self-check suite ──
+//
+// Deliberately not <cassert>. In a /SUBSYSTEM:WINDOWS build _wassert opens a
+// message box, and a process sitting on a dialog hangs whatever script ran it
+// — the exact failure the self-check exists to prevent. _set_error_mode and
+// _CrtSetReportMode do not cover _wassert, which was measured, not assumed.
+//
+// Logs the failed expression (the logger flushes every line, so it survives)
+// and exits with 2. Callers gate on the exit code: 0 pass, 2 assertion failed.
+#ifdef _DEBUG
+    #define BM_SELFCHECK(expr)                                                  \
+        do {                                                                    \
+            if (!(expr))                                                        \
+            {                                                                   \
+                LOG_FATAL("SELF-CHECK FAILED: {}", #expr);                      \
+                _exit(2);                                                       \
+            }                                                                   \
+        } while (0)
+#else
+    #define BM_SELFCHECK(expr) ((void)0)
+#endif
+
 #endif // BETTER_MAGNIFIER_LOGGER_H

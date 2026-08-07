@@ -26,7 +26,10 @@
 #include "pch.h"
 #include "App.h"
 #include "SettingsStore.h"
+#include "ViewportController.h"
 #include "Logger.h"
+
+#include <cwchar>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Forward Declarations (ileride App sınıfı buralara bağlanacak)
@@ -149,6 +152,16 @@ int WINAPI wWinMain(
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
 
     BetterMagnifier::SettingsStoreSelfCheck();
+    BetterMagnifier::ViewportControllerSelfCheck();
+
+    // --self-check runs the pure-logic assertions and exits, so the suite is
+    // scriptable. Without it the process would go on to open windows and never
+    // return, and there would be no way to gate a commit on the asserts.
+    if (std::wcsstr(GetCommandLineW(), L"--self-check") != nullptr)
+    {
+        LOG_INFO("Self-check complete, exiting (--self-check)");
+        return 0;
+    }
 #endif
 
     // ── 6. App'i başlat ve çalıştır ──
