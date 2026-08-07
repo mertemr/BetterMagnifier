@@ -18,7 +18,9 @@
 - Tüm yeni kod ve yorumlar **İngilizce**. Dokunulan mevcut satırlardaki Türkçe yorumlar İngilizce'ye çevrilir veya silinir; ayrı çeviri turu yok.
 - Namespace: `BetterMagnifier`. Header guard deseni: `BETTER_MAGNIFIER_<NAME>_H` artı `#pragma once`.
 - Low-level hook callback'i **hiçbir zaman** bloklamaz. `LowLevelHooksTimeout` 300 ms; hedef p99 < 1 ms.
-- Test framework yok. Testler `SettingsStoreSelfCheck()` desenindeki assert tabanlı self-check'lerdir, `#ifdef _DEBUG` altında.
+- Test framework yok. Testler `SettingsStoreSelfCheck()` desenindeki self-check'lerdir, `#ifdef _DEBUG` altında.
+- **`assert()` değil, `BM_SELFCHECK()` kullan** (`Logger.h`). `/SUBSYSTEM:WINDOWS` build'de `_wassert` bir MessageBox açıyor ve süreç orada asılı kalıyor — `_set_error_mode` ve `_CrtSetReportMode` onu kapsamıyor, ölçüldü. `BM_SELFCHECK` düşen ifadeyi loglayıp **2** ile çıkıyor.
+- Test koşumu: `.\bin\Debug-x64\BetterMagnifier.exe --self-check` → çıkış kodu 0 geçti, 2 assert düştü. Hangi ifadenin düştüğü son log dosyasında `SELF-CHECK FAILED:` satırında.
 - Build: `.\bm.ps1` (Debug), `.\bm.ps1 release`, `.\bm.ps1 errors` (son logdaki WARN/ERROR).
 - `std::atomic<double>` x64'te lock-free; snapshot'lar bunu kullanabilir.
 - Commit'ler sık ve küçük. Her task en az bir commit ile biter.
