@@ -27,6 +27,7 @@
 #include "App.h"
 #include "SettingsStore.h"
 #include "ViewportController.h"
+#include "SystemCursor.h"
 #include "Logger.h"
 
 #include <cwchar>
@@ -83,17 +84,33 @@ int WINAPI wWinMain(
     //
     // Python analojisi: tek örnek için port bind etmek / lock file tutmak,
     // ama bu ikisinden de güvenli çünkü OS temizliğini garanti ediyor.
-    HANDLE singleInstance = CreateMutexW(nullptr, TRUE, L"BetterMagnifier_SingleInstance_Mutex");
-    if (!singleInstance || GetLastError() == ERROR_ALREADY_EXISTS)
-    {
-        if (singleInstance)
-            CloseHandle(singleInstance);
+    //
+    // Diagnostic modes are exempt. They run pure logic and exit without
+    // opening a window, installing a hook or touching Desktop Duplication, so
+    // none of the reasons above apply to them. The exemption is not a nicety:
+    // without it the self-check cannot run while the app is running, which is
+    // exactly when you most want to check something — and worse, it blocks on
+    // the "already running" message box, so a script waiting on it hangs
+    // forever instead of failing.
+    const bool diagnosticRun =
+        std::wcsstr(GetCommandLineW(), L"--self-check")   != nullptr ||
+        std::wcsstr(GetCommandLineW(), L"--dump-cursors") != nullptr;
 
-        MessageBoxW(nullptr,
-            L"BetterMagnifier zaten çalışıyor.\n\n"
-            L"Tepsi (system tray) ikonuna bakın.",
-            L"BetterMagnifier", MB_ICONINFORMATION | MB_OK);
-        return 0;
+    HANDLE singleInstance = nullptr;
+    if (!diagnosticRun)
+    {
+        singleInstance = CreateMutexW(nullptr, TRUE, L"BetterMagnifier_SingleInstance_Mutex");
+        if (!singleInstance || GetLastError() == ERROR_ALREADY_EXISTS)
+        {
+            if (singleInstance)
+                CloseHandle(singleInstance);
+
+            MessageBoxW(nullptr,
+                L"BetterMagnifier zaten çalışıyor.\n\n"
+                L"Tepsi (system tray) ikonuna bakın.",
+                L"BetterMagnifier", MB_ICONINFORMATION | MB_OK);
+            return 0;
+        }
     }
 
     // ── 3. COM Initialize ──
@@ -140,7 +157,17 @@ int WINAPI wWinMain(
 #endif
     LOG_INFO("Debug build: {}", kIsDebugBuild ? "EVET" : "HAYIR");
 
-    // ── 5. Debug self-check ──
+    // ── 5. Pointer-hiding capability ──
+    //
+    // Probed before anything else can want it, and before the self-check exit,
+    // so `--self-check` reports the result too. Whether MagShowSystemCursor
+    // works decides whether pointer compositing may be on by default: the
+    // SetSystemCursor fallback outlives the process, so a kill from Task
+    // Manager would leave the user with no pointer at all.
+    BetterMagnifier::SystemCursor::Probe();
+    BetterMagnifier::SystemCursor::InstallGuards();
+
+    // ── 6. Debug self-check ──
     // Saf mantığı olan tek bileşenimiz SettingsStore. Bozulursa burada
     // düşüyoruz — uygulamanın ortasında tuhaf davranış olarak değil.
 #ifdef _DEBUG

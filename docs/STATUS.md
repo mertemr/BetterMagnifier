@@ -1,6 +1,6 @@
 # BetterMagnifier — Current State
 
-**As of:** 2026-08-05
+**As of:** 2026-08-07
 **Branch:** `refactor/improve-compability`
 **Builds:** Debug x64 and Release x64 both clean (`TreatWarningAsError` is on)
 
@@ -25,8 +25,12 @@ That single requirement drives every hard decision in the codebase. See
 .\bm.ps1 clean      # delete bin and obj
 ```
 
-The app now **requires administrator elevation** (manifest
-`requireAdministrator`). UAC appears on every launch.
+The app normally **requires administrator elevation** (`UACExecutionLevel` in
+the vcxproj; see `src/app.manifest` for why it isn't set there). **Temporarily
+switched to `AsInvoker`** (2026-08-07) so development and panel testing don't
+hit a UAC prompt on every launch — restore `RequireAdministrator` in all four
+`ItemDefinitionGroup` blocks before shipping; see the comment left at each
+site.
 
 Runtime shortcuts: `Ctrl+Alt+Z` toggle, `Ctrl+Alt+X` freeze, `Win+Plus` /
 `Win+Minus` step, `Ctrl+Alt+wheel` step, `Win+middle-click` freeze,
@@ -55,9 +59,9 @@ RENDER THREAD (main, MTA)
   its own GetMessage loop.
 
   GUI THREAD (STA)
-  WinUI 3 XAML island in a Win32 host window. Application::Start owns this
-  thread's message loop, so work is handed to it with
-  DispatcherQueue.TryEnqueue, never PostThreadMessage.
+  WinUI 3 XAML island in a Win32 host window. Its own GetMessage loop, not
+  Application::Start, so PostThreadMessage(WM_QUIT) ends it and work can be
+  handed to it with either PostThreadMessage or DispatcherQueue.TryEnqueue.
 ```
 
 **Why the input thread exists:** low-level hooks run on the message queue of
@@ -91,10 +95,31 @@ also stays in bounds for every anchor position by construction.
 - Hooks confirmed on a different thread from the render loop (log evidence)
 - Single-instance guard (named mutex)
 - `Ctrl+Alt+Shift+Q` panic exit
-- Elevation manifest (verified with `mt.exe` against the built exe)
+- Elevation manifest (verified with `mt.exe` against the built exe) — currently
+  disabled, see [Build and run](#build-and-run)
 - Recovery after locking the workstation (see below)
-- The control panel's XAML island comes up inside the real, elevated app
-  (`Control panel opened` in the log, on its own thread, no warnings)
+- The control panel's XAML island comes up and lays out the full tree
+  (`Control panel opened`, `Panel root Loaded`/`SizeChanged`, dispatcher
+  ticking, all in the log; confirmed visually with a screenshot). Tested
+  un-elevated (`AsInvoker`); not re-verified elevated since the flip.
+
+### Measured, 2026-08-07
+
+**`MagShowSystemCursor` works here, without UIAccess.** `SystemCursor::Probe()`
+loads `magnification.dll`, calls `MagInitialize`, and round-trips
+`MagShowSystemCursor(FALSE)`/`(TRUE)` rather than trusting that the export
+resolved. Result on this machine (Windows 11 Pro 26200): `AVAILABLE`.
+
+This settles the gate in the pointer-compositing design: cursor compositing may
+be **on by default**, and the `SetSystemCursor` fallback — which outlives the
+process and would leave the user with no pointer after a Task Manager kill —
+stays a dead path behind `allowUnsafeCursorHide`.
+
+`--self-check` runs the pure-logic assertions and exits, and is exempt from the
+single-instance mutex, so it works while the app is running. `BM_SELFCHECK`
+rather than `assert`: `_wassert` opens a message box in a `/SUBSYSTEM:WINDOWS`
+build and hangs the caller, which `_set_error_mode` and `_CrtSetReportMode` do
+not prevent — measured, not assumed.
 
 ### Works, not verified by me
 
@@ -139,11 +164,15 @@ durations.
 
 ## Control panel
 
-> **OFF by default, unfinished.** Set `BM_PANEL=1` to enable it; the tray's
-> Settings entry only appears when it is on. The blank-window bug is fixed - the
-> island needed `WindowsXamlManager::InitializeForCurrentThread()` - but a XAML
-> `TextBox` in the island takes the whole process down with a stowed exception,
-> and the rest of the tree is only partly verified without one. Full measurements
+> **OFF by default.** Set `BM_PANEL=1` to enable it; the tray's Settings entry
+> only appears when it is on. Both known crashes are fixed: the blank-window
+> bug (island needed `WindowsXamlManager::InitializeForCurrentThread()`) and a
+> stowed-exception crash from any XAML control that embeds a `TextBox`
+> (`TextBox` itself, and `NumberBox`, replaced with `Slider` for the zoom-limit
+> fields). The full tree — monitor cards and every settings section — now opens
+> and lays out without crashing, confirmed with a screenshot. Still off by
+> default because interactive behavior (does a slider drag actually reach
+> `PushSettings()` and persist) has not been verified by hand. Full measurements
 > in [`PANEL-BLANK.md`](PANEL-BLANK.md).
 
 WinUI 3, built in code, hosted as a XAML island on its own STA thread. One
@@ -313,7 +342,7 @@ the user's registry, not the launching process' in-memory one, so
 `$env:BM_X = '1'; Start-Process ...` silently has no effect. Use:
 
 ```powershell
-[Environment]::SetEnvironmentVariable('BM_OPEN_PANEL', '1', 'User')
+[Environment]::SetEnvironmentVariable('BM_PANEL', '1', 'User')
 ```
 
 and clear it the same way with `$null` afterwards.
@@ -348,9 +377,10 @@ became the broader `hijackMagnifierKeys`, which covers `Win+Plus`/`Win+Minus`,
 
 ## Decisions waiting on the user
 
-0. The panel is off by default and stays that way until the `TextBox` crash is
-   understood and the rest of its tree is verified control by control. See
-   [`PANEL-BLANK.md`](PANEL-BLANK.md); the magnifier does not depend on it.
+0. The panel no longer crashes (see [`PANEL-BLANK.md`](PANEL-BLANK.md)) but is
+   still off by default pending a five-minute manual check that the controls
+   actually drive settings and that a change survives a restart. The magnifier
+   does not depend on it either way.
 1. Which popup mode becomes the default
 2. Whether `Win+Plus` still double-triggers under elevation, which decides
    whether the OS Magnifier shortcut has to be turned off
