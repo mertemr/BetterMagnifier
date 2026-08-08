@@ -1,7 +1,13 @@
 # BetterMagnifier Kontrol Paneli — Tasarım
 
 **Tarih:** 2026-08-04
-**Durum:** Onaylandı, uygulama planı bekliyor
+**Durum:** Onaylandı, uygulaması kısmen yapıldı
+
+> **Uygulama durumu (2026-08-08):** Panelin motor tarafı hazır — mesaj kontratı
+> (`AppMessages.h`), lock-free durum aktarımı (`StatusSnapshot.h`), INI ayar deposu
+> (`SettingsStore`) ve ayrı input thread'i (bölüm 3.1'deki latent bug) uygulandı.
+> GUI'nin kendisi (XAML Islands) hâlâ bölüm 9'daki spike'ı bekliyor. Ayrıntı ve
+> sapmalar: `docs/superpowers/plans/2026-08-04-control-panel-gui.md` → "Uygulama Durumu".
 
 ## 1. Amaç
 

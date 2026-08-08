@@ -10,6 +10,30 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-04-control-panel-gui-design.md`
 
+## Uygulama Durumu (2026-08-08)
+
+| Task | Durum | Not |
+|---|---|---|
+| 1 — Spike (XAML island) | ⏳ Yapılmadı | Windows + Visual Studio + NuGet gerektiriyor |
+| 2 — Mesaj sabitleri + StatusSnapshot | ✅ Kod tamam | Derleme/çalıştırma doğrulaması bekliyor |
+| 3 — SettingsStore | ✅ Kod tamam | Saf mantık (`ParseHotkey`/`FormatHotkey`) ayrı bir kosumla doğrulandı; INI yolu Windows'ta doğrulanacak |
+| 4 — InputThread | ✅ Kod tamam | Hook'lar artık render thread'inde değil |
+| 5-9 — ControlPanel, sekmeler, odak, Win+Z | ⏳ Yapılmadı | Task 1 spike'ı ve Windows App SDK'sı ön koşul |
+
+Task 2/3/4'ün adım kutucukları **bilinçli olarak işaretsiz bırakıldı**: kod yazıldı ama
+bu plandaki doğrulama döngüsü (MSBuild + uygulamayı çalıştırıp log okuma) bir Windows
+makinesi gerektiriyor ve henüz koşulmadı. Kutucukları işaretlemek, koşulmamış bir
+doğrulamayı koşulmuş göstermek olurdu.
+
+Plandan sapmalar (hepsi mevcut kodda bulunan hataların düzeltilmesinden doğdu):
+
+- `App::Update`/`RenderMonitor` planın öngördüğünden fazla değişti: per-monitor dizi
+  hizası, capture önbelleği ve frame atlama mantığı eklendi (bkz. commit mesajları).
+- `DXGICapture` artık yakalanan frame'i kendi texture'ına kopyalayıp hemen bırakıyor;
+  `CapturedFrame.texture` ömrü `AcquireFrame` çağrıları arasında geçerli.
+- `App::Shutdown` `lastZoom`'u yalnızca zoom açıkken kaydediyor — kapalıyken
+  `zoomLevel` 1.0'a düştüğü için plandaki hali "son seviyeyi hatırla"yı boşa çıkarırdı.
+
 ## Global Constraints
 
 Her task'ın gereksinimleri bu bölümü kapsar.
@@ -49,7 +73,7 @@ powershell -Command "Add-Type -Namespace W -Name N -MemberDefinition '[DllImport
 
 ---
 
-### Task 1: Spike — ikincil STA thread'de XAML island
+### Task 1 ⏳: Spike — ikincil STA thread'de XAML island
 
 Spec bölüm 9'daki açık riski kapatır. Başarısız olursa tasarım değişir, bu yüzden ilk iş.
 
@@ -305,7 +329,7 @@ Spike BAŞARISIZ olursa: buradan sonraki task'lara geçme. Geri dönüş yollar�
 
 ---
 
-### Task 2: Mesaj sabitleri ve durum snapshot'ı
+### Task 2 ✅ (kod tamam): Mesaj sabitleri ve durum snapshot'ı
 
 **Files:**
 - Create: `src/AppMessages.h`
@@ -673,7 +697,7 @@ feat(app): add status snapshot and message constants
 
 ---
 
-### Task 3: SettingsStore — INI kalıcılığı ve hotkey ayrıştırma
+### Task 3 ✅ (kod tamam): SettingsStore — INI kalıcılığı ve hotkey ayrıştırma
 
 Spec bölüm 4 "Ayar deposu". Bu task'ın saf mantığı (`ParseHotkey`/`FormatHotkey`) projedeki tek gerçekten test edilebilir parça — assert self-check buraya konur.
 
@@ -1446,7 +1470,7 @@ feat(settings): add INI-backed settings store
 
 ---
 
-### Task 4: InputThread — hook'ları render thread'den çıkar
+### Task 4 ✅ (kod tamam): InputThread — hook'ları render thread'den çıkar
 
 Spec bölüm 3.1. Mevcut latent bug'ı kapatır: `WH_MOUSE_LL` şu anda ana thread'de, render loop'unun arkasında kuyruğa giriyor.
 
@@ -2161,7 +2185,7 @@ refactor(input): move low-level hooks to a dedicated thread
 
 ---
 
-### Task 5: ControlPanel iskeleti — GUI thread, bootstrapper, XAML island, iki boş sekme
+### Task 5 ⏳: ControlPanel iskeleti — GUI thread, bootstrapper, XAML island, iki boş sekme
 
 Spec bölüm 3.3, 5.2, 5.4. Task 1'deki spike'ın kanıtladığı deseni üretim koduna taşır.
 
@@ -2841,7 +2865,7 @@ feat(gui): add WinUI 3 control panel shell
 
 ---
 
-### Task 6: Durum sekmesi — monitör kartları, canlı okuma, zoom slider
+### Task 6 ⏳: Durum sekmesi — monitör kartları, canlı okuma, zoom slider
 
 Spec bölüm 6 "Durum sekmesi". `StatusSnapshot`'ı görünür kılar.
 
@@ -3448,7 +3472,7 @@ feat(gui): add live status tab with per-monitor cards
 
 ---
 
-### Task 7: Ayarlar sekmesi
+### Task 7 ⏳: Ayarlar sekmesi
 
 Spec bölüm 6 "Ayarlar sekmesi".
 
@@ -4000,7 +4024,7 @@ feat(gui): add settings tab
 
 ---
 
-### Task 8: Klavye odağı takibi
+### Task 8 ⏳: Klavye odağı takibi
 
 Spec bölüm 6 "Klavye odağı takibi". `FollowMode::MouseAndFocus`'u gerçek yapar.
 
@@ -4277,7 +4301,7 @@ feat(input): follow keyboard focus with EVENT_OBJECT_FOCUS
 
 ---
 
-### Task 9: `Win+Z` ele geçirme (opt-in)
+### Task 9 ⏳: `Win+Z` ele geçirme (opt-in)
 
 Spec bölüm 5.5. Kullanıcının açıkça istediği özellik; varsayılan kapalı.
 
