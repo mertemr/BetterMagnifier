@@ -68,11 +68,16 @@ void TrayIcon::Destroy()
 // =============================================================================
 void TrayIcon::UpdateTooltip(const wchar_t* text)
 {
-    if (!m_created) return;
+    if (!m_created || !text) return;
 
     wcscpy_s(m_nid.szTip, text);
-    m_nid.uFlags = NIF_TIP;
-    Shell_NotifyIconW(NIM_MODIFY, &m_nid);
+
+    // uFlags'i KALICI olarak degistirmiyoruz. Eskiden `m_nid.uFlags = NIF_TIP;`
+    // yaziyordu — ilk tooltip guncellemesinden sonra NIF_ICON ve NIF_MESSAGE
+    // sonsuza dek kayboluyordu, sonraki her NIM_MODIFY eksik bayrakla gidiyordu.
+    NOTIFYICONDATAW update = m_nid;
+    update.uFlags = NIF_TIP;
+    Shell_NotifyIconW(NIM_MODIFY, &update);
 }
 
 // =============================================================================
@@ -120,6 +125,11 @@ void TrayIcon::ShowContextMenu()
         hMenu,
         TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
         pt.x, pt.y, 0, m_hwnd, nullptr);
+
+    // Belgelenmis Win32 tuhafligi (MS KB135788): SetForegroundWindow ile
+    // menuyu one aldiktan sonra pencereye bos bir mesaj postalanmazsa,
+    // kullanici menunun disina tikladiginda menu ekranda asili kaliyor.
+    PostMessageW(m_hwnd, WM_NULL, 0, 0);
 
     DestroyMenu(hMenu);
 

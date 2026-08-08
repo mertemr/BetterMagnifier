@@ -273,6 +273,7 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
 
     // Eski swap chain varsa temizle
     rt.rtv.Reset();
+    rt.backBuffer.Reset();
     rt.swapChain.Reset();
 
     DXGI_SWAP_CHAIN_DESC1 swapDesc{};
@@ -306,15 +307,14 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
 
     // ── Render Target View olustur ──
     // Swap chain'in back buffer'ini render hedefi olarak kullanmak icin RTV gerekli.
-    ComPtr<ID3D11Texture2D> backBuffer;
-    hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&rt.backBuffer));
     if (FAILED(hr))
     {
         LOG_ERROR("GetBuffer basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
         return false;
     }
 
-    hr = m_device->CreateRenderTargetView(backBuffer.Get(), nullptr, &rt.rtv);
+    hr = m_device->CreateRenderTargetView(rt.backBuffer.Get(), nullptr, &rt.rtv);
     if (FAILED(hr))
     {
         LOG_ERROR("CreateRenderTargetView basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
@@ -344,85 +344,64 @@ void D3DRenderer::RenderFrame(
         return;
 
     auto& rt = m_renderTargets[targetIndex];
-    if (!rt.swapChain || !rt.rtv)
+    if (!rt.swapChain || !rt.rtv || !rt.backBuffer)
         return;
 
     if (!srcTexture)
         return;
 
-    // NOT: Burada SRV olusturmaya CALISMIYORUZ.
-    // Desktop Duplication texture'lari D3D11_BIND_SHADER_RESOURCE flag'i
-    // OLMADAN gelir — CreateShaderResourceView her zaman basarisiz olur.
-    // Bu asamada CopySubresourceRegion kullaniyoruz, o SRV gerektirmiyor.
-    // Shader tabanli olceklendirmeye gecince (Adim 4) DD texture'i once
-    // SRV bind flag'li ara bir texture'a kopyalamak gerekecek.
+    // NOT: Burada SRV olusturmaya CALISMIYORUZ — henuz shader pipeline yok.
+    // Kaynak artik DXGICapture'in onbellek texture'i ve SRV bind flag'i ile
+    // olusturuluyor, yani shader tabanli olceklendirmenin (Adim 4) onunde
+    // engel kalmadi. Su anki yol: CopySubresourceRegion, SRV gerektirmiyor.
 
-    // ── Viewport ayarla ──
-    D3D11_VIEWPORT viewport{};
-    viewport.TopLeftX = 0.0f;
-    viewport.TopLeftY = 0.0f;
-    viewport.Width    = static_cast<float>(rt.width);
-    viewport.Height   = static_cast<float>(rt.height);
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
-
-    m_context->RSSetViewports(1, &viewport);
-    m_context->OMSetRenderTargets(1, rt.rtv.GetAddressOf(), nullptr);
-
-    // ── Clear ──
-    float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };  // Transparent
-    m_context->ClearRenderTargetView(rt.rtv.Get(), clearColor);
-
-    // ── Source rect'ten crop + scale ──
-    // srcRect: kaynak texture'dan kesilecek bolge
-    // Bu bolge, zoom level ve focal point'e gore hesaplaniyor.
-    //
-    // Basit yaklasim: CopySubresourceRegion ile crop, sonra full-screen quad ile render.
-    // Simdilik CopySubresourceRegion + StretchRect equivalent kullaniyoruz.
-    // Shader-based render (vertex/pixel shader) ileride eklenecek.
-
-    // Source texture boyutlarini al
+    // ── Source rect'ten crop ──
+    // srcRect: kaynak texture'dan kesilecek bolge (zoom level + focal point).
     D3D11_TEXTURE2D_DESC srcDesc{};
     srcTexture->GetDesc(&srcDesc);
 
-    // Clamp source rect to texture bounds
+    // Kaynak sinirlarina clamp
     D3D11_BOX sourceBox{};
-    sourceBox.left   = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.left), 0L, static_cast<long>(srcDesc.Width)));
-    sourceBox.top    = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.top), 0L, static_cast<long>(srcDesc.Height)));
-    sourceBox.right  = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.right), 0L, static_cast<long>(srcDesc.Width)));
+    sourceBox.left   = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.left),   0L, static_cast<long>(srcDesc.Width)));
+    sourceBox.top    = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.top),    0L, static_cast<long>(srcDesc.Height)));
+    sourceBox.right  = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.right),  0L, static_cast<long>(srcDesc.Width)));
     sourceBox.bottom = static_cast<UINT>(std::clamp(static_cast<long>(srcRect.bottom), 0L, static_cast<long>(srcDesc.Height)));
     sourceBox.front  = 0;
     sourceBox.back   = 1;
 
-    // Gecici texture'a crop
-    UINT cropW = sourceBox.right - sourceBox.left;
-    UINT cropH = sourceBox.bottom - sourceBox.top;
-
-    if (cropW == 0 || cropH == 0)
+    if (sourceBox.right <= sourceBox.left || sourceBox.bottom <= sourceBox.top)
         return;
 
-    // Back buffer'a kopyala.
+    // Hedef sinirlarina da clamp: kopya bolgesi back buffer'a sigmiyorsa
+    // CopySubresourceRegion TAMAMEN sessizce duser (kismi kopya yapmaz).
+    // Monitor cozunurlugu degisip swap chain henuz yenilenmediyse tam olarak
+    // bu olurdu — ekran donardi, log'da hicbir iz olmazdi.
+    if (sourceBox.right - sourceBox.left > rt.width)
+        sourceBox.right = sourceBox.left + rt.width;
+    if (sourceBox.bottom - sourceBox.top > rt.height)
+        sourceBox.bottom = sourceBox.top + rt.height;
+
+    // ── Clear ──
+    // Kopya sadece kirpma bolgesini dolduruyor; flip-model'de Present sonrasi
+    // back buffer icerigi TANIMSIZ, o yuzden gerisini temizlemek sart.
+    // ClearRenderTargetView RTV'nin OM'a BAGLI olmasini gerektirmiyor. Eskiden
+    // once viewport + OMSetRenderTargets yapip hemen ardindan geri cikariyorduk;
+    // hicbir draw call olmadigi icin ikisi de olu isti. Bagli olmayan back
+    // buffer'a CopySubresourceRegion da serbest — debug layer sikayet etmiyor.
+    const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };  // Opak siyah
+    m_context->ClearRenderTargetView(rt.rtv.Get(), clearColor);
+
+    // ── Back buffer'a kopyala ──
     // ponytail: CopySubresourceRegion 1:1 kopyalar — OLCEKLEME YAPMAZ.
     // Yani su an zoom seviyesi kirpma bolgesini kucultuyor ama goruntu
     // buyumuyor. Gercek zoom icin shader pipeline gerekli (Adim 4):
     // fullscreen quad + linear sampler + srcRect'i UV'ye ceviren constant buffer.
-    ComPtr<ID3D11Texture2D> backBuffer;
-    HRESULT hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-    if (SUCCEEDED(hr))
-    {
-        // KRITIK: Back buffer su an render target olarak BAGLI.
-        // Bagli bir kaynaga CopySubresourceRegion yapilamaz — D3D11 debug layer
-        // "resource is bound as render target" hatasi verir ve kopya sessizce duser.
-        // Once RTV'yi cikar.
-        m_context->OMSetRenderTargets(0, nullptr, nullptr);
-
-        m_context->CopySubresourceRegion(
-            backBuffer.Get(), 0,    // Hedef
-            0, 0, 0,                // Hedef offset
-            srcTexture, 0,          // Kaynak
-            &sourceBox              // Kaynak bolgesi
-        );
-    }
+    m_context->CopySubresourceRegion(
+        rt.backBuffer.Get(), 0,   // Hedef
+        0, 0, 0,                  // Hedef offset
+        srcTexture, 0,            // Kaynak
+        &sourceBox                // Kaynak bolgesi
+    );
 }
 
 // =============================================================================
@@ -463,8 +442,10 @@ void D3DRenderer::ResizeTarget(size_t targetIndex, UINT width, UINT height)
     if (!rt.swapChain)
         return;
 
-    // RTV'yi release et (resize oncesi zorunlu)
+    // Back buffer'a tutunan HER referans birakilmali (RTV + onbellek),
+    // yoksa ResizeBuffers DXGI_ERROR_INVALID_CALL doner.
     rt.rtv.Reset();
+    rt.backBuffer.Reset();
     m_context->Flush();
 
     HRESULT hr = rt.swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
@@ -474,12 +455,15 @@ void D3DRenderer::ResizeTarget(size_t targetIndex, UINT width, UINT height)
         return;
     }
 
-    // Yeni RTV olustur
-    ComPtr<ID3D11Texture2D> backBuffer;
-    hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    // Yeni back buffer + RTV
+    hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&rt.backBuffer));
     if (SUCCEEDED(hr))
     {
-        m_device->CreateRenderTargetView(backBuffer.Get(), nullptr, &rt.rtv);
+        m_device->CreateRenderTargetView(rt.backBuffer.Get(), nullptr, &rt.rtv);
+    }
+    else
+    {
+        LOG_ERROR("Resize sonrasi GetBuffer basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
     }
 
     rt.width  = width;
@@ -495,9 +479,13 @@ void D3DRenderer::RemoveRenderTarget(size_t index)
 {
     if (index < m_renderTargets.size())
     {
-        m_renderTargets[index].rtv.Reset();
-        m_renderTargets[index].swapChain.Reset();
-        m_renderTargets[index].targetWindow = nullptr;
+        auto& rt = m_renderTargets[index];
+        rt.rtv.Reset();
+        rt.backBuffer.Reset();
+        rt.swapChain.Reset();
+        rt.targetWindow = nullptr;
+        rt.width  = 0;
+        rt.height = 0;
     }
 }
 

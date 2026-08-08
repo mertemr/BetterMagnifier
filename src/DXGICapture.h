@@ -39,11 +39,15 @@ namespace BetterMagnifier {
 // ─────────────────────────────────────────────────────────────────────────────
 // Captured Frame — Yakalanan tek bir frame'in bilgileri
 // ─────────────────────────────────────────────────────────────────────────────
+// texture: DXGICapture'in SAHIP OLDUGU onbellek texture'i. Duplication'dan
+// gelen gecici texture DEGIL — o AcquireFrame doner donmez birakiliyor.
+// Yani bu texture bir sonraki AcquireFrame'e kadar gecerli kalir ve
+// masaustu degismese bile okunabilir (fare hareketiyle pan yapabilmek icin sart).
 struct CapturedFrame
 {
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;     // GPU'daki yakalanan frame
-    DXGI_OUTDUPL_FRAME_INFO                 frameInfo;   // Timestamp, mouse info, vb.
-    bool                                    isNewFrame = false;  // Yeni frame mi, eski mi?
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;     // Onbellekteki son goruntu
+    DXGI_OUTDUPL_FRAME_INFO                 frameInfo{}; // Timestamp, mouse info, vb.
+    bool                                    isNewFrame = false;  // Bu cagrida icerik degisti mi?
     UINT                                    width  = 0;
     UINT                                    height = 0;
 };
@@ -73,30 +77,46 @@ public:
 
     // ── Frame Capture ──
     // Desktop'un guncel frame'ini yakala.
-    // timeoutMs: Bekleme suresi (0 = anlik, 16 = ~60fps)
-    // Dondurulen CapturedFrame.isNewFrame true ise yeni frame var.
-    // False ise ekranda degisiklik yok (eski frame'i kullanmaya devam et).
-    CapturedFrame AcquireFrame(UINT timeoutMs = 16);
+    // timeoutMs: Bekleme suresi (0 = bloklamadan sor)
+    //
+    // Dondurulen CapturedFrame.texture HER ZAMAN (ilk basarili yakalamadan
+    // sonra) gecerlidir; isNewFrame sadece "icerik bu cagrida degisti mi"
+    // sorusunu cevaplar. Cagiran ikisini ayri degerlendirmeli: icerik ayni
+    // kalsa bile zoom bolgesi degistiyse yeniden render gerekir.
+    //
+    // ReleaseFrame'i cagirmak GEREKMEZ — duplication frame'i onbellege
+    // kopyalandiktan hemen sonra icerde birakiliyor (DWM'yi bekletmemek icin).
+    CapturedFrame AcquireFrame(UINT timeoutMs = 0);
 
     // ── Release ──
-    // Yakalanan frame'i serbest birak. AcquireFrame'den sonra MUTLAKA cagirilmali!
-    // Aksi halde sonraki AcquireFrame basarisiz olur.
+    // Elde tutulan duplication frame'ini birak. AcquireFrame bunu kendisi
+    // yapiyor; disaridan cagirmak sadece guvenlik amacli (idempotent).
     void ReleaseFrame();
 
     // ── Recovery ──
     // DXGI_ERROR_ACCESS_LOST sonrasi yeniden olustur.
     // Full-screen exclusive app acilip kapaninca gerekir.
+    // Basarisiz denemelerden sonra kisa bir bekleme uygular — her frame
+    // yeniden denemek log'u doldurur ve bosa DuplicateOutput cagrisi yapar.
     bool Reinitialize();
 
     // ── State ──
     bool IsInitialized() const { return m_initialized; }
     bool NeedsReinit()   const { return m_needsReinit; }
+    bool HasFrame()      const { return m_cachedFrame != nullptr; }
     UINT GetWidth()      const { return m_width; }
     UINT GetHeight()     const { return m_height; }
 
 private:
     // ── Internal ──
     void Cleanup();
+
+    // Sadece duplication oturumunu birakir; output ve device referanslarini
+    // TUTAR. ACCESS_LOST sonrasi Reinitialize'in calisabilmesi icin sart.
+    void ReleaseDuplication();
+
+    // Onbellek texture'ini kaynak texture'in tanimina gore olustur/dogrula.
+    bool EnsureCacheTexture(ID3D11Texture2D* src);
 
     // ── COM Resources ──
     // Release sirasi KRITIK:
@@ -109,12 +129,25 @@ private:
     ID3D11Device*                                  m_device  = nullptr;  // Owned by D3DRenderer
     ID3D11DeviceContext*                            m_context = nullptr;  // Owned by D3DRenderer
 
+    // ── Frame Onbellegi ──
+    // Duplication'in verdigi texture yalnizca ReleaseFrame'e kadar gecerli ve
+    // SRV bind flag'i yok. Her yeni frame'i kendi texture'imiza kopyaliyoruz:
+    //   1. Frame'i hemen birakabiliyoruz (DWM bizi beklemiyor)
+    //   2. Masaustu degismese bile son goruntu elimizde — fare hareket edince
+    //      zoom bolgesini kaydirip yeniden render edebiliyoruz
+    //   3. SRV bind flag'i ile olusturuluyor — shader tabanli olceklemenin onu acik
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>        m_cachedFrame;
+
     // ── Frame State ──
-    bool  m_frameAcquired = false;   // AcquireFrame yapildi, ReleaseFrame henuz yapilmadi
+    bool  m_frameAcquired = false;   // AcquireNextFrame yapildi, ReleaseFrame henuz yapilmadi
     bool  m_initialized   = false;
     bool  m_needsReinit   = false;   // DXGI_ERROR_ACCESS_LOST durumu
     UINT  m_width  = 0;
     UINT  m_height = 0;
+
+    // Basarisiz reinit sonrasi bir sonraki denemenin en erken zamani
+    std::chrono::steady_clock::time_point m_nextReinitAttempt{};
+    static constexpr std::chrono::milliseconds kReinitRetryDelay{500};
 
     // ── Stats ──
     uint64_t m_frameCount = 0;

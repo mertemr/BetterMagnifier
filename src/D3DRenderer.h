@@ -35,8 +35,14 @@ struct MonitorInfo;
 // ─────────────────────────────────────────────────────────────────────────────
 struct RenderTarget
 {
-    Microsoft::WRL::ComPtr<IDXGISwapChain1>       swapChain;
+    Microsoft::WRL::ComPtr<IDXGISwapChain1>        swapChain;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
+
+    // Flip-model swap chain'de 0 numarali buffer sabittir (rotasyonu D3D11
+    // icerde yapiyor), bu yuzden RTV gibi bunu da bir kez alip saklıyoruz.
+    // Her frame GetBuffer cagirmak bir COM QueryInterface + tahsis demekti.
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>        backBuffer;
+
     HWND                                           targetWindow = nullptr;
     UINT                                           width  = 0;
     UINT                                           height = 0;

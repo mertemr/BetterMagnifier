@@ -62,8 +62,6 @@ void MonitorManager::Refresh()
 {
     LOG_INFO("Monitor listesi yenileniyor (display change)...");
 
-    std::lock_guard lock(m_mutex);
-
     // Mevcut zoom state'leri koru — yeni listeye aktarilacak
     // Python analojisi: 
     //   old_states = {mon.device_name: mon.zoom for mon in self.monitors}
@@ -309,19 +307,35 @@ MonitorInfo* MonitorManager::FindByHandle(HMONITOR hMon)
 }
 
 // Bir noktanin hangi monitorde oldugunu bul
-// Python analojisi: 
+// Python analojisi:
 //   next((m for m in monitors if m.rect.contains(point)), None)
 MonitorInfo* MonitorManager::FindByPoint(POINT pt)
 {
-    for (auto& mon : m_monitors)
+    const auto index = FindIndexByPoint(pt);
+    return index ? &m_monitors[*index] : nullptr;
+}
+
+std::optional<size_t> MonitorManager::FindIndexByHandle(HMONITOR hMon) const
+{
+    for (size_t i = 0; i < m_monitors.size(); ++i)
     {
-        if (PtInRect(&mon.bounds, pt))
-            return &mon;
+        if (m_monitors[i].hMonitor == hMon)
+            return i;
+    }
+    return std::nullopt;
+}
+
+std::optional<size_t> MonitorManager::FindIndexByPoint(POINT pt) const
+{
+    for (size_t i = 0; i < m_monitors.size(); ++i)
+    {
+        if (PtInRect(&m_monitors[i].bounds, pt))
+            return i;
     }
 
-    // Hicbir monitorde degilse, Windows'un MonitorFromPoint'ini kullan
-    HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-    return FindByHandle(hMon);
+    // Hicbir monitorun sinirlarina dusmediyse (monitorler arasi bosluk,
+    // koordinat yuvarlamasi) Windows'a en yakinini sor.
+    return FindIndexByHandle(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST));
 }
 
 MonitorInfo* MonitorManager::GetPrimaryMonitor()

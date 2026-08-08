@@ -28,7 +28,6 @@
 #include <string>
 #include <vector>
 #include <optional>
-#include <mutex>
 #include <functional>
 #include <windows.h>
 #include <dxgi1_5.h>
@@ -121,6 +120,14 @@ struct MonitorInfo
 // ─────────────────────────────────────────────────────────────────────────────
 // MonitorManager Class
 // ─────────────────────────────────────────────────────────────────────────────
+// THREAD SAHIPLIGI: Bu sinifin TEK sahibi render thread'i. GUI thread ve input
+// thread buraya dokunmaz — onlar mesaj penceresine PostMessage eder, render
+// thread kendi zamanlamasiyla isler (bkz. tasarim dokumani bolum 3.2).
+//
+// Eskiden burada bir mutex vardi ama sadece Refresh() aliyordu; okuyucularin
+// hicbiri almiyordu. Yani hicbir sey korumuyor, sadece kod okuyani yaniltiyordu.
+// Kaldirildi — dogru cozum zaten tek sahiplik.
+// ─────────────────────────────────────────────────────────────────────────────
 class MonitorManager
 {
 public:
@@ -155,6 +162,14 @@ public:
     // Bir noktanin hangi monitorde oldugunu bul (mouse pozisyonu icin)
     MonitorInfo* FindByPoint(POINT pt);
 
+    // ── Index ile arama ──
+    // Cagiranlarin cogunun pointer'a degil INDEKSE ihtiyaci var: overlay,
+    // capture ve swap chain dizileri hep indeksle adresleniyor. Pointer donup
+    // sonra cagiranin listeyi tarayip indeksi bulmasi (eski hali) hem
+    // tekrarlanan kod hem de gereksiz ikinci tarama demekti.
+    std::optional<size_t> FindIndexByHandle(HMONITOR hMon) const;
+    std::optional<size_t> FindIndexByPoint(POINT pt) const;
+
     // Primary monitoru al
     MonitorInfo* GetPrimaryMonitor();
 
@@ -183,7 +198,6 @@ private:
 
     // ── Data ──
     std::vector<MonitorInfo> m_monitors;
-    mutable std::mutex       m_mutex;   // Thread-safe erisim icin
 };
 
 } // namespace BetterMagnifier

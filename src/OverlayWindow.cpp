@@ -30,9 +30,11 @@ OverlayWindow::OverlayWindow(OverlayWindow&& other) noexcept
     : m_hwnd(other.m_hwnd)
     , m_monitorIndex(other.m_monitorIndex)
     , m_visible(other.m_visible)
+    , m_excludedFromCapture(other.m_excludedFromCapture)
 {
     other.m_hwnd = nullptr;
     other.m_visible = false;
+    other.m_excludedFromCapture = false;
 }
 
 OverlayWindow& OverlayWindow::operator=(OverlayWindow&& other) noexcept
@@ -40,11 +42,14 @@ OverlayWindow& OverlayWindow::operator=(OverlayWindow&& other) noexcept
     if (this != &other)
     {
         if (m_hwnd) DestroyWindow(m_hwnd);
-        m_hwnd         = other.m_hwnd;
-        m_monitorIndex = other.m_monitorIndex;
-        m_visible      = other.m_visible;
-        other.m_hwnd    = nullptr;
-        other.m_visible = false;
+        m_hwnd                = other.m_hwnd;
+        m_monitorIndex        = other.m_monitorIndex;
+        m_visible             = other.m_visible;
+        m_excludedFromCapture = other.m_excludedFromCapture;
+
+        other.m_hwnd                = nullptr;
+        other.m_visible             = false;
+        other.m_excludedFromCapture = false;
     }
     return *this;
 }
@@ -148,8 +153,13 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
     // WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+): pencere kullaniciya normal
     // gorunur ama ekran yakalama API'lerine gorunmez. Tam istedigimiz sey.
     // Eski Windows'ta basarisiz olur — o zaman feedback loop olusur, uyari veriyoruz.
-    if (!SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE))
+    if (SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE))
     {
+        m_excludedFromCapture = true;
+    }
+    else
+    {
+        m_excludedFromCapture = false;
         LOG_WARN("SetWindowDisplayAffinity basarisiz ({}) — Windows 10 2004+ gerekiyor, "
                  "feedback loop olusabilir", GetLastError());
     }
