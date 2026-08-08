@@ -1,0 +1,88 @@
+#pragma once
+
+// =============================================================================
+// StatusSnapshot.h — Motor -> GUI canli durum aktarimi
+// =============================================================================
+// Render thread her frame buraya yazar, GUI thread 10 Hz okur.
+//
+// Neden mutex degil atomic?
+//   Render thread'in hot path'inde kilit almasi frame suresini kestirilemez
+//   yapar — projenin butun amaci laggsizlik. std::atomic<float> ve
+//   std::atomic<bool> x64'te lock-free (kontrol: is_always_lock_free).
+//
+// Neden 10 Hz okuma yeter?
+//   Ayar panelinde 60 Hz gostergeye kimse bakmiyor. 10 Hz'de cekisme sifira
+//   iner, insan gozu farki gormez.
+//
+// Tutarlilik notu: alanlar tek tek atomic, yapinin TAMAMI atomic degil.
+// Yani GUI ayni monitorun zoomLevel'ini yeni, isActive'ini bir frame eski
+// okuyabilir. Gosterge icin kabul edilebilir — kritik karar alinmiyor.
+//
+// Python analojisi: threading.Event / itertools yerine, her alan icin ayri
+// bir thread-safe kutucuk. Yazan beklemez, okuyan beklemez.
+// =============================================================================
+
+#ifndef BETTER_MAGNIFIER_STATUS_SNAPSHOT_H
+#define BETTER_MAGNIFIER_STATUS_SNAPSHOT_H
+
+#include <atomic>
+#include <array>
+#include <cstddef>
+
+namespace BetterMagnifier {
+
+struct MonitorStatus
+{
+    std::atomic<float> zoomLevel{1.0f};
+    std::atomic<bool>  isActive{false};
+    std::atomic<bool>  isFrozen{false};
+
+    // DXGICapture::IsInitialized() && !NeedsReinit()
+    std::atomic<bool>  captureOk{false};
+
+    // SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) basarili miydi?
+    // false ise overlay kendini yakalar — feedback loop riski, panelde uyari.
+    std::atomic<bool>  captureExcluded{false};
+
+    std::atomic<float> fps{0.0f};
+};
+
+class StatusSnapshot
+{
+public:
+    static constexpr size_t kMaxMonitors = 8;
+
+    StatusSnapshot() = default;
+    StatusSnapshot(const StatusSnapshot&) = delete;
+    StatusSnapshot& operator=(const StatusSnapshot&) = delete;
+
+    // Bounds-check'li erisim. Sinir disi index son elemana duser —
+    // GUI thread'in yaris kosulunda cokmemesi icin (monitor sayisi
+    // WM_DISPLAYCHANGE ile degisebilir, GUI bir tick geride olabilir).
+    MonitorStatus& Monitor(size_t i)
+    {
+        return m_monitors[i < kMaxMonitors ? i : kMaxMonitors - 1];
+    }
+
+    const MonitorStatus& Monitor(size_t i) const
+    {
+        return m_monitors[i < kMaxMonitors ? i : kMaxMonitors - 1];
+    }
+
+    // Sinir disi indeksleri son elemana dusuren yardimci — App icindeki
+    // per-monitor dizilerin (FPS zamanlari, son kirpma bolgesi) ayni
+    // guvenli indekslemeyi paylasmasi icin.
+    static size_t ClampIndex(size_t i)
+    {
+        return i < kMaxMonitors ? i : kMaxMonitors - 1;
+    }
+
+    std::atomic<size_t> monitorCount{0};
+
+private:
+    std::array<MonitorStatus, kMaxMonitors> m_monitors{};
+};
+
+} // namespace BetterMagnifier
+
+#endif // BETTER_MAGNIFIER_STATUS_SNAPSHOT_H

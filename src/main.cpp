@@ -26,6 +26,7 @@
 #include "pch.h"
 #include "App.h"
 #include "Logger.h"
+#include "SettingsStore.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Forward Declarations (ileride App sınıfı buralara bağlanacak)
@@ -109,6 +110,14 @@ int WINAPI wWinMain(
     constexpr bool kIsDebugBuild = false;
 #endif
     LOG_INFO("Debug build: {}", kIsDebugBuild ? "EVET" : "HAYIR");
+
+    // ── Debug self-check ──
+    // Saf mantigi olan tek bilesenimiz. Bozulursa burada dusuyoruz,
+    // uygulamanin ortasinda tuhaf davranis olarak degil.
+    // COM'dan sonra cagriliyor: SHGetKnownFolderPath'e ihtiyaci var.
+#ifdef _DEBUG
+    BetterMagnifier::SettingsStoreSelfCheck();
+#endif
 
     // ── 5. App'i başlat ve çalıştır ──
     // Tüm iş App sınıfında: component init, message loop, capture/render, cleanup.
