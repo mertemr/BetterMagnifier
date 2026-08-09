@@ -42,7 +42,23 @@ public:
     void SetEnabled(bool enabled);
     bool Enabled() const { return m_enabled.load(std::memory_order_relaxed); }
 
+    // scale = speed / pow(zoom, compensation)
+    //
+    // Two knobs because they answer different complaints. compensation = 1
+    // maps hand movement 1:1 onto the magnified screen, which sounds ideal and
+    // measured as too slow in practice: the content is zoom times further apart
+    // visually, so crossing it takes zoom times the hand travel. compensation
+    // below 1 gives some of that back, and it does so where the problem
+    // actually is — at high zoom — instead of uniformly. speed then trims the
+    // result to taste.
     void SetSpeed(float speed);
+    void SetCompensation(float compensation);
+
+    // Keep the pointer on the monitor it is magnifying instead of letting it
+    // walk onto the next one. Wanted deliberately: with a zoomed edge the
+    // pointer used to slip onto the neighbouring display exactly when the user
+    // was trying to reach the edge of the magnified content.
+    void SetLockToMonitor(bool lock);
 
     // True when the event was consumed: the caller must return 1 from the hook
     // and must NOT chain.
@@ -57,6 +73,8 @@ private:
 
     std::atomic<bool>  m_enabled{false};
     std::atomic<float> m_speed{1.0f};
+    std::atomic<float> m_compensation{0.5f};
+    std::atomic<bool>  m_lockToMonitor{true};
 
     // Touched only from the hook, which runs on one thread. Not atomic.
     double m_x = 0.0;

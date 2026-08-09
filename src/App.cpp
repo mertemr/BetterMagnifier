@@ -670,7 +670,25 @@ void App::RenderMonitor(size_t monitorIndex)
     // olceklendirip sunabiliyoruz.
     {
         // ── Zoom bolgesini hesapla (monitor-local koordinatlar) ──
-        const float zoom = (std::max)(mon->zoom.zoomLevel, ZoomState::kMinZoom);
+        // Zoom comes from the SNAPSHOT, not from MonitorManager, and the
+        // distinction is the whole fix for the slide-in artefact while zooming.
+        //
+        // srcOrigin is computed by the controller for the zoom the controller
+        // has applied. Sizing the rect from MonitorManager's zoom instead meant
+        // that during the window between the render thread publishing a new
+        // zoom and the input thread applying it — up to one sync tick, and
+        // every single step of a zoom ramp — the origin and the extent belonged
+        // to different zoom levels. The rect was simply wrong, and it visibly
+        // slid into place as the two caught up.
+        //
+        // Reading both from the same source makes them consistent by
+        // construction. The cost is that a zoom change can appear one tick
+        // late, which is invisible; an inconsistent rect was not.
+        const MonitorViewportAtomic& vp = m_viewportSnapshot.Monitor(monitorIndex);
+
+        const float zoom = (std::max)(
+            static_cast<float>(vp.zoom.load(std::memory_order_relaxed)),
+            ZoomState::kMinZoom);
 
         // Yeni frame yoksa frame.width/height sifir gelir — monitor
         // boyutuna duseriyoruz (capture zaten monitor boyutunda acildi).
@@ -702,8 +720,6 @@ void App::RenderMonitor(size_t monitorIndex)
         // The controller lives on the input thread and advances per mouse
         // event, so the pan stays proportional to mouse motion rather than to
         // frame rate.
-        const MonitorViewportAtomic& vp = m_viewportSnapshot.Monitor(monitorIndex);
-
         RECT srcRect{};
         srcRect.left = static_cast<long>(vp.srcOriginX.load(std::memory_order_relaxed));
         srcRect.top  = static_cast<long>(vp.srcOriginY.load(std::memory_order_relaxed));
