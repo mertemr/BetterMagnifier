@@ -100,6 +100,24 @@ private:
     // Input thread only; no synchronisation needed.
     std::uint64_t m_seenLayoutEpoch = 0;
 
+    // Hook liveness. Windows uninstalls a low-level hook without telling anyone
+    // when it overruns LowLevelHooksTimeout, and there is no API to ask whether
+    // ours is still installed — so it is inferred: the OS cursor moved but no
+    // event reached us since the last tick.
+    //
+    // This mattered little before. Now a dead hook while the pointer is hidden
+    // leaves the user with no pointer at all and no scaling to move it with.
+    void CheckHookLiveness();
+
+    std::atomic<std::uint64_t> m_mouseEvents{0};
+    std::uint64_t m_lastSeenEvents = 0;
+    POINT         m_lastSeenCursor{ -1, -1 };
+    int           m_livenessTicks = 0;
+
+    // The sync timer runs at 16 ms; liveness only needs about a second, and
+    // checking every tick would call GetCursorPos 60 times a second for nothing.
+    static constexpr int kLivenessEveryTicks = 60;
+
     // Zoom can change with the mouse perfectly still (a hotkey, the panel), and
     // then nothing would pull the request through until the user moved. A timer
     // covers that; 16 ms keeps the lag under one frame.

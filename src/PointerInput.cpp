@@ -14,7 +14,7 @@ namespace {
 // defaults and the panel exposes them.
 //
 //   BM_POINTER_SPEED  overall multiplier          (default 1.0)
-//   BM_POINTER_COMP   zoom compensation, 0..1     (default 0.5)
+//   BM_POINTER_COMP   zoom compensation, 0..1     (default 0.2, measured)
 //                     1 = hand maps 1:1 on the magnified screen (slowest)
 //                     0 = native, pointer flies at zoom times speed
 //   BM_POINTER_LOCK   0 to let the pointer leave the magnified monitor

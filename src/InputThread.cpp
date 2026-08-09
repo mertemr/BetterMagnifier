@@ -239,6 +239,12 @@ void InputThread::ThreadMain()
         {
             SyncFromRequests();
             PublishViewport();
+
+            if (++m_livenessTicks >= kLivenessEveryTicks)
+            {
+                m_livenessTicks = 0;
+                CheckHookLiveness();
+            }
             continue;
         }
 
@@ -310,6 +316,54 @@ void InputThread::SyncFromRequests()
         if (want != m_viewport->Zoom(i))
             m_viewport->SetZoom(i, want, px, py);
     }
+}
+
+// =============================================================================
+// CheckHookLiveness — sessizce kaldirilan hook'u yakala
+// =============================================================================
+//
+// Windows removes a low-level hook without notice when the callback overruns
+// LowLevelHooksTimeout, and offers no way to ask whether ours survived. So it
+// is inferred: if the OS cursor has moved but no mouse event reached us since
+// the last check, nothing is delivering events and the hook is gone.
+//
+// Reinstalling is the good outcome. The bad one has to be handled too: if the
+// hook cannot be brought back while the pointer is hidden, the user has no
+// pointer and no way to click anything to fix it. Then the only correct move is
+// to give the real pointer back and stop pretending.
+// =============================================================================
+void InputThread::CheckHookLiveness()
+{
+    POINT now{};
+    if (!GetCursorPos(&now))
+        return;
+
+    const std::uint64_t events = m_mouseEvents.load(std::memory_order_relaxed);
+
+    const bool cursorMoved = (m_lastSeenCursor.x != -1 || m_lastSeenCursor.y != -1) &&
+                             (now.x != m_lastSeenCursor.x || now.y != m_lastSeenCursor.y);
+    const bool sawEvents   = (events != m_lastSeenEvents);
+
+    m_lastSeenCursor = now;
+    m_lastSeenEvents = events;
+
+    if (!cursorMoved || sawEvents)
+        return;
+
+    LOG_WARN("Mouse hook appears dead (cursor moved, no events) — reinstalling");
+
+    RemoveHooks();
+    if (InstallHooks())
+    {
+        m_pointer.Resync();
+        LOG_INFO("Hooks reinstalled");
+        return;
+    }
+
+    LOG_ERROR("Hook reinstall failed — restoring the system pointer and "
+              "disabling pointer scaling");
+    SystemCursor::Restore();
+    m_pointer.SetEnabled(false);
 }
 
 void InputThread::PublishViewport()
@@ -394,6 +448,11 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
     {
         InputThread* self = s_instance;
         auto* mm = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+
+        // Counted before any filtering: the liveness check asks "is anything
+        // reaching us at all", and a filtered event still proves the hook is
+        // installed.
+        self->m_mouseEvents.fetch_add(1, std::memory_order_relaxed);
 
         // Injected filtering lives in PointerInput now, and it has to: our own
         // SetCursorPos comes back marked injected, so "ignore all injected" is

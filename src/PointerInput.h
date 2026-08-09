@@ -46,11 +46,15 @@ public:
     //
     // Two knobs because they answer different complaints. compensation = 1
     // maps hand movement 1:1 onto the magnified screen, which sounds ideal and
-    // measured as too slow in practice: the content is zoom times further apart
-    // visually, so crossing it takes zoom times the hand travel. compensation
-    // below 1 gives some of that back, and it does so where the problem
-    // actually is — at high zoom — instead of uniformly. speed then trims the
-    // result to taste.
+    // measured as far too slow in practice: the content is zoom times further
+    // apart visually, so crossing it takes zoom times the hand travel.
+    // compensation below 1 gives that back where the problem actually is — at
+    // high zoom — instead of uniformly. speed then trims to taste.
+    //
+    // 0.2 is not a guess. 1.0 was unusable, 0.5 still slow, 0.2 tested right on
+    // a 2560x1440 plus 1920x1080 pair. It is closer to native than to full
+    // compensation, which says the theory oversold how much correction the
+    // pointer actually wants.
     void SetSpeed(float speed);
     void SetCompensation(float compensation);
 
@@ -73,7 +77,7 @@ private:
 
     std::atomic<bool>  m_enabled{false};
     std::atomic<float> m_speed{1.0f};
-    std::atomic<float> m_compensation{0.5f};
+    std::atomic<float> m_compensation{0.2f};
     std::atomic<bool>  m_lockToMonitor{true};
 
     // Touched only from the hook, which runs on one thread. Not atomic.
