@@ -163,9 +163,14 @@ struct ControlPanel::Impl
     WUXC::CheckBox    hijackBox{ nullptr };
     WUXC::RadioButton followMouseRadio{ nullptr };
     WUXC::RadioButton followFocusRadio{ nullptr };
-    WUXC::NumberBox   minZoomBox{ nullptr };
-    WUXC::NumberBox   maxZoomBox{ nullptr };
-    WUXC::NumberBox   zoomStepBox{ nullptr };
+    // Sliders, not NumberBox: a NumberBox embeds a TextBox internally and kills
+    // the process the same way a bare TextBox does. See docs/PANEL-BLANK.md.
+    WUXC::Slider      minZoomSlider{ nullptr };
+    WUXC::Slider      maxZoomSlider{ nullptr };
+    WUXC::Slider      zoomStepSlider{ nullptr };
+    WUXC::TextBlock   minZoomLabel{ nullptr };
+    WUXC::TextBlock   maxZoomLabel{ nullptr };
+    WUXC::TextBlock   zoomStepLabel{ nullptr };
     WUXC::CheckBox    startWithWindowsBox{ nullptr };
     WUXC::CheckBox    rememberZoomBox{ nullptr };
 
@@ -805,17 +810,47 @@ void ControlPanel::BuildSettingsTab()
     // ── Zoom limits ──
     panel.Children().Append(MakeHeader(L"Zoom limits"));
 
-    auto makeNumberBox = [](std::wstring_view header, double value,
-                            double lo, double hi, double step)
+    // Slider, not NumberBox: a NumberBox embeds a TextBox internally, and that
+    // kills this process on first layout the same way a bare TextBox does (see
+    // the Hotkeys section above and docs/PANEL-BLANK.md). Sliders are plain
+    // controls with no text-input service dependency and are already proven
+    // safe by the per-monitor zoom slider in the Status section.
+    auto makeLimitRow = [&panel](std::wstring_view label, double value, double lo, double hi,
+                                 double step, WUXC::Slider& sliderOut, WUXC::TextBlock& labelOut)
     {
-        WUXC::NumberBox nb{};
-        nb.Header(winrt::box_value(winrt::hstring{ header }));
-        nb.Value(value);
-        nb.Minimum(lo);
-        nb.Maximum(hi);
-        nb.SmallChange(step);
-        nb.SpinButtonPlacementMode(WUXC::NumberBoxSpinButtonPlacementMode::Compact);
-        return nb;
+        WUXC::Grid row{};
+        WUXC::ColumnDefinition c0{};
+        c0.Width(WUX::GridLengthHelper::FromValueAndType(64.0, WUX::GridUnitType::Pixel));
+        WUXC::ColumnDefinition c1{};
+        c1.Width(WUX::GridLengthHelper::FromValueAndType(1.0, WUX::GridUnitType::Star));
+        WUXC::ColumnDefinition c2{}; c2.Width(WUX::GridLengthHelper::Auto());
+        row.ColumnDefinitions().Append(c0);
+        row.ColumnDefinitions().Append(c1);
+        row.ColumnDefinitions().Append(c2);
+        row.ColumnSpacing(8);
+
+        WUXC::TextBlock name{};
+        name.Text(winrt::hstring{ label });
+        name.VerticalAlignment(WUX::VerticalAlignment::Center);
+        WUXC::Grid::SetColumn(name, 0);
+        row.Children().Append(name);
+
+        sliderOut = WUXC::Slider{};
+        sliderOut.Minimum(lo);
+        sliderOut.Maximum(hi);
+        sliderOut.StepFrequency(step);
+        sliderOut.Value(value);
+        WUXC::Grid::SetColumn(sliderOut, 1);
+        row.Children().Append(sliderOut);
+
+        labelOut = WUXC::TextBlock{};
+        labelOut.MinWidth(48.0);
+        labelOut.VerticalAlignment(WUX::VerticalAlignment::Center);
+        labelOut.Text(winrt::hstring{ std::format(L"{:.2f}", value) });
+        WUXC::Grid::SetColumn(labelOut, 2);
+        row.Children().Append(labelOut);
+
+        panel.Children().Append(row);
     };
 
     // The first monitor's values stand in for all of them; writing applies to
@@ -829,13 +864,12 @@ void ControlPanel::BuildSettingsTab()
             representative = m_settings->Monitor(device);
     }
 
-    m_impl->minZoomBox  = makeNumberBox(L"Minimum", representative.minZoom,  1.0,  20.0, 0.25);
-    m_impl->maxZoomBox  = makeNumberBox(L"Maximum", representative.maxZoom,  1.0,  20.0, 0.25);
-    m_impl->zoomStepBox = makeNumberBox(L"Step",    representative.zoomStep, 0.05,  2.0, 0.05);
-
-    panel.Children().Append(m_impl->minZoomBox);
-    panel.Children().Append(m_impl->maxZoomBox);
-    panel.Children().Append(m_impl->zoomStepBox);
+    makeLimitRow(L"Minimum", representative.minZoom, 1.0, 20.0, 0.25,
+                 m_impl->minZoomSlider, m_impl->minZoomLabel);
+    makeLimitRow(L"Maximum", representative.maxZoom, 1.0, 20.0, 0.25,
+                 m_impl->maxZoomSlider, m_impl->maxZoomLabel);
+    makeLimitRow(L"Step", representative.zoomStep, 0.05, 2.0, 0.05,
+                 m_impl->zoomStepSlider, m_impl->zoomStepLabel);
 
     panel.Children().Append(MakeHint(L"Applied to every monitor."));
 
@@ -901,15 +935,19 @@ void ControlPanel::BuildSettingsTab()
     m_impl->rememberZoomBox.Checked(onChanged);
     m_impl->rememberZoomBox.Unchecked(onChanged);
 
-    auto onNumberChanged = [this](WUXC::NumberBox const&,
-                                  WUXC::NumberBoxValueChangedEventArgs const&)
+    auto makeLimitChanged = [this](WUXC::TextBlock label)
     {
-        if (!m_impl->suppressSettingsEvents)
-            PushSettings();
+        return [this, label](winrt::Windows::Foundation::IInspectable const&,
+                             WUXP::RangeBaseValueChangedEventArgs const& args)
+        {
+            label.Text(winrt::hstring{ std::format(L"{:.2f}", args.NewValue()) });
+            if (!m_impl->suppressSettingsEvents)
+                PushSettings();
+        };
     };
-    m_impl->minZoomBox.ValueChanged(onNumberChanged);
-    m_impl->maxZoomBox.ValueChanged(onNumberChanged);
-    m_impl->zoomStepBox.ValueChanged(onNumberChanged);
+    m_impl->minZoomSlider.ValueChanged(makeLimitChanged(m_impl->minZoomLabel));
+    m_impl->maxZoomSlider.ValueChanged(makeLimitChanged(m_impl->maxZoomLabel));
+    m_impl->zoomStepSlider.ValueChanged(makeLimitChanged(m_impl->zoomStepLabel));
 
     m_impl->suppressSettingsEvents = false;
 }
@@ -932,14 +970,9 @@ void ControlPanel::PushSettings()
                           ? FollowMode::Mouse : FollowMode::MouseAndFocus;
 
     {
-        double lo   = m_impl->minZoomBox.Value();
-        double hi   = m_impl->maxZoomBox.Value();
-        double step = m_impl->zoomStepBox.Value();
-
-        // An emptied NumberBox reports NaN.
-        if (std::isnan(lo))   lo   = 1.0;
-        if (std::isnan(hi))   hi   = 10.0;
-        if (std::isnan(step)) step = 0.25;
+        double lo   = m_impl->minZoomSlider.Value();
+        double hi   = m_impl->maxZoomSlider.Value();
+        double step = m_impl->zoomStepSlider.Value();
 
         if (hi <= lo)
             hi = lo + 1.0;

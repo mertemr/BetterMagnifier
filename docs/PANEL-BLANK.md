@@ -1,11 +1,15 @@
 # Kontrol paneli — teshis notlari
 
-**Son guncelleme:** 2026-08-06
-**Durum:** Panel **varsayilan olarak KAPALI**. `BM_PANEL=1` ile aciliyor.
-Cekirdek magnifier bundan etkilenmiyor; tepsi menusunde de "Settings..."
-maddesi ancak switch aciksa gorunuyor.
+**Son guncelleme:** 2026-08-07
+**Durum:** Tam agac (monitor kartlari + ayarlar sekmesinin tamami) artik
+cokmeden aciliyor ve dogrulandi — ekran goruntusuyle. Panel yine de
+**varsayilan olarak KAPALI**, `BM_PANEL=1` ile aciliyor: gercek etkilesim
+(slider/checkbox degisikliklerinin ayarlara yazilip yazilmadigi, restart
+sonrasi kalicilik) henuz elle test edilmedi. Cekirdek magnifier bundan
+etkilenmiyor; tepsi menusunde de "Settings..." maddesi ancak switch aciksa
+gorunuyor.
 
-Iki ayri hata vardi. Biri cozuldu, digeri paneli kapatmaya sebep oldu.
+Iki ayri hata vardi, ikisi de ayni kok sebepten: cozuldu.
 
 ---
 
@@ -50,38 +54,47 @@ XAML o thread'de hic calismiyor demektir.
 
 ---
 
-## 2. ACIK — `TextBox` butun process'i olduruyor
+## 2. COZULDU — metin-girisli kontroller butun process'i olduruyor
 
 **Belirti:** Panel aciliyor, ilk layout pass'inde process
 `0xC000027B` (`STATUS_STOWED_EXCEPTION`) ile oluyor. Log'da hicbir sey yok.
 
-**Bisect sonucu (kesin):**
+**Bisect sonucu (kesin, iki ayri tur icin):**
 
 | Icerik | Sonuc |
 |---|---|
 | Sadece monitor kartlari (Border, Grid, TextBlock, ToggleSwitch, Slider, ToggleButton) | **Ayakta**, Loaded + SizeChanged + dispatcher tick calisiyor |
-| Sadece ayarlar bolumu | Cokuyor |
-| Ayarlar bolumu, sadece baslik + hint | **Ayakta** |
 | Ayarlar bolumu, baslik + **2 adet `TextBox`** | **Cokuyor** |
+| Ayarlar bolumu, `TextBox` cikarilmis, **CheckBox + RadioButton** kadar | **Ayakta** |
+| Yukaridakine + 3 adet `NumberBox` (zoom limitleri) | **Cokuyor** |
+| Sadece **1 adet `NumberBox`**, baska hicbir sey yok | **Cokuyor** |
 
-Yani suclu tam olarak `TextBox`. Ayni agactaki diger her kontrol sorunsuz.
-Muhtemel sebep: paketlenmemis + yukseltilmis bir process'te, ikincil STA
+Suclular: `TextBox` ve `NumberBox`. Ikisi de metin girisi barindiran kontroller
+— `NumberBox` iceride bir `TextBox` gomuyor, cokme sebebi ayni. Ayni agactaki
+`CheckBox`, `RadioButton`, `Slider`, `Button`, `ToggleSwitch`, `ToggleButton`
+sorunsuz. Sebep: paketlenmemis + yukseltilmis bir process'te, ikincil STA
 thread'deki island icin metin girisi servisleri (TSF/IME) ayaga kalkmiyor.
 
-**Simdilik yapilan:** Hotkey'ler panelde salt okunur gosteriliyor; duzenleme
-`settings.ini` uzerinden, panelin "Reload from disk" butonuyla.
+**Yapilan duzeltme:**
+- Hotkey'ler panelde salt okunur gosteriliyor; duzenleme `settings.ini`
+  uzerinden, panelin "Reload from disk" butonuyla.
+- Zoom limitleri (Minimum/Maximum/Step) artik `NumberBox` degil `Slider` +
+  yaninda deger gosteren bir `TextBlock` — `RebuildMonitorCards()`'taki
+  per-monitor zoom slider'iyla ayni, zaten dogrulanmis desen.
 
-**Yarim kalan:** `TextBox` cikarildiktan sonraki tam agac **dogrulanmadi** —
-bolum 2-6 hicbir zaman tek basina test edilmedi, cunku her test bolum 1'i
-(dolayisiyla TextBox'i) de iceriyordu. `NumberBox`, `RadioButton`, `CheckBox`
-ve `Button` hala supheli olabilir.
+**Dogrulama:** Tam agac (monitor kartlari + ayarlar sekmesinin tum
+bolumleri: Hotkeys, Follow mode, Zoom limits, Other, Settings file) acildi,
+`Panel root Loaded` / `SizeChanged` / `Panel dispatcher is ticking` uclu
+log'u geldi, process ayakta kaldi, ve ekran goruntusuyle gorsel olarak
+dogru render edildigi teyit edildi.
 
-**Denenecekler:**
-1. `TextBox`siz tam agaci tek tek dogrula (bolum 2, 3, 4, 5, 6 ayri ayri).
-2. Hotkey girisi gerekiyorsa: `TextBox` yerine, zaten sahip oldugumuz
-   `WH_KEYBOARD_LL` hook'uyla "tusa bas" yakalama. Daha iyi UX, yeni kontrol yok.
-3. Stowed exception'in gercek HRESULT'ini gormek icin spike'taki
-   `AddVectoredExceptionHandler` desenini panele tasi.
+**Hala acik:** Etkilesimli dogrulama yapilmadi — slider suruklemek/checkbox
+tiklamak gercekten `PushSettings()`'i tetikliyor mu, deger `settings.ini`'ye
+yaziliyor mu, restart sonrasi kaliyor mu. Otomasyondan erisilemiyor (UIPI),
+elle bakilmasi gerekiyor.
+
+**Ileride, hotkey girisi gerekirse:** `TextBox` yerine, zaten sahip oldugumuz
+`WH_KEYBOARD_LL` hook'uyla "tusa bas" yakalama. Daha iyi UX, yeni kontrol yok.
 
 ---
 
