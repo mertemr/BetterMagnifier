@@ -105,6 +105,29 @@ also stays in bounds for every anchor position by construction.
 
 ### Measured, 2026-08-07
 
+**An occluded popup is NOT frozen in the capture. The earlier diagnosis was
+wrong, and it was wrong in the direction that mattered.**
+
+Method: `BM_DUMP_FRAME` with `BM_DUMP_COUNT=12`, `BM_DUMP_EVERY=20`,
+`BM_DUMP_MONITOR=0`, while an "Open with" context menu was open and the mouse
+walked down its items. All twelve back-buffer dumps differ. Frame 3 highlights
+*VMware Player*, frame 6 *Microsoft Visual Studio Version Selector*, frame 9
+*Google Chrome*.
+
+So the menu is present in our capture, magnified, and its highlight tracks the
+mouse. Desktop Duplication composes it live even while our overlay covers it,
+which is what `WDA_EXCLUDEFROMCAPTURE` on the overlay should have implied all
+along.
+
+**Consequence: the overlay + capture architecture stays.** The `WC_MAGNIFIER`
+spike is not needed and open decision 5 is closed without it. The magnification
+pipeline was never the problem here.
+
+**What this does NOT settle:** the dump shows our render, not the composited
+screen, so it says nothing about whether the real menu also appears a second
+time, unmagnified, on top of us. That is a z-order question, and UIAccess is
+the answer to it — not a capture change.
+
 **`MagShowSystemCursor` works here, without UIAccess.** `SystemCursor::Probe()`
 loads `magnification.dll`, calls `MagInitialize`, and round-trips
 `MagShowSystemCursor(FALSE)`/`(TRUE)` rather than trusting that the export
