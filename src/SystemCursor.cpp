@@ -5,7 +5,6 @@
 #include <atomic>
 #include <cstdlib>
 #include <exception>
-#include <vector>
 
 namespace BetterMagnifier {
 namespace {
@@ -23,57 +22,6 @@ std::atomic<bool> g_magAvailable{false};
 std::atomic<bool> g_hidden{false};
 
 std::terminate_handler g_previousTerminate = nullptr;
-
-// The OCR_* constants only exist when OEMRESOURCE is defined before windows.h,
-// and windows.h arrives through the precompiled header. Spelling the values
-// out is less fragile than reaching back into pch.h for one file's sake.
-//
-// OCR_SIZE (32640) and OCR_ICON (32641) are deliberately absent: they are
-// obsolete and SetSystemCursor rejects them.
-constexpr WORD kCursorIds[] = {
-    32512, // OCR_NORMAL
-    32513, // OCR_IBEAM
-    32514, // OCR_WAIT
-    32515, // OCR_CROSS
-    32516, // OCR_UP
-    32642, // OCR_SIZENWSE
-    32643, // OCR_SIZENESW
-    32644, // OCR_SIZEWE
-    32645, // OCR_SIZENS
-    32646, // OCR_SIZEALL
-    32648, // OCR_NO
-    32649, // OCR_HAND
-    32650, // OCR_APPSTARTING
-};
-
-// A fully transparent cursor at the system cursor size.
-//
-// Not 1x1: CreateCursor is documented to want the system dimensions, and an
-// off-size cursor is where this quietly fails on some drivers. AND = 1 keeps
-// the screen, XOR = 0 does not invert it, so every pixel is transparent.
-//
-// Recreated per call because SetSystemCursor takes ownership of the handle.
-HCURSOR MakeBlankCursor()
-{
-    const int w = GetSystemMetrics(SM_CXCURSOR);
-    const int h = GetSystemMetrics(SM_CYCURSOR);
-    if (w <= 0 || h <= 0)
-        return nullptr;
-
-    const size_t stride = static_cast<size_t>((w + 7) / 8);
-    std::vector<BYTE> andMask(stride * h, 0xFF);
-    std::vector<BYTE> xorMask(stride * h, 0x00);
-
-    return CreateCursor(GetModuleHandleW(nullptr), 0, 0, w, h,
-                        andMask.data(), xorMask.data());
-}
-
-// The single reliable undo for SetSystemCursor: reload every system cursor
-// from the user's own registry settings.
-void RestoreFromRegistry()
-{
-    SystemParametersInfoW(SPI_SETCURSORS, 0, nullptr, 0);
-}
 
 BOOL WINAPI ConsoleCtrlHandler(DWORD)
 {
@@ -139,20 +87,16 @@ bool SystemCursor::IsHidden()         { return g_hidden.load(); }
 
 void SystemCursor::Hide()
 {
+    // No Magnification path means we do not hide the pointer, full stop. The
+    // caller is expected to have checked, but this is the last line of defence
+    // and it must fail closed.
+    if (!g_magAvailable.load())
+        return;
+
     if (g_hidden.exchange(true))
         return;
 
-    if (g_magAvailable.load())
-    {
-        g_magShowCursor(FALSE);
-        return;
-    }
-
-    for (WORD id : kCursorIds)
-    {
-        if (HCURSOR blank = MakeBlankCursor())
-            SetSystemCursor(blank, id);   // takes ownership of blank
-    }
+    g_magShowCursor(FALSE);
 }
 
 void SystemCursor::Restore()
@@ -161,12 +105,7 @@ void SystemCursor::Restore()
         return;
 
     if (g_magAvailable.load())
-    {
         g_magShowCursor(TRUE);
-        return;
-    }
-
-    RestoreFromRegistry();
 }
 
 void SystemCursor::InstallGuards()

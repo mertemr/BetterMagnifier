@@ -147,22 +147,27 @@ Durum: `V_f` (float, sanal masaüstü koordinatı — **otorite budur**) ve `las
 - İçerik bilinear, **imleç point sampling**. Büyütülmüş bir okun keskin kenarlı olması bulanık olmasından iyi okunur; ayrı sampler.
 - `ci.flags == 0` → imleç zaten gizli (metin alanına yazarken, oyunlarda). Hiçbir şey çizme.
 
-### 5.3 Gerçek imlecin gizlenmesi (`SystemCursor`)
+### 5.3 Gerçek imlecin gizlenmesi (`SystemCursor`) — UYGULANDI
 
-Birincil: `MagInitialize()` + `MagShowSystemCursor(FALSE)`.
-Yedek: `SetSystemCursor` ile boş imleç, her standart `OCR_*` kimliği için.
+**Ölçüm sonucu (2026-08-07, Windows 11 Pro 26200): `MagShowSystemCursor` AVAILABLE**, UIAccess olmadan. `SystemCursor::Probe()` export'un çözülmesine güvenmiyor, `MagShowSystemCursor(FALSE)`/`(TRUE)` gidiş-dönüşü yapıp sonucu ölçüyor.
 
-Geri getirme garantileri — bir erişilebilirlik aracında **kalıcı görünmez imleç** mümkün olan en kötü arıza:
+**Tek yol: `MagInitialize()` + `MagShowSystemCursor`. `SetSystemCursor` yedeği yazılmadı ve yazılmayacak.** Etkisi global ve kalıcı; süreç Task Manager'dan öldürülürse kullanıcı oturumu kapatana kadar imleçsiz kalır. Bir erişilebilirlik aracında bu, hiçbir özelliğin karşılığında göze alınmayacak bir arıza.
+
+**Kapı kuralı, sadeleşmiş hali:**
+
+> `MagShowSystemCursor` yoksa **imleç hiç gizlenmez.** `Hide()` sessizce hiçbir şey yapmaz, imleç kompozisyonu açılmaz, edge-push native imleç davranışına (zoom katı hız, yutma yok) düşer. Doğaçlama yok, zarif bozulma var.
+
+Bunun sonucu olarak `allowUnsafeCursorHide` ayarı, panel uyarısı ve `OCR_*` tablosu tasarımdan tamamen düştü.
+
+**Geri getirme:**
 
 1. Gizleme **yalnızca en az bir monitörde `zoom > 1` iken**. Zoom kapanınca anında geri gelir; maruziyet penceresi tam olarak "aktif büyütme".
-2. `SystemParametersInfo(SPI_SETCURSORS, 0, nullptr, 0)` tek güvenilir geri alma. Şuralardan çağrılır: normal çıkış, `WM_QUERYENDSESSION`, `WM_ENDSESSION`, `Ctrl+Alt+Shift+Q` panik çıkışı, `SetConsoleCtrlHandler`, `std::set_terminate`.
-3. `WTS_SESSION_LOCK` → geri getir. Mevcut `WTSRegisterSessionNotification` altyapısı hazır.
+2. `WTS_SESSION_LOCK` → `Restore()`. Bu nezaket değil: güvenli masaüstüne geçiş bizim gizlememizi de düşürürse, bayrağımız hâlâ "gizli" derken `Hide()` erken dönüp bir daha uygulamaz — gerçek imleç sprite'ın altında görünür kalır. Kilitte sıfırlamak bir sonraki karenin yeniden uygulamasını sağlıyor.
+3. `WM_QUERYENDSESSION` / `WM_ENDSESSION` → `Restore()`.
+4. `Ctrl+Alt+Shift+Q` panik çıkışı → **önce** `Restore()`, sonra kapatma; `TerminateProcess` yolunda bir kez daha, çünkü orada hiçbir temizlik çalışmaz.
+5. `SetConsoleCtrlHandler` + `std::set_terminate`.
 
-**Kapı kuralı.** Süreç Task Manager'dan öldürülürse temizlik çalışmaz. `MagShowSystemCursor` durumu süreçle birlikte öldüğü için o yolda sorun yok; `SetSystemCursor` yedeğinde imleç asılı kalır. Bu yüzden:
-
-> `MagShowSystemCursor` çalışmıyorsa **imleç kompozisyonu varsayılan olarak açılmaz.** Ayar arkasında, uyarı metniyle kalır; edge-push native imleç davranışına (zoom katı hız, yutma yok) düşer.
-
-Bu ölçüm Faz 1'in ilk işidir.
+**2–5 neden hâlâ duruyor:** `MagShowSystemCursor`'un etkisinin süreçle birlikte öldüğü *beklenen* ama **doğrulanmamış** bir varsayım. Doğrulamak, canlı bir makinede imleci gizleyip süreci sert öldürmek demek — yani tam olarak korunmaya çalışılan sonucu üretme riski. Yedek makinede test edilene kadar bu kancalar varsayımın ucuz sigortası olarak kalıyor.
 
 ## 6. Faz 1b — UIAccess
 

@@ -5,6 +5,7 @@
 #include "pch.h"
 #include "InputThread.h"
 #include "AppMessages.h"
+#include "SystemCursor.h"
 #include "Logger.h"
 
 #include <future>
@@ -438,6 +439,12 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
                 {
                     LOG_WARN("PANIK CIKISI (Ctrl+Alt+Shift+Q) — nazik kapatma deneniyor");
 
+                    // Pointer first, before anything that can fail or stall.
+                    // This shortcut exists for the case where the app has gone
+                    // wrong, and "the app went wrong AND took my mouse pointer
+                    // with it" is the state it must never leave behind.
+                    SystemCursor::Restore();
+
                     // 1. Nazik yol: mesaj penceresine WM_CLOSE.
                     PostMessageW(s_instance->m_target, WM_CLOSE, 0, 0);
 
@@ -446,6 +453,9 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
                     std::thread([]{
                         std::this_thread::sleep_for(std::chrono::milliseconds(1500));
                         LOG_ERROR("Nazik kapatma 1.5 sn'de tamamlanmadi — TerminateProcess");
+                        // Restore again: the graceful path may have hung after
+                        // re-hiding, and TerminateProcess runs no cleanup.
+                        SystemCursor::Restore();
                         TerminateProcess(GetCurrentProcess(), 1);
                     }).detach();
                 }

@@ -30,6 +30,7 @@
 
 #include "pch.h"
 #include "App.h"
+#include "SystemCursor.h"
 #include "Logger.h"
 
 #include <wtsapi32.h>   // WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK
@@ -1270,7 +1271,23 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_WTSSESSION_CHANGE:
         if (s_instance && wParam == WTS_SESSION_UNLOCK)
             s_instance->OnSessionUnlock();
+
+        // Clear the hidden-pointer state on lock. Not politeness: the secure
+        // desktop has its own pointer, and if the switch also drops our hide
+        // while our flag still says "hidden", Hide() would early-out on
+        // return and never re-apply — leaving the real pointer visible
+        // underneath our sprite. Restoring here forces the next frame to
+        // re-apply it.
+        if (wParam == WTS_SESSION_LOCK)
+            SystemCursor::Restore();
         return 0;
+
+    // The process is about to end. With the pointer hidden this is the last
+    // chance to put it back.
+    case WM_QUERYENDSESSION:
+    case WM_ENDSESSION:
+        SystemCursor::Restore();
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
 
     case WM_CLOSE:
     case WM_DESTROY:

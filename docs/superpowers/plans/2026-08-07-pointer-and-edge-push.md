@@ -110,6 +110,13 @@ git commit -m "measure: settle whether an occluded popup stays live in the captu
 
 ### Task 2: `SystemCursor` — gizleme, geri getirme ve kapı kuralı
 
+> **TAMAMLANDI (2026-08-07).** Gerçek kod `src/SystemCursor.{h,cpp}`. **Aşağıdaki listeleme özgün plandır, son hâli değil** — uygulanırken iki şey değişti, ikisi de ölçüme dayanıyor:
+>
+> 1. **Probe AVAILABLE çıktı**, dolayısıyla `SetSystemCursor` yedeği (`kCursorIds`, `MakeBlankCursor`, `RestoreFromRegistry`) **hiç yazılmadı.** `Hide()` `MagPathAvailable` yoksa sessizce hiçbir şey yapmıyor. Aşağıdaki o üç blok geçersiz.
+> 2. Geri getirme kancaları `App::MessageWndProc` (`WM_QUERYENDSESSION`, `WM_ENDSESSION`, `WTS_SESSION_LOCK`) ve `InputThread`'in panik çıkışına bağlandı — panikte `Restore()` hem nazik yoldan önce hem `TerminateProcess`'ten hemen önce çağrılıyor.
+>
+> Ayrıca `--self-check` ve `--dump-cursors` tek-instance mutex'inden muaf tutuldu: guard self-check'ten önceydi ve uygulama açıkken teşhis koşumu "zaten çalışıyor" dialog'una takılıp asılıyordu.
+
 **Files:**
 - Create: `src/SystemCursor.h`, `src/SystemCursor.cpp`
 - Modify: `src/main.cpp` (guard kurulumu + probe logu)
@@ -2078,12 +2085,9 @@ Sonra `src/SettingsStore.h`'de `GeneralSettings`'e bu task'ın okuduğu üç ala
     // Sprite size relative to zoom. Above 1 draws a pointer larger than the
     // content scale, which low-vision users generally want.
     float cursorScale = 1.0f;
-
-    // Permit the SetSystemCursor fallback when MagShowSystemCursor is
-    // unavailable. Off by default: that fallback outlives the process, so a
-    // kill from Task Manager would leave the user with no pointer.
-    bool  allowUnsafeCursorHide = false;
 ```
+
+> `allowUnsafeCursorHide` **yok.** Faz 1'de `MagShowSystemCursor` AVAILABLE ölçüldü ve `SetSystemCursor` yedeği tasarımdan tamamen çıkarıldı, dolayısıyla açılacak bir "güvensiz mod" kalmadı. Kapı `SystemCursor::MagPathAvailable()`'a indi.
 
 `src/App.cpp`'de, içerik çizildikten sonra ve `Present`'ten önce:
 
@@ -2111,13 +2115,12 @@ Sonra `src/SettingsStore.h`'de `GeneralSettings`'e bu task'ın okuduğu üç ala
 Kapı — `App`'te zoom durumu her değiştiğinde:
 
 ```cpp
-    // Pointer compositing requires hiding the real pointer. Without
-    // MagShowSystemCursor the only way to do that is SetSystemCursor, which
-    // survives the process — so it stays off unless the user opts in.
+    // Pointer compositing requires hiding the real pointer, and
+    // MagShowSystemCursor is the only way we are willing to do that. No
+    // MagPathAvailable means no sprite and native pointer behaviour.
     const bool wantScaled = anyMonitorZoomed
                          && m_settings.General().pointerScaling
-                         && (SystemCursor::MagPathAvailable()
-                             || m_settings.General().allowUnsafeCursorHide);
+                         && SystemCursor::MagPathAvailable();
 
     if (wantScaled != m_pointerScalingActive)
     {
@@ -2401,17 +2404,15 @@ git commit -m "feat(uiaccess): replace the administrator requirement with UIAcce
         s.MutableGeneral().pointerScaling       = false;
         s.MutableGeneral().pointerSpeed         = 1.5f;
         s.MutableGeneral().cursorScale          = 1.25f;
-        s.MutableGeneral().allowUnsafeCursorHide = true;
-        assert(s.Save());
+        BM_SELFCHECK(s.Save());
 
         SettingsStore r;
-        assert(r.Load());
+        BM_SELFCHECK(r.Load());
         assert(r.General().followMode == FollowMode::EdgePush);
         assert(std::abs(r.General().edgeBandFraction - 0.2f)  < 1e-4f);
         assert(r.General().pointerScaling == false);
         assert(std::abs(r.General().pointerSpeed  - 1.5f)  < 1e-4f);
-        assert(std::abs(r.General().cursorScale   - 1.25f) < 1e-4f);
-        assert(r.General().allowUnsafeCursorHide == true);
+        BM_SELFCHECK(std::abs(r.General().cursorScale - 1.25f) < 1e-4f);
     }
 
     // Nonsensical values fall back to defaults individually, they do not
@@ -2540,9 +2541,9 @@ Herhangi biri başarısızsa **burada dur ve düzelt**; panel varsayılan açıl
 
 `TextBox` ve `NumberBox` **kullanma** — `PANEL-BLANK.md`'ye göre gömülü `TextBox` içeren her kontrol stowed exception ile çöküyor. `Slider` ve `ComboBox` güvenli.
 
-`SystemCursor::MagPathAvailable()` false ise "Scale pointer with zoom" anahtarının altına uyarı satırı ve `allowUnsafeCursorHide` için ayrı bir ToggleSwitch ekle:
+`SystemCursor::MagPathAvailable()` false ise "Scale pointer with zoom" anahtarını **devre dışı bırak** ve altına açıklama koy. Açılacak bir "güvensiz mod" yok, dolayısıyla ikinci bir ToggleSwitch de yok:
 
-> "Windows would not let us hide the pointer the safe way. The fallback stays in effect if this app is killed, and you would have no mouse pointer until you sign out."
+> "Windows will not let this app hide the mouse pointer, so the magnified pointer is unavailable. Zoom still works; the pointer behaves as it does in Windows Magnifier."
 
 `StatusSnapshot::uiAccess` false ise Ayarlar'ın en üstüne durum satırı:
 
