@@ -28,6 +28,7 @@
 #include "SettingsStore.h"
 #include "ViewportController.h"
 #include "SystemCursor.h"
+#include "CursorRenderer.h"
 #include "Logger.h"
 
 #include <cwchar>
@@ -188,6 +189,57 @@ int WINAPI wWinMain(
     {
         LOG_INFO("Self-check complete, exiting (--self-check)");
         return 0;
+    }
+
+    // --dump-cursors decodes the standard cursors to BMP for eyeball checking.
+    // Cursor decoding cannot be asserted: whether the monochrome AND/XOR
+    // unpacking is right is a question about what the picture looks like, and
+    // "some pixels are set" would pass for a solid black square too.
+    if (std::wcsstr(GetCommandLineW(), L"--dump-cursors") != nullptr)
+    {
+        // const, not constexpr: IDC_* are MAKEINTRESOURCEW casts, which are
+        // not constant expressions.
+        struct Shape { const wchar_t* name; LPCWSTR id; };
+        const Shape kShapes[] = {
+            { L"arrow",   IDC_ARROW   },
+            { L"ibeam",   IDC_IBEAM   },   // monochrome path
+            { L"wait",    IDC_WAIT    },   // colour with alpha
+            { L"hand",    IDC_HAND    },
+            { L"sizeall", IDC_SIZEALL },
+            { L"cross",   IDC_CROSS   },   // monochrome path
+        };
+
+        wchar_t dir[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"TEMP", dir, MAX_PATH) == 0)
+            wcscpy_s(dir, L".");
+
+        int failures = 0;
+        for (const Shape& s : kShapes)
+        {
+            BetterMagnifier::CursorBitmap bmp;
+            if (!BetterMagnifier::DecodeCursor(LoadCursorW(nullptr, s.id), bmp))
+            {
+                LOG_ERROR("DecodeCursor failed for {}", ToUtf8(s.name));
+                ++failures;
+                continue;
+            }
+
+            wchar_t path[MAX_PATH]{};
+            swprintf_s(path, L"%ls\\bm-cursor-%ls.bmp", dir, s.name);
+            if (!BetterMagnifier::WriteCursorBitmapFile(bmp, path))
+            {
+                LOG_ERROR("Could not write {}", ToUtf8(path));
+                ++failures;
+                continue;
+            }
+
+            LOG_INFO("cursor {}: {}x{} hotspot ({},{}) -> {}",
+                     ToUtf8(s.name), bmp.width, bmp.height,
+                     bmp.hotspotX, bmp.hotspotY, ToUtf8(path));
+        }
+
+        LOG_INFO("Cursor dump complete, {} failure(s)", failures);
+        return failures == 0 ? 0 : 3;
     }
 #endif
 

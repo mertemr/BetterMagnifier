@@ -272,6 +272,7 @@
     <ClCompile Include="src\InputThread.cpp" />
     <ClCompile Include="src\ViewportController.cpp" />
     <ClCompile Include="src\SystemCursor.cpp" />
+    <ClCompile Include="src\CursorRenderer.cpp" />
     <ClCompile Include="src\ControlPanel.cpp" />
   </ItemGroup>
 
@@ -313,6 +314,7 @@
     <ClInclude Include="src\InputThread.h" />
     <ClInclude Include="src\ViewportController.h" />
     <ClInclude Include="src\SystemCursor.h" />
+    <ClInclude Include="src\CursorRenderer.h" />
     <ClInclude Include="src\App.h" />
     <ClInclude Include="src\MonitorManager.h" />
     <ClInclude Include="src\D3DRenderer.h" />
