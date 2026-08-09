@@ -7,7 +7,6 @@
 #include "Logger.h"
 
 #include <shlobj.h>       // SHGetKnownFolderPath, FOLDERID_RoamingAppData
-#include <cassert>
 #include <cwctype>        // towlower, towupper
 #include <cwchar>         // wcstof
 
@@ -404,33 +403,33 @@ void SettingsStoreSelfCheck()
     // ── 1. ParseHotkey: temel durum ──
     {
         UINT mods = 0, vk = 0;
-        assert(ParseHotkey(L"Ctrl+Alt+Z", mods, vk));
-        assert(mods == (MOD_CONTROL | MOD_ALT));
-        assert(vk == 'Z');
+        BM_SELFCHECK(ParseHotkey(L"Ctrl+Alt+Z", mods, vk));
+        BM_SELFCHECK(mods == (MOD_CONTROL | MOD_ALT));
+        BM_SELFCHECK(vk == 'Z');
     }
 
     // ── 2. ParseHotkey: dort modifier birlikte ──
     {
         UINT mods = 0, vk = 0;
-        assert(ParseHotkey(L"Ctrl+Alt+Shift+Win+K", mods, vk));
-        assert(mods == (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN));
-        assert(vk == 'K');
+        BM_SELFCHECK(ParseHotkey(L"Ctrl+Alt+Shift+Win+K", mods, vk));
+        BM_SELFCHECK(mods == (MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_WIN));
+        BM_SELFCHECK(vk == 'K');
     }
 
     // ── 3. ParseHotkey: buyuk/kucuk harf onemsiz ──
     {
         UINT mods = 0, vk = 0;
-        assert(ParseHotkey(L"ctrl+ALT+z", mods, vk));
-        assert(mods == (MOD_CONTROL | MOD_ALT));
-        assert(vk == 'Z');
+        BM_SELFCHECK(ParseHotkey(L"ctrl+ALT+z", mods, vk));
+        BM_SELFCHECK(mods == (MOD_CONTROL | MOD_ALT));
+        BM_SELFCHECK(vk == 'Z');
     }
 
     // ── 4. ParseHotkey: fonksiyon tuslari ──
     {
         UINT mods = 0, vk = 0;
-        assert(ParseHotkey(L"Ctrl+F12", mods, vk));
-        assert(mods == MOD_CONTROL);
-        assert(vk == VK_F12);
+        BM_SELFCHECK(ParseHotkey(L"Ctrl+F12", mods, vk));
+        BM_SELFCHECK(mods == MOD_CONTROL);
+        BM_SELFCHECK(vk == VK_F12);
     }
 
     // ── 5. ParseHotkey: bozuk girdi ciktiya DOKUNMAZ ──
@@ -438,28 +437,28 @@ void SettingsStoreSelfCheck()
     // calismaya devam etmeli.
     {
         UINT mods = 0xDEAD, vk = 0xBEEF;
-        assert(!ParseHotkey(L"", mods, vk));
-        assert(mods == 0xDEAD && vk == 0xBEEF);
+        BM_SELFCHECK(!ParseHotkey(L"", mods, vk));
+        BM_SELFCHECK(mods == 0xDEAD && vk == 0xBEEF);
 
-        assert(!ParseHotkey(L"Ctrl+", mods, vk));
-        assert(mods == 0xDEAD && vk == 0xBEEF);
+        BM_SELFCHECK(!ParseHotkey(L"Ctrl+", mods, vk));
+        BM_SELFCHECK(mods == 0xDEAD && vk == 0xBEEF);
 
-        assert(!ParseHotkey(L"Bogus+Z", mods, vk));
-        assert(mods == 0xDEAD && vk == 0xBEEF);
+        BM_SELFCHECK(!ParseHotkey(L"Bogus+Z", mods, vk));
+        BM_SELFCHECK(mods == 0xDEAD && vk == 0xBEEF);
 
-        assert(!ParseHotkey(L"Ctrl+Alt", mods, vk));   // son parca tus degil
-        assert(mods == 0xDEAD && vk == 0xBEEF);
+        BM_SELFCHECK(!ParseHotkey(L"Ctrl+Alt", mods, vk));   // son parca tus degil
+        BM_SELFCHECK(mods == 0xDEAD && vk == 0xBEEF);
 
-        assert(!ParseHotkey(L"Ctrl+F99", mods, vk));   // F24'ten buyuk
-        assert(mods == 0xDEAD && vk == 0xBEEF);
+        BM_SELFCHECK(!ParseHotkey(L"Ctrl+F99", mods, vk));   // F24'ten buyuk
+        BM_SELFCHECK(mods == 0xDEAD && vk == 0xBEEF);
     }
 
     // ── 6. FormatHotkey: sabit modifier sirasi ──
     {
-        assert(FormatHotkey(MOD_CONTROL | MOD_ALT, 'Z') == L"Ctrl+Alt+Z");
-        assert(FormatHotkey(MOD_ALT | MOD_CONTROL, 'Z') == L"Ctrl+Alt+Z");
-        assert(FormatHotkey(MOD_WIN, 'Z') == L"Win+Z");
-        assert(FormatHotkey(MOD_CONTROL, VK_F5) == L"Ctrl+F5");
+        BM_SELFCHECK(FormatHotkey(MOD_CONTROL | MOD_ALT, 'Z') == L"Ctrl+Alt+Z");
+        BM_SELFCHECK(FormatHotkey(MOD_ALT | MOD_CONTROL, 'Z') == L"Ctrl+Alt+Z");
+        BM_SELFCHECK(FormatHotkey(MOD_WIN, 'Z') == L"Win+Z");
+        BM_SELFCHECK(FormatHotkey(MOD_CONTROL, VK_F5) == L"Ctrl+F5");
     }
 
     // ── 7. Round-trip: format -> parse ayni degeri verir ──
@@ -469,17 +468,17 @@ void SettingsStoreSelfCheck()
         const std::wstring text = FormatHotkey(origMods, origVk);
 
         UINT mods = 0, vk = 0;
-        assert(ParseHotkey(text, mods, vk));
-        assert(mods == origMods);
-        assert(vk == origVk);
+        BM_SELFCHECK(ParseHotkey(text, mods, vk));
+        BM_SELFCHECK(mods == origMods);
+        BM_SELFCHECK(vk == origVk);
     }
 
     // ── 8. FilePath: %APPDATA% altinda, dogru dosya adi ──
     {
         const auto p = SettingsStore::FilePath();
-        assert(!p.empty());
-        assert(p.filename() == L"settings.ini");
-        assert(p.parent_path().filename() == L"BetterMagnifier");
+        BM_SELFCHECK(!p.empty());
+        BM_SELFCHECK(p.filename() == L"settings.ini");
+        BM_SELFCHECK(p.parent_path().filename() == L"BetterMagnifier");
     }
 
     // ── 9 & 10. Load/Save ──
@@ -497,17 +496,17 @@ void SettingsStoreSelfCheck()
 
         // ── 9. Dosya yoksa varsayilanlar, true doner ──
         SettingsStore fresh;
-        assert(fresh.Load());
-        assert(fresh.General().toggleVk == 'Z');
-        assert(fresh.General().toggleModifiers == (MOD_CONTROL | MOD_ALT));
-        assert(fresh.General().hijackMagnifierKeys == true);   // varsayilan ACIK
-        assert(fresh.General().followMode == FollowMode::Mouse);   // varsayilan
-        assert(fresh.General().rememberZoomLevel == true);
+        BM_SELFCHECK(fresh.Load());
+        BM_SELFCHECK(fresh.General().toggleVk == 'Z');
+        BM_SELFCHECK(fresh.General().toggleModifiers == (MOD_CONTROL | MOD_ALT));
+        BM_SELFCHECK(fresh.General().hijackMagnifierKeys == true);   // varsayilan ACIK
+        BM_SELFCHECK(fresh.General().followMode == FollowMode::Mouse);   // varsayilan
+        BM_SELFCHECK(fresh.General().rememberZoomLevel == true);
 
         // Bilinmeyen monitor -> varsayilan
         const auto m = fresh.Monitor(L"\\\\.\\NOSUCHDISPLAY");
-        assert(m.minZoom == 1.0f);
-        assert(m.maxZoom == 10.0f);
+        BM_SELFCHECK(m.minZoom == 1.0f);
+        BM_SELFCHECK(m.maxZoom == 10.0f);
 
         // ── 10. Save -> Load turu degerleri koruyor ──
         SettingsStore w;
@@ -517,34 +516,34 @@ void SettingsStoreSelfCheck()
         w.MutableGeneral().followMode       = FollowMode::Mouse;
         w.MutableGeneral().rememberZoomLevel = false;
         w.SetMonitor(L"\\\\.\\DISPLAY1", MonitorSettings{ 1.5f, 8.0f, 0.5f, 3.25f });
-        assert(w.Save());
+        BM_SELFCHECK(w.Save());
 
         SettingsStore r;
-        assert(r.Load());
-        assert(r.General().toggleModifiers == (MOD_CONTROL | MOD_SHIFT));
-        assert(r.General().toggleVk == 'M');
-        assert(r.General().hijackMagnifierKeys == false);
-        assert(r.General().followMode == FollowMode::Mouse);
-        assert(r.General().rememberZoomLevel == false);
+        BM_SELFCHECK(r.Load());
+        BM_SELFCHECK(r.General().toggleModifiers == (MOD_CONTROL | MOD_SHIFT));
+        BM_SELFCHECK(r.General().toggleVk == 'M');
+        BM_SELFCHECK(r.General().hijackMagnifierKeys == false);
+        BM_SELFCHECK(r.General().followMode == FollowMode::Mouse);
+        BM_SELFCHECK(r.General().rememberZoomLevel == false);
 
         const auto rm = r.Monitor(L"\\\\.\\DISPLAY1");
-        assert(rm.minZoom  == 1.5f);
-        assert(rm.maxZoom  == 8.0f);
-        assert(rm.zoomStep == 0.5f);
-        assert(rm.lastZoom == 3.25f);
+        BM_SELFCHECK(rm.minZoom  == 1.5f);
+        BM_SELFCHECK(rm.maxZoom  == 8.0f);
+        BM_SELFCHECK(rm.zoomStep == 0.5f);
+        BM_SELFCHECK(rm.lastZoom == 3.25f);
 
         // ── 11. Mantiksiz degerler varsayilana duser ──
         SettingsStore bad;
         bad.SetMonitor(L"\\\\.\\DISPLAY9", MonitorSettings{ -5.0f, -1.0f, 0.0f, 999.0f });
-        assert(bad.Save());
+        BM_SELFCHECK(bad.Save());
 
         SettingsStore fixed;
-        assert(fixed.Load());
+        BM_SELFCHECK(fixed.Load());
         const auto fm = fixed.Monitor(L"\\\\.\\DISPLAY9");
-        assert(fm.minZoom  == 1.0f);    // negatif -> varsayilan
-        assert(fm.maxZoom  == 10.0f);   // min'den kucuk -> varsayilan
-        assert(fm.zoomStep == 0.25f);   // sifir -> varsayilan
-        assert(fm.lastZoom >= fm.minZoom && fm.lastZoom <= fm.maxZoom);
+        BM_SELFCHECK(fm.minZoom  == 1.0f);    // negatif -> varsayilan
+        BM_SELFCHECK(fm.maxZoom  == 10.0f);   // min'den kucuk -> varsayilan
+        BM_SELFCHECK(fm.zoomStep == 0.25f);   // sifir -> varsayilan
+        BM_SELFCHECK(fm.lastZoom >= fm.minZoom && fm.lastZoom <= fm.maxZoom);
 
         // Temizlik: self-check dosyasini sil, gercegi geri koy
         std::filesystem::remove(real, ec);
