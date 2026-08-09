@@ -199,8 +199,24 @@ std::wstring FormatHotkey(UINT modifiers, UINT vk)
 //
 // Python analojisi: os.path.join(os.getenv("APPDATA"), "BetterMagnifier", ...)
 // =============================================================================
+#ifdef _DEBUG
+namespace {
+std::filesystem::path g_pathOverride;
+}
+
+void SetSettingsPathOverride(const std::filesystem::path& p)
+{
+    g_pathOverride = p;
+}
+#endif
+
 std::filesystem::path SettingsStore::FilePath()
 {
+#ifdef _DEBUG
+    if (!g_pathOverride.empty())
+        return g_pathOverride;
+#endif
+
     PWSTR appData = nullptr;
     const HRESULT hr = SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appData);
 
@@ -523,17 +539,22 @@ void SettingsStoreSelfCheck()
     }
 
     // ── 9 & 10. Load/Save ──
-    // Gercek ayar dosyasini bozmamak icin gecici bir yola tasiyip geri koyuyoruz.
+    //
+    // Redirected to a temp file. The suite used to move the real settings.ini
+    // aside and put it back, which is fine until an assertion aborts the
+    // process mid-run: the real file then stays parked under the backup name,
+    // the next run's rename fails because the destination exists, and the suite
+    // reads its own leftovers while the user's settings sit in a file nothing
+    // will ever open again. That happened. A test that can eat the user's
+    // config when it fails is not worth having, so it no longer goes near it.
     {
-        const auto real = SettingsStore::FilePath();
-        const auto backup = real.parent_path() / L"settings.ini.selfcheck-backup";
-
         std::error_code ec;
-        std::filesystem::create_directories(real.parent_path(), ec);
+        const auto temp = std::filesystem::temp_directory_path(ec)
+                        / L"BetterMagnifier-selfcheck" / L"settings.ini";
 
-        const bool hadFile = std::filesystem::exists(real, ec);
-        if (hadFile)
-            std::filesystem::rename(real, backup, ec);
+        std::filesystem::create_directories(temp.parent_path(), ec);
+        std::filesystem::remove(temp, ec);      // leftovers from an aborted run
+        SetSettingsPathOverride(temp);
 
         // ── 9. Dosya yoksa varsayilanlar, true doner ──
         SettingsStore fresh;
@@ -622,10 +643,11 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(fm.zoomStep == 0.25f);   // sifir -> varsayilan
         BM_SELFCHECK(fm.lastZoom >= fm.minZoom && fm.lastZoom <= fm.maxZoom);
 
-        // Temizlik: self-check dosyasini sil, gercegi geri koy
-        std::filesystem::remove(real, ec);
-        if (hadFile)
-            std::filesystem::rename(backup, real, ec);
+        // Cleanup is a courtesy now, not a correctness requirement: an aborted
+        // run leaves a stray temp file and nothing else, and the next run
+        // removes it before starting.
+        std::filesystem::remove(temp, ec);
+        SetSettingsPathOverride({});
     }
 
     LOG_INFO("SettingsStore self-check GECTI");

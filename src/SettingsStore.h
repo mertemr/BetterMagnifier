@@ -136,6 +136,18 @@ private:
 };
 
 #ifdef _DEBUG
+// Redirect FilePath, so the self-check never touches the user's real settings.
+//
+// This exists because the alternative was tried and bit: the suite used to move
+// settings.ini aside and put it back afterwards, which works right up until an
+// assertion aborts the process mid-run. Then the real file stays parked under
+// the backup name, the next run's rename fails because the destination already
+// exists, and the suite quietly reads its own leftovers — while the user's
+// settings sit in a file nothing will ever read again.
+//
+// Empty path restores normal behaviour.
+void SetSettingsPathOverride(const std::filesystem::path& p);
+
 // Assert-based self-check, run from main on Debug startup. There is no test
 // framework here, and this is the only component that is pure logic.
 void SettingsStoreSelfCheck();

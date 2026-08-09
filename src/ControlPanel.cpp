@@ -160,6 +160,10 @@ struct ControlPanel::Impl
 
     // Settings tab
     WUXC::TextBlock   hotkeyWarning{ nullptr };
+
+    // Windows Magnifier clash. Both hidden until it is actually running.
+    WUXC::TextBlock   magnifierWarning{ nullptr };
+    WUXC::Button      closeMagnifierButton{ nullptr };
     WUXC::CheckBox    hijackBox{ nullptr };
     WUXC::RadioButton followEdgeRadio{ nullptr };
     WUXC::RadioButton followMouseRadio{ nullptr };
@@ -733,6 +737,19 @@ void ControlPanel::UpdateLiveValues()
             m_impl->hotkeyWarning.Visibility(WUX::Visibility::Collapsed);
         }
     }
+
+    // Two magnifiers at once is confusing in a way that is hard to diagnose
+    // from the screen: the Windows Magnifier magnifies OUR overlay, so what you
+    // see is its magnification of ours. Saying so is worth more than any amount
+    // of the user squinting at it.
+    if (m_impl->magnifierWarning && m_status)
+    {
+        const bool clash = m_status->osMagnifierRunning.load(std::memory_order_relaxed);
+        const auto vis = clash ? WUX::Visibility::Visible : WUX::Visibility::Collapsed;
+
+        m_impl->magnifierWarning.Visibility(vis);
+        m_impl->closeMagnifierButton.Visibility(vis);
+    }
 }
 
 // =============================================================================
@@ -787,6 +804,36 @@ void ControlPanel::BuildSettingsTab()
     m_impl->hotkeyWarning.Foreground(Brush(255, 99, 99));
     m_impl->hotkeyWarning.Visibility(WUX::Visibility::Collapsed);
     panel.Children().Append(m_impl->hotkeyWarning);
+
+    // ── Windows Magnifier clash ──
+    m_impl->magnifierWarning = WUXC::TextBlock{};
+    m_impl->magnifierWarning.FontSize(12.0);
+    m_impl->magnifierWarning.TextWrapping(WUX::TextWrapping::Wrap);
+    m_impl->magnifierWarning.Foreground(Brush(255, 99, 99));
+    m_impl->magnifierWarning.Visibility(WUX::Visibility::Collapsed);
+    m_impl->magnifierWarning.Text(
+        L"The Windows Magnifier is running as well. It magnifies this app's overlay, so "
+        L"you are seeing its magnification of ours and neither responds normally. "
+        L"Win+Plus reaches it too, which is the usual way it ends up open.");
+    panel.Children().Append(m_impl->magnifierWarning);
+
+    m_impl->closeMagnifierButton = WUXC::Button{};
+    m_impl->closeMagnifierButton.Content(winrt::box_value(L"Close Windows Magnifier"));
+    m_impl->closeMagnifierButton.Visibility(WUX::Visibility::Collapsed);
+    m_impl->closeMagnifierButton.Click(
+        [](winrt::Windows::Foundation::IInspectable const&, WUX::RoutedEventArgs const&)
+        {
+            // WM_CLOSE, not TerminateProcess. Magnifier is an accessibility tool
+            // and somebody may be relying on it; asking it to close lets it shut
+            // down on its own terms. If it declines, it stays open and the
+            // warning stays up, which is the honest outcome.
+            if (HWND mag = FindWindowW(L"Screen Magnifier Window", nullptr))
+            {
+                PostMessageW(mag, WM_CLOSE, 0, 0);
+                LOG_INFO("Asked the Windows Magnifier to close");
+            }
+        });
+    panel.Children().Append(m_impl->closeMagnifierButton);
 
     m_impl->hijackBox = WUXC::CheckBox{};
     m_impl->hijackBox.Content(winrt::box_value(L"Take over the Windows Magnifier shortcuts"));
