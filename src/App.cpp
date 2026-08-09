@@ -123,6 +123,27 @@ bool ApplyStartWithWindows(bool enable)
     return ok;
 }
 
+// =============================================================================
+// OsMagnifierRunning — Windows Magnifier ayakta mi?
+// =============================================================================
+//
+// Two magnifiers at once is a genuinely confusing state, and it is easy to end
+// up in by accident: Win+Plus reaches the OS Magnifier as well as us, because
+// that process runs with UIAccess and a hook from here cannot swallow its
+// shortcut. Once it is up it magnifies our overlay, so the screen shows our
+// magnification of its magnification and neither responds the way you expect.
+//
+// Detected by window class rather than process name: Magnify.exe also runs
+// briefly for the accessibility settings UI without actually magnifying, and
+// the window is what says it is really on.
+//
+// Only reported. Closing another application is the user's call, not ours.
+// =============================================================================
+bool OsMagnifierRunning()
+{
+    return FindWindowW(L"Screen Magnifier Window", nullptr) != nullptr;
+}
+
 } // anonymous namespace
 
 // =============================================================================
@@ -501,6 +522,25 @@ void App::UpdatePointerCompositing(bool anyMonitorZoomed)
                    && m_settings.General().pointerScaling
                    && SystemCursor::MagPathAvailable()
                    && !m_pointerCompositingBroken;
+
+    // Checked on the transition into magnifying rather than per frame: that is
+    // the moment it matters and it costs one FindWindow.
+    if (anyMonitorZoomed && !m_wasZoomed)
+    {
+        const bool clash = OsMagnifierRunning();
+        m_status.osMagnifierRunning.store(clash, std::memory_order_relaxed);
+
+        if (clash)
+        {
+            LOG_WARN("Windows Magnifier is running as well. It magnifies our overlay, so "
+                     "the two stack and neither behaves as expected. Close it (Win+Esc).");
+        }
+    }
+    else if (!anyMonitorZoomed)
+    {
+        m_status.osMagnifierRunning.store(false, std::memory_order_relaxed);
+    }
+    m_wasZoomed = anyMonitorZoomed;
 
     if (want == m_pointerCompositing)
         return;

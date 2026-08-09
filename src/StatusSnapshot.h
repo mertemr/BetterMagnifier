@@ -74,6 +74,11 @@ public:
     // HotkeyManager::Reregister result. Bit 0 = toggle failed, bit 1 = freeze.
     std::atomic<unsigned> hotkeyFailedMask{0};
 
+    // The Windows Magnifier is up at the same time. It magnifies our overlay,
+    // so the two stack and neither behaves as expected. Surfaced so the panel
+    // can say so rather than leaving the user to work it out.
+    std::atomic<bool> osMagnifierRunning{false};
+
 private:
     std::array<MonitorStatus, kMaxMonitors> m_monitors{};
 };

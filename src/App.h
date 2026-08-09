@@ -128,6 +128,10 @@ private:
     int m_spriteFailures = 0;
     static constexpr int kSpriteFailureLimit = 30;
 
+    // Edge-triggers the Windows Magnifier clash check on the transition into
+    // magnifying, rather than paying for a FindWindow every frame.
+    bool m_wasZoomed = false;
+
     // Did the cursor actually move? Without this the per-frame mouse tracking
     // overwrites whatever focus tracking just set.
     POINT m_lastCursorPos{ -1, -1 };

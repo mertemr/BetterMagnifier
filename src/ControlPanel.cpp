@@ -161,8 +161,22 @@ struct ControlPanel::Impl
     // Settings tab
     WUXC::TextBlock   hotkeyWarning{ nullptr };
     WUXC::CheckBox    hijackBox{ nullptr };
+    WUXC::RadioButton followEdgeRadio{ nullptr };
     WUXC::RadioButton followMouseRadio{ nullptr };
     WUXC::RadioButton followFocusRadio{ nullptr };
+
+    // Pointer section. ToggleSwitch and Slider only — anything embedding a
+    // TextBox takes the process down (docs/PANEL-BLANK.md).
+    WUXC::ToggleSwitch pointerScalingSwitch{ nullptr };
+    WUXC::ToggleSwitch lockToMonitorSwitch{ nullptr };
+    WUXC::Slider       pointerSpeedSlider{ nullptr };
+    WUXC::TextBlock    pointerSpeedLabel{ nullptr };
+    WUXC::Slider       pointerCompSlider{ nullptr };
+    WUXC::TextBlock    pointerCompLabel{ nullptr };
+    WUXC::Slider       cursorScaleSlider{ nullptr };
+    WUXC::TextBlock    cursorScaleLabel{ nullptr };
+    WUXC::Slider       edgeBandSlider{ nullptr };
+    WUXC::TextBlock    edgeBandLabel{ nullptr };
     // Sliders, not NumberBox: a NumberBox embeds a TextBox internally and kills
     // the process the same way a bare TextBox does. See docs/PANEL-BLANK.md.
     WUXC::Slider      minZoomSlider{ nullptr };
@@ -789,8 +803,18 @@ void ControlPanel::BuildSettingsTab()
     // ── Follow mode ──
     panel.Children().Append(MakeHeader(L"Follow mode"));
 
+    // EdgePush first, because it is the default. Leaving it out of this list
+    // was a real bug: PushSettings writes whatever the radios say, so changing
+    // ANY setting silently rewrote the mode to Mouse and edge-push stopped.
+    m_impl->followEdgeRadio = WUXC::RadioButton{};
+    m_impl->followEdgeRadio.Content(winrt::box_value(L"Edge push (recommended)"));
+    m_impl->followEdgeRadio.GroupName(L"FollowMode");
+    m_impl->followEdgeRadio.IsChecked(
+        winrt::Windows::Foundation::IReference<bool>{ g.followMode == FollowMode::EdgePush });
+    panel.Children().Append(m_impl->followEdgeRadio);
+
     m_impl->followMouseRadio = WUXC::RadioButton{};
-    m_impl->followMouseRadio.Content(winrt::box_value(L"Mouse only"));
+    m_impl->followMouseRadio.Content(winrt::box_value(L"Centred on the pointer"));
     m_impl->followMouseRadio.GroupName(L"FollowMode");
     m_impl->followMouseRadio.IsChecked(
         winrt::Windows::Foundation::IReference<bool>{ g.followMode == FollowMode::Mouse });
@@ -804,8 +828,9 @@ void ControlPanel::BuildSettingsTab()
     panel.Children().Append(m_impl->followFocusRadio);
 
     panel.Children().Append(MakeHint(
-        L"Following focus moves the zoom region on Tab, but it detaches the anchor from "
-        L"the cursor, and then clicks no longer land where they appear."));
+        L"Edge push holds the view still while the pointer moves inside it and scrolls "
+        L"only near an edge. Centred on the pointer moves the view on every mouse "
+        L"movement. Keyboard focus following currently has no visible effect."));
 
     // ── Zoom limits ──
     panel.Children().Append(MakeHeader(L"Zoom limits"));
@@ -873,6 +898,52 @@ void ControlPanel::BuildSettingsTab()
 
     panel.Children().Append(MakeHint(L"Applied to every monitor."));
 
+    // ── Pointer ──
+    panel.Children().Append(MakeHeader(L"Pointer"));
+
+    m_impl->lockToMonitorSwitch = WUXC::ToggleSwitch{};
+    m_impl->lockToMonitorSwitch.Header(winrt::box_value(L"Keep the pointer on the magnified monitor"));
+    m_impl->lockToMonitorSwitch.IsOn(g.lockPointerToMonitor);
+    panel.Children().Append(m_impl->lockToMonitorSwitch);
+
+    panel.Children().Append(MakeHint(
+        L"On, the pointer stops at the edge of the display it is magnifying instead of "
+        L"sliding onto the next one. Edge push already reaches the edge of the magnified "
+        L"content, so nothing is out of reach. Turn it off to move between displays "
+        L"while zoomed."));
+
+    m_impl->pointerScalingSwitch = WUXC::ToggleSwitch{};
+    m_impl->pointerScalingSwitch.Header(winrt::box_value(L"Magnified pointer"));
+    m_impl->pointerScalingSwitch.IsOn(g.pointerScaling);
+    panel.Children().Append(m_impl->pointerScalingSwitch);
+
+    panel.Children().Append(MakeHint(
+        L"Draws an enlarged pointer and slows mouse movement to match the zoom. Off "
+        L"gives the normal Windows pointer, which at high zoom crosses the screen very "
+        L"fast."));
+
+    makeLimitRow(L"Speed", g.pointerSpeed, 0.1, 5.0, 0.05,
+                 m_impl->pointerSpeedSlider, m_impl->pointerSpeedLabel);
+    makeLimitRow(L"Zoom drag", g.pointerCompensation, 0.0, 1.0, 0.05,
+                 m_impl->pointerCompSlider, m_impl->pointerCompLabel);
+    makeLimitRow(L"Size", g.cursorScale, 0.5, 4.0, 0.05,
+                 m_impl->cursorScaleSlider, m_impl->cursorScaleLabel);
+
+    panel.Children().Append(MakeHint(
+        L"Zoom drag decides how much the zoom level slows the pointer. 0 keeps native "
+        L"speed, 1 makes hand movement match the magnified screen exactly and is very "
+        L"slow. 0.2 tested best."));
+
+    // ── Edge push ──
+    panel.Children().Append(MakeHeader(L"Edge push"));
+
+    makeLimitRow(L"Band", g.edgeBandFraction, 0.02, 0.45, 0.01,
+                 m_impl->edgeBandSlider, m_impl->edgeBandLabel);
+
+    panel.Children().Append(MakeHint(
+        L"How far from each edge the view starts scrolling, as a fraction of the "
+        L"screen. Smaller means a larger still area in the middle."));
+
     // ── Other ──
     panel.Children().Append(MakeHeader(L"Other"));
 
@@ -928,6 +999,7 @@ void ControlPanel::BuildSettingsTab()
 
     m_impl->hijackBox.Checked(onChanged);
     m_impl->hijackBox.Unchecked(onChanged);
+    m_impl->followEdgeRadio.Checked(onChanged);
     m_impl->followMouseRadio.Checked(onChanged);
     m_impl->followFocusRadio.Checked(onChanged);
     m_impl->startWithWindowsBox.Checked(onChanged);
@@ -949,6 +1021,20 @@ void ControlPanel::BuildSettingsTab()
     m_impl->maxZoomSlider.ValueChanged(makeLimitChanged(m_impl->maxZoomLabel));
     m_impl->zoomStepSlider.ValueChanged(makeLimitChanged(m_impl->zoomStepLabel));
 
+    m_impl->pointerSpeedSlider.ValueChanged(makeLimitChanged(m_impl->pointerSpeedLabel));
+    m_impl->pointerCompSlider.ValueChanged(makeLimitChanged(m_impl->pointerCompLabel));
+    m_impl->cursorScaleSlider.ValueChanged(makeLimitChanged(m_impl->cursorScaleLabel));
+    m_impl->edgeBandSlider.ValueChanged(makeLimitChanged(m_impl->edgeBandLabel));
+
+    auto onToggled = [this](winrt::Windows::Foundation::IInspectable const&,
+                            WUX::RoutedEventArgs const&)
+    {
+        if (!m_impl->suppressSettingsEvents)
+            PushSettings();
+    };
+    m_impl->lockToMonitorSwitch.Toggled(onToggled);
+    m_impl->pointerScalingSwitch.Toggled(onToggled);
+
     m_impl->suppressSettingsEvents = false;
 }
 
@@ -966,8 +1052,19 @@ void ControlPanel::PushSettings()
     g.hijackMagnifierKeys = IsCheckedTrue(m_impl->hijackBox);
     g.startWithWindows    = IsCheckedTrue(m_impl->startWithWindowsBox);
     g.rememberZoomLevel   = IsCheckedTrue(m_impl->rememberZoomBox);
-    g.followMode          = IsCheckedTrue(m_impl->followMouseRadio)
-                          ? FollowMode::Mouse : FollowMode::MouseAndFocus;
+    // Every mode has to be represented here. A radio missing from this chain
+    // does not read as "leave it alone" — it reads as one of the others, so
+    // changing an unrelated setting silently rewrites the mode.
+    g.followMode = IsCheckedTrue(m_impl->followEdgeRadio)  ? FollowMode::EdgePush      :
+                   IsCheckedTrue(m_impl->followMouseRadio) ? FollowMode::Mouse
+                                                           : FollowMode::MouseAndFocus;
+
+    g.lockPointerToMonitor = m_impl->lockToMonitorSwitch.IsOn();
+    g.pointerScaling       = m_impl->pointerScalingSwitch.IsOn();
+    g.pointerSpeed         = static_cast<float>(m_impl->pointerSpeedSlider.Value());
+    g.pointerCompensation  = static_cast<float>(m_impl->pointerCompSlider.Value());
+    g.cursorScale          = static_cast<float>(m_impl->cursorScaleSlider.Value());
+    g.edgeBandFraction     = static_cast<float>(m_impl->edgeBandSlider.Value());
 
     {
         double lo   = m_impl->minZoomSlider.Value();
