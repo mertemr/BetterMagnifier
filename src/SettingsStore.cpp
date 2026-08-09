@@ -274,14 +274,40 @@ bool SettingsStore::Load()
 
     // ── Takip modu ──
     {
+        // EdgePush is the default now. It is what the pointer work was built
+        // for, and with our own cursor it no longer costs the click alignment
+        // that made Mouse the safe choice.
         wchar_t buf[32]{};
-        GetPrivateProfileStringW(L"General", L"FollowMode", L"Mouse",
+        GetPrivateProfileStringW(L"General", L"FollowMode", L"EdgePush",
                                  buf, 32, file.c_str());
-        // Taninmayan deger -> varsayilan (MouseAndFocus)
-        m_general.followMode = EqualsCI(buf, L"Mouse")
-            ? FollowMode::Mouse
-            : FollowMode::MouseAndFocus;
+
+        m_general.followMode =
+            EqualsCI(buf, L"Mouse")         ? FollowMode::Mouse         :
+            EqualsCI(buf, L"MouseAndFocus") ? FollowMode::MouseAndFocus :
+                                              FollowMode::EdgePush;
     }
+
+    // ── Edge-push ve imlec ──
+    // Every one clamped on read. A hand-edited INI is a supported way to use
+    // this file, and a nonsensical value must fall back on its own rather than
+    // poison the rest of the section.
+    m_general.edgeBandFraction = std::clamp(
+        ReadFloat(file, L"General", L"EdgeBandFraction", 0.12f), 0.02f, 0.45f);
+
+    m_general.pointerScaling =
+        GetPrivateProfileIntW(L"General", L"PointerScaling", 1, file.c_str()) != 0;
+
+    m_general.pointerSpeed = std::clamp(
+        ReadFloat(file, L"General", L"PointerSpeed", 1.0f), 0.1f, 5.0f);
+
+    m_general.pointerCompensation = std::clamp(
+        ReadFloat(file, L"General", L"PointerCompensation", 0.2f), 0.0f, 1.0f);
+
+    m_general.cursorScale = std::clamp(
+        ReadFloat(file, L"General", L"CursorScale", 1.0f), 0.5f, 4.0f);
+
+    m_general.lockPointerToMonitor =
+        GetPrivateProfileIntW(L"General", L"LockPointerToMonitor", 1, file.c_str()) != 0;
 
     // ── Per-monitor section'lari ──
     // GetPrivateProfileSectionNamesW tum section isimlerini '\0' ile ayrilmis
@@ -360,8 +386,23 @@ bool SettingsStore::Save() const
             m_general.startWithWindows ? 1 : 0) && ok;
     ok = WriteInt(file, L"General", L"RememberZoomLevel",
             m_general.rememberZoomLevel ? 1 : 0) && ok;
+    ok = WriteFloat(file, L"General", L"EdgeBandFraction",
+                    m_general.edgeBandFraction) && ok;
+    ok = WriteInt(file, L"General", L"PointerScaling",
+                  m_general.pointerScaling ? 1 : 0) && ok;
+    ok = WriteFloat(file, L"General", L"PointerSpeed",
+                    m_general.pointerSpeed) && ok;
+    ok = WriteFloat(file, L"General", L"PointerCompensation",
+                    m_general.pointerCompensation) && ok;
+    ok = WriteFloat(file, L"General", L"CursorScale",
+                    m_general.cursorScale) && ok;
+    ok = WriteInt(file, L"General", L"LockPointerToMonitor",
+                  m_general.lockPointerToMonitor ? 1 : 0) && ok;
+
     ok = WritePrivateProfileStringW(L"General", L"FollowMode",
-            (m_general.followMode == FollowMode::Mouse) ? L"Mouse" : L"MouseAndFocus",
+            (m_general.followMode == FollowMode::Mouse)         ? L"Mouse" :
+            (m_general.followMode == FollowMode::MouseAndFocus) ? L"MouseAndFocus"
+                                                                : L"EdgePush",
             file.c_str()) != 0 && ok;
 
     for (const auto& [device, ms] : m_monitors)
@@ -500,8 +541,15 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(fresh.General().toggleVk == 'Z');
         BM_SELFCHECK(fresh.General().toggleModifiers == (MOD_CONTROL | MOD_ALT));
         BM_SELFCHECK(fresh.General().hijackMagnifierKeys == true);   // varsayilan ACIK
-        BM_SELFCHECK(fresh.General().followMode == FollowMode::Mouse);   // varsayilan
+        BM_SELFCHECK(fresh.General().followMode == FollowMode::EdgePush);  // yeni varsayilan
         BM_SELFCHECK(fresh.General().rememberZoomLevel == true);
+
+        // Pointer ve edge-push varsayilanlari
+        BM_SELFCHECK(fresh.General().pointerScaling == true);
+        BM_SELFCHECK(fresh.General().lockPointerToMonitor == true);
+        BM_SELFCHECK(std::abs(fresh.General().pointerCompensation - 0.2f) < 1e-4f);
+        BM_SELFCHECK(std::abs(fresh.General().pointerSpeed - 1.0f) < 1e-4f);
+        BM_SELFCHECK(std::abs(fresh.General().edgeBandFraction - 0.12f) < 1e-4f);
 
         // Bilinmeyen monitor -> varsayilan
         const auto m = fresh.Monitor(L"\\\\.\\NOSUCHDISPLAY");
@@ -515,6 +563,12 @@ void SettingsStoreSelfCheck()
         w.MutableGeneral().hijackMagnifierKeys = false;
         w.MutableGeneral().followMode       = FollowMode::Mouse;
         w.MutableGeneral().rememberZoomLevel = false;
+        w.MutableGeneral().edgeBandFraction     = 0.2f;
+        w.MutableGeneral().pointerScaling       = false;
+        w.MutableGeneral().pointerSpeed         = 1.5f;
+        w.MutableGeneral().pointerCompensation  = 0.35f;
+        w.MutableGeneral().cursorScale          = 1.25f;
+        w.MutableGeneral().lockPointerToMonitor = false;
         w.SetMonitor(L"\\\\.\\DISPLAY1", MonitorSettings{ 1.5f, 8.0f, 0.5f, 3.25f });
         BM_SELFCHECK(w.Save());
 
@@ -525,6 +579,29 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(r.General().hijackMagnifierKeys == false);
         BM_SELFCHECK(r.General().followMode == FollowMode::Mouse);
         BM_SELFCHECK(r.General().rememberZoomLevel == false);
+        BM_SELFCHECK(std::abs(r.General().edgeBandFraction - 0.2f) < 1e-4f);
+        BM_SELFCHECK(r.General().pointerScaling == false);
+        BM_SELFCHECK(std::abs(r.General().pointerSpeed - 1.5f) < 1e-4f);
+        BM_SELFCHECK(std::abs(r.General().pointerCompensation - 0.35f) < 1e-4f);
+        BM_SELFCHECK(std::abs(r.General().cursorScale - 1.25f) < 1e-4f);
+        BM_SELFCHECK(r.General().lockPointerToMonitor == false);
+
+        // Sacma degerler tek tek varsayilana dusuyor, dosyanin geri kalanini
+        // zehirlemiyor.
+        SettingsStore outOfRange;
+        outOfRange.MutableGeneral().edgeBandFraction    = 5.0f;
+        outOfRange.MutableGeneral().pointerSpeed        = 99.0f;
+        outOfRange.MutableGeneral().pointerCompensation = -3.0f;
+        BM_SELFCHECK(outOfRange.Save());
+
+        SettingsStore clamped;
+        BM_SELFCHECK(clamped.Load());
+        BM_SELFCHECK(clamped.General().edgeBandFraction > 0.0f &&
+                     clamped.General().edgeBandFraction <= 0.45f);
+        BM_SELFCHECK(clamped.General().pointerSpeed > 0.0f &&
+                     clamped.General().pointerSpeed <= 5.0f);
+        BM_SELFCHECK(clamped.General().pointerCompensation >= 0.0f &&
+                     clamped.General().pointerCompensation <= 1.0f);
 
         const auto rm = r.Monitor(L"\\\\.\\DISPLAY1");
         BM_SELFCHECK(rm.minZoom  == 1.5f);

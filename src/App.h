@@ -139,6 +139,12 @@ private:
     // on vSync and burns GPU.
     std::array<RECT, StatusSnapshot::kMaxMonitors> m_lastSrcRect{};
 
+    // The sprite is part of what is on screen, so it is part of "did anything
+    // change". Without it, edge-push holding the source rect still — which is
+    // the entire feature — froze the magnified pointer mid-move.
+    std::array<POINT, StatusSnapshot::kMaxMonitors>       m_lastSpritePos{};
+    std::array<const void*, StatusSnapshot::kMaxMonitors> m_lastSpriteShape{};
+
     // Nothing presented this tick means vSync did not pace the loop, so it
     // needs an explicit sleep.
     bool m_presentedThisTick = false;

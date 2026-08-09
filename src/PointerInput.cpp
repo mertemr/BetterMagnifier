@@ -9,9 +9,10 @@ namespace BetterMagnifier {
 
 namespace {
 
-// Feel is not something to guess at from a desk. These let the numbers be
-// tuned in a live session without a rebuild; the settled values become the
-// defaults and the panel exposes them.
+// Feel is not something to guess at from a desk. These are a startup override
+// for experimenting without a rebuild; the real controls are in settings.ini
+// and the panel, and ApplySettings overwrites these the moment settings load.
+// Use them to find a number, then put it in the settings.
 //
 //   BM_POINTER_SPEED  overall multiplier          (default 1.0)
 //   BM_POINTER_COMP   zoom compensation, 0..1     (default 0.2, measured)

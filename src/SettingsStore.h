@@ -24,8 +24,9 @@ namespace BetterMagnifier {
 
 enum class FollowMode
 {
-    Mouse,
+    Mouse,           // the view is centred on the pointer (legacy behaviour)
     MouseAndFocus,   // also follows EVENT_OBJECT_FOCUS
+    EdgePush,        // the view holds still until the pointer reaches a band
 };
 
 struct GeneralSettings
@@ -44,14 +45,48 @@ struct GeneralSettings
     // On by default. Turning it off leaves only the RegisterHotKey bindings.
     bool       hijackMagnifierKeys = true;
 
-    // Mouse by default. MouseAndFocus moves the zoom region to the keyboard
-    // focus, but that detaches the anchor from the cursor, and then clicks no
-    // longer land where they appear (see App::OnFocusChanged). Both cannot
-    // hold at once, so working clicks win and focus following is opt-in.
-    FollowMode followMode        = FollowMode::Mouse;
+    // EdgePush by default. Mouse was the old default for one reason — it kept
+    // the view anchored to the cursor, which was the only way clicks landed
+    // where they appeared. Our own cursor sprite removed that constraint, so
+    // the view can hold still without costing alignment, and a view that stops
+    // sliding on every twitch is far less tiring to read.
+    //
+    // MouseAndFocus is currently inert: focalPoint no longer feeds the source
+    // rect. See App::OnFocusChanged.
+    FollowMode followMode        = FollowMode::EdgePush;
 
     bool       startWithWindows  = false;
     bool       rememberZoomLevel = true;
+
+    // ── Edge-push panning ──
+    // Band width as a fraction of the axis; ViewportController clamps the
+    // result to [80, 300] screen pixels at use time.
+    float edgeBandFraction = 0.12f;
+
+    // ── Pointer ──
+    // Scale mouse motion so the magnified pointer is usable. Off falls back to
+    // native behaviour: the pointer flies at zoom times speed and no sprite is
+    // drawn.
+    bool  pointerScaling = true;
+
+    // scale = pointerSpeed / pow(zoom, pointerCompensation)
+    //
+    // 1.0 compensation maps hand movement 1:1 onto the magnified screen, which
+    // is right in theory and measured as far too slow: content is zoom times
+    // further apart than it looks. 0.2 tested right; the theory oversold how
+    // much correction the pointer wants.
+    float pointerSpeed       = 1.0f;
+    float pointerCompensation = 0.2f;
+
+    // Sprite size relative to zoom. Above 1 draws a pointer larger than the
+    // content scale, which low-vision users generally want.
+    float cursorScale = 1.0f;
+
+    // Keep the pointer on the monitor it is magnifying. On by default, and not
+    // an accident: with a zoomed edge the pointer used to slip onto the next
+    // display exactly when the user was reaching for the edge of the magnified
+    // content. Edge-push already gets you to that edge.
+    bool  lockPointerToMonitor = true;
 };
 
 // Keyed by device name, e.g. "\\\\.\\DISPLAY1"

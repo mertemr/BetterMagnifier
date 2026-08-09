@@ -498,6 +498,7 @@ void App::PublishViewportRequests(bool bumpLayout)
 void App::UpdatePointerCompositing(bool anyMonitorZoomed)
 {
     const bool want = anyMonitorZoomed
+                   && m_settings.General().pointerScaling
                    && SystemCursor::MagPathAvailable()
                    && !m_pointerCompositingBroken;
 
@@ -732,59 +733,40 @@ void App::RenderMonitor(size_t monitorIndex)
         srcRect.right  = srcRect.left + srcW;
         srcRect.bottom = srcRect.top  + srcH;
 
-        // ── Degisen bir sey yoksa hic cizme ──
-        // Ne yeni frame geldi ne de capa oynadi: ekranda gosterilecek yeni
-        // bir sey yok. Present cagirmak sadece vSync'te bloklayip GPU
-        // yakmak olurdu.
+        // ── Imlec sprite'inin durumu — ATLAMA TESTINDEN ONCE ──
+        //
+        // This has to be decided before the skip below, and that ordering is
+        // the whole point. The skip used to ask only "new frame, or did the
+        // source rect move?" — which worked while the rect was anchored to the
+        // cursor and therefore changed on every mouse move.
+        //
+        // Under edge-push the rect deliberately holds still: that IS the
+        // feature. So a pointer moving through the middle of the screen changed
+        // nothing the test could see, the frame was skipped, and the magnified
+        // pointer froze in place while the real one moved. The sprite's
+        // position and shape are part of what is on screen, so they belong in
+        // the test.
         const size_t rectSlot = (monitorIndex < StatusSnapshot::kMaxMonitors)
                               ? monitorIndex : StatusSnapshot::kMaxMonitors - 1;
-        const RECT& lastRect = m_lastSrcRect[rectSlot];
 
-        const bool rectSame = (lastRect.left   == srcRect.left)
-                           && (lastRect.top    == srcRect.top)
-                           && (lastRect.right  == srcRect.right)
-                           && (lastRect.bottom == srcRect.bottom);
+        CursorCache::Shape shape;
+        CursorCache::State cursorState = CursorCache::State::Hidden;
+        POINT spritePos{ 0, 0 };
 
-        if (!frame.isNewFrame && rectSame)
-        {
-            capture.ReleaseFrame();
-            return;
-        }
+        // Shape identity, so an arrow turning into an I-beam without moving
+        // still redraws. The SRV pointer is stable per cached shape, which
+        // makes it a usable identity without keeping the HCURSOR around.
+        const void* spriteShape = nullptr;
 
-        m_lastSrcRect[rectSlot] = srcRect;
-
-        // Yeni frame varsa onu ver; yoksa nullptr = "son frame'i tekrar kullan".
-        ID3D11Texture2D* newFrame = (frame.isNewFrame && frame.texture)
-                                  ? frame.texture.Get()
-                                  : nullptr;
-
-        if (!m_renderer.RenderFrame(newFrame, monitorIndex, srcRect))
-        {
-            // Henuz hic frame gelmemis olabilir — bir sonraki turda tekrar denenir.
-            capture.ReleaseFrame();
-            return;
-        }
-
-        // ── Kendi imlecimizi icerigin uzerine ciz ──
-        //
-        // Position: the sprite goes where the user should SEE the pointer,
-        // (V - srcOrigin) * zoom. The real OS cursor sits at round(V), which is
-        // the source pixel underneath that sprite — and that identity is the
-        // whole reason clicks land on what the pointer appears to point at.
-        //
-        // Sub-pixel by design: V is a double, so the sprite slides smoothly
-        // instead of snapping in zoom-pixel steps the way a magnified real
-        // cursor would.
         if (m_pointerCompositing)
         {
-            CursorCache::Shape shape;
-            const CursorCache::State state = m_cursorCache.Current(shape);
+            cursorState = m_cursorCache.Current(shape);
 
             // Fail closed. The real pointer is hidden right now, so a sprite we
             // cannot draw means the user has no pointer at all and no way to
-            // click their way out of it. A single miss is not worth reacting
-            // to — a shape can fail to decode once — but a run of them is.
-            if (state == CursorCache::State::Failed)
+            // click their way out of it. A single miss is not worth reacting to
+            // — a shape can fail to decode once — but a run of them is.
+            if (cursorState == CursorCache::State::Failed)
             {
                 if (++m_spriteFailures >= kSpriteFailureLimit)
                 {
@@ -802,25 +784,76 @@ void App::RenderMonitor(size_t monitorIndex)
                 m_spriteFailures = 0;
             }
 
-            if (state == CursorCache::State::Ok)
+            if (cursorState == CursorCache::State::Ok)
             {
                 const double vx = m_viewportSnapshot.pointerX.load(std::memory_order_relaxed);
                 const double vy = m_viewportSnapshot.pointerY.load(std::memory_order_relaxed);
 
-                const double sx = (vx - mon->bounds.left - srcRect.left) * zoom;
-                const double sy = (vy - mon->bounds.top  - srcRect.top ) * zoom;
-
-                const float scale = static_cast<float>(zoom);
-                const float w = static_cast<float>(shape.width)  * scale;
-                const float h = static_cast<float>(shape.height) * scale;
-
-                // The hotspot is what the user points with, so it — not the
-                // sprite's corner — is what lands on the computed position.
-                m_renderer.RenderSprite(monitorIndex, shape.srv,
-                    static_cast<float>(sx) - shape.hotspotX * scale,
-                    static_cast<float>(sy) - shape.hotspotY * scale,
-                    w, h);
+                // Rounded to whole target pixels: sub-pixel motion that cannot
+                // change a single pixel is not worth a frame.
+                spritePos.x = std::lround((vx - mon->bounds.left - srcRect.left) * zoom);
+                spritePos.y = std::lround((vy - mon->bounds.top  - srcRect.top ) * zoom);
+                spriteShape = shape.srv;
             }
+        }
+
+        // ── Degisen bir sey yoksa hic cizme ──
+        // Ne yeni frame geldi, ne kaynak bolge oynadi, ne de imlec kimildadi:
+        // ekranda gosterilecek yeni bir sey yok. Present cagirmak sadece
+        // vSync'te bloklayip GPU yakmak olurdu.
+        const RECT& lastRect = m_lastSrcRect[rectSlot];
+
+        const bool rectSame = (lastRect.left   == srcRect.left)
+                           && (lastRect.top    == srcRect.top)
+                           && (lastRect.right  == srcRect.right)
+                           && (lastRect.bottom == srcRect.bottom);
+
+        const bool spriteSame = (m_lastSpritePos[rectSlot].x == spritePos.x)
+                             && (m_lastSpritePos[rectSlot].y == spritePos.y)
+                             && (m_lastSpriteShape[rectSlot] == spriteShape);
+
+        if (!frame.isNewFrame && rectSame && spriteSame)
+        {
+            capture.ReleaseFrame();
+            return;
+        }
+
+        m_lastSrcRect[rectSlot]     = srcRect;
+        m_lastSpritePos[rectSlot]   = spritePos;
+        m_lastSpriteShape[rectSlot] = spriteShape;
+
+        // Yeni frame varsa onu ver; yoksa nullptr = "son frame'i tekrar kullan".
+        ID3D11Texture2D* newFrame = (frame.isNewFrame && frame.texture)
+                                  ? frame.texture.Get()
+                                  : nullptr;
+
+        if (!m_renderer.RenderFrame(newFrame, monitorIndex, srcRect))
+        {
+            // Henuz hic frame gelmemis olabilir — bir sonraki turda tekrar denenir.
+            capture.ReleaseFrame();
+            return;
+        }
+
+        // ── Kendi imlecimizi icerigin uzerine ciz ──
+        //
+        // Shape and position were resolved above, before the skip test, because
+        // they are part of deciding whether this frame is worth drawing at all.
+        //
+        // spritePos is where the user should SEE the pointer,
+        // (V - srcOrigin) * zoom. The real OS cursor sits at round(V), the
+        // source pixel underneath that sprite — and that identity is the whole
+        // reason clicks land on what the pointer appears to point at.
+        if (cursorState == CursorCache::State::Ok)
+        {
+            const float scale = static_cast<float>(zoom);
+
+            // The hotspot is what the user points with, so it — not the
+            // sprite's corner — is what lands on the computed position.
+            m_renderer.RenderSprite(monitorIndex, shape.srv,
+                static_cast<float>(spritePos.x) - shape.hotspotX * scale,
+                static_cast<float>(spritePos.y) - shape.hotspotY * scale,
+                static_cast<float>(shape.width)  * scale,
+                static_cast<float>(shape.height) * scale);
         }
 
         // ── vSync SADECE flip modda ──
@@ -1247,6 +1280,28 @@ void App::ApplySettings()
     // Input thread'in atomic bayraklarini guncelle
     m_inputThread.SetFollowMode(g.followMode);
     m_inputThread.SetHijackMagnifierKeys(g.hijackMagnifierKeys);
+
+    // ── Edge-push ve imlec, canli ──
+    // Every one of these takes effect on the next mouse event: they are atomics
+    // the input thread reads, not state it has to be restarted to pick up. That
+    // is what makes the panel's sliders usable — you drag and feel it.
+    EdgePushConfig cfg;
+    cfg.enabled      = (g.followMode == FollowMode::EdgePush);
+    cfg.bandFraction = g.edgeBandFraction;
+    m_inputThread.SetEdgePushConfig(cfg);
+
+    m_inputThread.Pointer().SetSpeed(g.pointerSpeed);
+    m_inputThread.Pointer().SetCompensation(g.pointerCompensation);
+    m_inputThread.Pointer().SetLockToMonitor(g.lockPointerToMonitor);
+
+    // Turning pointer scaling off has to give the real pointer back straight
+    // away, not on the next zoom change.
+    if (!g.pointerScaling && m_pointerCompositing)
+    {
+        SystemCursor::Restore();
+        m_inputThread.Pointer().SetEnabled(false);
+        m_pointerCompositing = false;
+    }
 
     // Mevcut zoom yeni sinirlarin disinda kaldiysa iceri cek
     for (size_t i = 0; i < m_monitorManager.GetMonitorCount(); ++i)
