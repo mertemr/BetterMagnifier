@@ -253,6 +253,7 @@ void InputThread::Attach(ViewportController* controller, ViewportSnapshot* snaps
 {
     m_viewport = controller;
     m_snapshot = snapshot;
+    m_pointer.Attach(controller, snapshot);
 }
 
 void InputThread::SetEdgePushConfig(const EdgePushConfig& cfg)
@@ -391,27 +392,25 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
     if (nCode == HC_ACTION && wParam == WM_MOUSEMOVE && lParam &&
         s_instance && s_instance->m_viewport && s_instance->m_snapshot)
     {
+        InputThread* self = s_instance;
         auto* mm = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
 
-        if (!((mm->flags & LLMHF_INJECTED) && IgnoreInjectedInput()))
+        // Injected filtering lives in PointerInput now, and it has to: our own
+        // SetCursorPos comes back marked injected, so "ignore all injected" is
+        // no longer a rule this layer can apply. Only the blanket automation
+        // guard stays here, and only when it is not our own echo.
+        const bool foreignInjected =
+            (mm->flags & LLMHF_INJECTED) && IgnoreInjectedInput() &&
+            !self->m_pointer.Enabled();
+
+        if (!foreignInjected)
         {
-            InputThread* self = s_instance;
-            const double px = static_cast<double>(mm->pt.x);
-            const double py = static_cast<double>(mm->pt.y);
-
             self->SyncFromRequests();
-
-            const int mi = self->m_viewport->MonitorIndexAt(px, py);
-            if (mi >= 0 &&
-                !self->m_snapshot->Monitor(static_cast<std::size_t>(mi))
-                     .frozen.load(std::memory_order_relaxed))
-            {
-                self->m_viewport->OnPointerMoved(static_cast<std::size_t>(mi), px, py);
-            }
-
-            self->m_snapshot->pointerX.store(px, std::memory_order_relaxed);
-            self->m_snapshot->pointerY.store(py, std::memory_order_relaxed);
+            const bool consumed = self->m_pointer.OnMouseMove(*mm);
             self->PublishViewport();
+
+            if (consumed)
+                return 1;
         }
     }
 

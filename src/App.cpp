@@ -274,6 +274,8 @@ bool App::InitializeComponents()
         return false;
     }
 
+    m_cursorCache.Initialize(m_renderer.GetDevice());
+
     // ── 3. Per-monitor: overlay + swap chain + capture ──
     const size_t monitorCount = m_monitorManager.GetMonitorCount();
 
@@ -479,6 +481,46 @@ void App::PublishViewportRequests(bool bumpLayout)
         m_viewportSnapshot.layoutEpoch.fetch_add(1, std::memory_order_release);
 }
 
+// =============================================================================
+// UpdatePointerCompositing — gercek imleci gizle / geri getir
+// =============================================================================
+//
+// The exposure window is exactly "actively magnifying": the pointer is hidden
+// when a monitor is zoomed and comes back the instant it is not.
+//
+// Gated on MagPathAvailable, and that gate is load-bearing rather than
+// defensive. Hiding the pointer without MagShowSystemCursor means
+// SetSystemCursor, whose effect outlives the process; if we drew a sprite
+// without hiding, the user would see two pointers in different places, which
+// is worse than one in the wrong place. So when the safe hide is unavailable
+// the whole feature stays off and the pointer behaves natively.
+// =============================================================================
+void App::UpdatePointerCompositing(bool anyMonitorZoomed)
+{
+    const bool want = anyMonitorZoomed
+                   && SystemCursor::MagPathAvailable()
+                   && !m_pointerCompositingBroken;
+
+    if (want == m_pointerCompositing)
+        return;
+
+    m_pointerCompositing = want;
+
+    // Order matters on the way in: enable scaling first so the pointer is
+    // already being tracked when it disappears. On the way out, show the real
+    // pointer before releasing control, so there is never a frame with none.
+    if (want)
+    {
+        m_inputThread.Pointer().SetEnabled(true);
+        SystemCursor::Hide();
+    }
+    else
+    {
+        SystemCursor::Restore();
+        m_inputThread.Pointer().SetEnabled(false);
+    }
+}
+
 void App::Update()
 {
     m_status.monitorCount.store(m_overlays.size(), std::memory_order_relaxed);
@@ -558,6 +600,8 @@ void App::Update()
 
         RenderMonitor(i);
     }
+
+    UpdatePointerCompositing(anyActive);
 
     // Hicbir monitor aktif degil → bosa CPU yakma.
     // Zoom aktifse Present(vSync) bizi zaten refresh rate'e kilitliyor.
@@ -703,6 +747,64 @@ void App::RenderMonitor(size_t monitorIndex)
             // Henuz hic frame gelmemis olabilir — bir sonraki turda tekrar denenir.
             capture.ReleaseFrame();
             return;
+        }
+
+        // ── Kendi imlecimizi icerigin uzerine ciz ──
+        //
+        // Position: the sprite goes where the user should SEE the pointer,
+        // (V - srcOrigin) * zoom. The real OS cursor sits at round(V), which is
+        // the source pixel underneath that sprite — and that identity is the
+        // whole reason clicks land on what the pointer appears to point at.
+        //
+        // Sub-pixel by design: V is a double, so the sprite slides smoothly
+        // instead of snapping in zoom-pixel steps the way a magnified real
+        // cursor would.
+        if (m_pointerCompositing)
+        {
+            CursorCache::Shape shape;
+            const CursorCache::State state = m_cursorCache.Current(shape);
+
+            // Fail closed. The real pointer is hidden right now, so a sprite we
+            // cannot draw means the user has no pointer at all and no way to
+            // click their way out of it. A single miss is not worth reacting
+            // to — a shape can fail to decode once — but a run of them is.
+            if (state == CursorCache::State::Failed)
+            {
+                if (++m_spriteFailures >= kSpriteFailureLimit)
+                {
+                    LOG_ERROR("Cursor sprite failed {} frames running — restoring the "
+                              "real pointer and disabling pointer compositing",
+                              m_spriteFailures);
+                    SystemCursor::Restore();
+                    m_inputThread.Pointer().SetEnabled(false);
+                    m_pointerCompositing = false;
+                    m_pointerCompositingBroken = true;
+                }
+            }
+            else
+            {
+                m_spriteFailures = 0;
+            }
+
+            if (state == CursorCache::State::Ok)
+            {
+                const double vx = m_viewportSnapshot.pointerX.load(std::memory_order_relaxed);
+                const double vy = m_viewportSnapshot.pointerY.load(std::memory_order_relaxed);
+
+                const double sx = (vx - mon->bounds.left - srcRect.left) * zoom;
+                const double sy = (vy - mon->bounds.top  - srcRect.top ) * zoom;
+
+                const float scale = static_cast<float>(zoom);
+                const float w = static_cast<float>(shape.width)  * scale;
+                const float h = static_cast<float>(shape.height) * scale;
+
+                // The hotspot is what the user points with, so it — not the
+                // sprite's corner — is what lands on the computed position.
+                m_renderer.RenderSprite(monitorIndex, shape.srv,
+                    static_cast<float>(sx) - shape.hotspotX * scale,
+                    static_cast<float>(sy) - shape.hotspotY * scale,
+                    w, h);
+            }
         }
 
         // ── vSync SADECE flip modda ──
@@ -1360,6 +1462,12 @@ void App::Shutdown()
     LOG_INFO("App kapatiliyor...");
 
     m_running = false;
+
+    // Before anything else can fail: give the pointer back. Every other
+    // teardown step is recoverable by restarting the app; a hidden pointer is
+    // not, because the user cannot click anything to fix it.
+    UpdatePointerCompositing(false);
+    m_cursorCache.Clear();
 
     // 0. GUI thread'i once durdur — panel m_settings ve m_status'a pointer
     // tutuyor, onlar gecersizlesmeden thread'in gitmesi lazim.

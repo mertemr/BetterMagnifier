@@ -156,6 +156,88 @@ bool DecodeCursor(HCURSOR cursor, CursorBitmap& out)
     return true;
 }
 
+void CursorCache::Clear()
+{
+    m_entries.clear();
+}
+
+bool CursorCache::Acquire(HCURSOR cursor, Shape& out)
+{
+    if (!m_device || !cursor)
+        return false;
+
+    if (auto it = m_entries.find(cursor); it != m_entries.end())
+    {
+        out.srv      = it->second.srv.Get();
+        out.width    = it->second.width;
+        out.height   = it->second.height;
+        out.hotspotX = it->second.hotspotX;
+        out.hotspotY = it->second.hotspotY;
+        return true;
+    }
+
+    CursorBitmap bmp;
+    if (!DecodeCursor(cursor, bmp) || bmp.pixels.empty())
+        return false;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width            = static_cast<UINT>(bmp.width);
+    desc.Height           = static_cast<UINT>(bmp.height);
+    desc.MipLevels        = 1;
+    desc.ArraySize        = 1;
+    desc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage            = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA init{};
+    init.pSysMem     = bmp.pixels.data();
+    init.SysMemPitch = static_cast<UINT>(bmp.width) * 4u;
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
+    if (FAILED(m_device->CreateTexture2D(&desc, &init, &tex)))
+        return false;
+
+    Entry entry;
+    if (FAILED(m_device->CreateShaderResourceView(tex.Get(), nullptr, &entry.srv)))
+        return false;
+
+    entry.width    = bmp.width;
+    entry.height   = bmp.height;
+    entry.hotspotX = bmp.hotspotX;
+    entry.hotspotY = bmp.hotspotY;
+
+    if (m_entries.size() >= kMaxEntries)
+        m_entries.clear();
+
+    const Entry& stored = (m_entries[cursor] = std::move(entry));
+
+    out.srv      = stored.srv.Get();
+    out.width    = stored.width;
+    out.height   = stored.height;
+    out.hotspotX = stored.hotspotX;
+    out.hotspotY = stored.hotspotY;
+    return true;
+}
+
+CursorCache::State CursorCache::Current(Shape& out)
+{
+    CURSORINFO ci{};
+    ci.cbSize = sizeof(ci);
+
+    if (!GetCursorInfo(&ci))
+        return State::Failed;
+
+    // flags == 0 means the pointer is genuinely hidden — a text field with the
+    // caret active, a game that took it. Drawing a sprite then would put a
+    // pointer on screen that should not be there, so this is Hidden, not a
+    // fault, and the caller must not treat it as one.
+    if (ci.flags == 0 || !ci.hCursor)
+        return State::Hidden;
+
+    return Acquire(ci.hCursor, out) ? State::Ok : State::Failed;
+}
+
 bool WriteCursorBitmapFile(const CursorBitmap& bmp, const wchar_t* path)
 {
     if (bmp.pixels.empty() || bmp.width <= 0 || bmp.height <= 0)

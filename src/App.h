@@ -18,6 +18,7 @@
 #include "InputThread.h"
 #include "ViewportController.h"
 #include "ViewportSnapshot.h"
+#include "CursorRenderer.h"
 #include "ControlPanel.h"
 
 #include <windows.h>
@@ -110,6 +111,22 @@ private:
     // Push monitor rects and the settled zoom to the input thread. Called every
     // frame; bumpLayout only on a topology change.
     void PublishViewportRequests(bool bumpLayout);
+
+    // Turn pointer compositing on exactly while a monitor is magnified, and
+    // only when the pointer can be hidden safely.
+    void UpdatePointerCompositing(bool anyMonitorZoomed);
+
+    CursorCache m_cursorCache;
+    bool        m_pointerCompositing = false;
+
+    // Latched once the sprite has proved it cannot be drawn. Without the latch
+    // UpdatePointerCompositing would turn the feature straight back on next
+    // frame and hide the pointer again, so the failure would loop instead of
+    // stopping.
+    bool m_pointerCompositingBroken = false;
+
+    int m_spriteFailures = 0;
+    static constexpr int kSpriteFailureLimit = 30;
 
     // Did the cursor actually move? Without this the per-frame mouse tracking
     // overwrites whatever focus tracking just set.

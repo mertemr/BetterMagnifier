@@ -58,6 +58,12 @@ public:
     // Returns false when there is nothing to draw; do not Present then.
     bool RenderFrame(ID3D11Texture2D* srcTexture, size_t targetIndex, const RECT& srcRect);
 
+    // Draws a premultiplied-BGRA sprite over whatever RenderFrame just drew.
+    // Coordinates are target pixels; the top-left corner, hotspot already
+    // subtracted by the caller. Call between RenderFrame and Present.
+    bool RenderSprite(size_t targetIndex, ID3D11ShaderResourceView* srv,
+                      float x, float y, float width, float height);
+
     void Present(size_t targetIndex, bool vSync = true);
 
     ID3D11Device*        GetDevice()  const { return m_device.Get(); }
@@ -77,6 +83,12 @@ public:
 #endif
 
 private:
+#ifdef _DEBUG
+    // Env-driven frame dumping. Called from Present so the cursor sprite is
+    // included, since that is composited after RenderFrame returns.
+    void MaybeDumpFrame(size_t targetIndex);
+#endif
+
     bool CreateDevice();
     bool CreateSamplerStates();
     bool CreateShaders();
@@ -91,6 +103,13 @@ private:
     D3D_FEATURE_LEVEL                            m_featureLevel = D3D_FEATURE_LEVEL_11_0;
 
     Microsoft::WRL::ComPtr<ID3D11SamplerState>   m_samplerLinear;
+
+    // Point, not linear: a magnified pointer reads better with crisp edges.
+    Microsoft::WRL::ComPtr<ID3D11SamplerState>    m_samplerPoint;
+    Microsoft::WRL::ComPtr<ID3D11BlendState>      m_alphaBlend;
+    Microsoft::WRL::ComPtr<ID3D11VertexShader>    m_spriteVS;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader>     m_spritePS;
+    Microsoft::WRL::ComPtr<ID3D11Buffer>          m_spriteBuffer;
 
     // No vertex buffer and no input layout: the vertex shader derives its
     // positions from SV_VertexID.

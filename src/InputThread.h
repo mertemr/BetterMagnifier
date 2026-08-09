@@ -19,6 +19,7 @@
 #include "SettingsStore.h"   // FollowMode
 #include "ViewportController.h"
 #include "ViewportSnapshot.h"
+#include "PointerInput.h"
 
 #include <windows.h>
 #include <thread>
@@ -59,6 +60,8 @@ public:
 
     void SetEdgePushConfig(const EdgePushConfig& cfg);
 
+    PointerInput& Pointer() { return m_pointer; }
+
 private:
     void ThreadMain();
     bool InstallHooks();
@@ -86,6 +89,7 @@ private:
 
     ViewportController* m_viewport = nullptr;
     ViewportSnapshot*   m_snapshot = nullptr;
+    PointerInput        m_pointer;
 
     // Split into scalars rather than std::atomic<EdgePushConfig>: the struct is
     // 16 bytes and an atomic that wide is not guaranteed lock-free, which is

@@ -69,6 +69,32 @@ float4 PSMain(VSOut input) : SV_TARGET
     // Alpha 1.0 sabit: swap chain AlphaMode IGNORE, overlay opak.
     return float4(srcTex.Sample(srcSmp, input.uv).rgb, 1.0);
 }
+
+// ── Cursor sprite ──
+// Ayri gecis: icerik bilinear ornekleniyor ama buyutulmus bir okun keskin
+// kenarli olmasi bulanik olmasindan iyi okunuyor, o yuzden kendi sampler'i var.
+cbuffer SpriteParams : register(b0)
+{
+    // Hedef dikdortgen, NDC: xy = sol-ust, zw = sag-alt
+    float4 spriteRect;
+};
+
+VSOut SpriteVS(uint vid : SV_VertexID)
+{
+    // Dort vertex'lik strip: (0,0) (1,0) (0,1) (1,1)
+    float2 c = float2(vid & 1, (vid >> 1) & 1);
+
+    VSOut o;
+    o.pos = float4(lerp(spriteRect.xy, spriteRect.zw, c), 0.0, 1.0);
+    o.uv  = c;
+    return o;
+}
+
+float4 SpritePS(VSOut input) : SV_TARGET
+{
+    // Premultiplied: blend ONE / INV_SRC_ALPHA ile eslesiyor.
+    return srcTex.Sample(srcSmp, input.uv);
+}
 )HLSL";
 
 // Constant buffer duzeni. D3D11 sabit tampon boyutunu 16'nin kati istiyor —
@@ -397,6 +423,82 @@ bool D3DRenderer::CreateShaders()
         return false;
     }
 
+    // ── Sprite gecisi (imlec) ──
+    ComPtr<ID3DBlob> spriteVsBlob;
+    if (!compileStage("SpriteVS", "vs_5_0", spriteVsBlob))
+        return false;
+
+    ComPtr<ID3DBlob> spritePsBlob;
+    if (!compileStage("SpritePS", "ps_5_0", spritePsBlob))
+        return false;
+
+    hr = m_device->CreateVertexShader(spriteVsBlob->GetBufferPointer(),
+                                      spriteVsBlob->GetBufferSize(), nullptr, &m_spriteVS);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Sprite VS olusturulamadi: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    hr = m_device->CreatePixelShader(spritePsBlob->GetBufferPointer(),
+                                     spritePsBlob->GetBufferSize(), nullptr, &m_spritePS);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Sprite PS olusturulamadi: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    // Premultiplied alpha: kaynak carpani ONE. Duz alfa ile buyutulmus
+    // kenarlarda hale olusuyor, ki buyutme onu tam da gorunur kildigi yer.
+    D3D11_BLEND_DESC blendDesc{};
+    blendDesc.RenderTarget[0].BlendEnable           = TRUE;
+    blendDesc.RenderTarget[0].SrcBlend              = D3D11_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlend             = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOp               = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].SrcBlendAlpha         = D3D11_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlendAlpha        = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+
+    hr = m_device->CreateBlendState(&blendDesc, &m_alphaBlend);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Alpha blend state olusturulamadi: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    // Point sampling for the sprite only. Kept here beside the rest of the
+    // sprite state rather than with the content sampler, because the two make
+    // opposite choices on purpose.
+    D3D11_SAMPLER_DESC pointDesc{};
+    pointDesc.Filter         = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    pointDesc.AddressU       = D3D11_TEXTURE_ADDRESS_CLAMP;
+    pointDesc.AddressV       = D3D11_TEXTURE_ADDRESS_CLAMP;
+    pointDesc.AddressW       = D3D11_TEXTURE_ADDRESS_CLAMP;
+    pointDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    pointDesc.MaxLOD         = D3D11_FLOAT32_MAX;
+
+    hr = m_device->CreateSamplerState(&pointDesc, &m_samplerPoint);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Point sampler olusturulamadi: 0x{:08X}", static_cast<unsigned long>(hr));
+        return false;
+    }
+
+    D3D11_BUFFER_DESC spriteCb{};
+    spriteCb.ByteWidth      = sizeof(float) * 4;
+    spriteCb.Usage          = D3D11_USAGE_DEFAULT;
+    spriteCb.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+    spriteCb.CPUAccessFlags = 0;
+
+    hr = m_device->CreateBuffer(&spriteCb, nullptr, &m_spriteBuffer);
+    if (FAILED(hr))
+    {
+        LOG_ERROR("Sprite constant buffer olusturulamadi: 0x{:08X}",
+                  static_cast<unsigned long>(hr));
+        return false;
+    }
+
     // ── UV constant buffer ──
     // Her frame UpdateSubresource ile yaziyoruz, DEFAULT usage yeterli.
     D3D11_BUFFER_DESC cbDesc{};
@@ -636,7 +738,12 @@ bool D3DRenderer::RenderFrame(
     // Uc vertex = ekrani kaplayan tek ucgen.
     m_context->Draw(3, 0);
 
+    return true;
+}
+
 #ifdef _DEBUG
+void D3DRenderer::MaybeDumpFrame(size_t targetIndex)
+{
     // ── Frame dump (verification tool) ──
     //
     // The overlay is WDA_EXCLUDEFROMCAPTURE, so a screenshot cannot show what
@@ -647,6 +754,10 @@ bool D3DRenderer::RenderFrame(
     // for is whether something MOVES between frames: an occluded popup that
     // keeps repainting shows a menu highlight that tracks the mouse, a frozen
     // one does not. One frame cannot tell those apart.
+    //
+    // Called from Present rather than from RenderFrame so the cursor sprite,
+    // which is composited in between, is in the dump. Still before the actual
+    // Present call: FLIP_DISCARD leaves the back buffer undefined afterwards.
     //
     // BM_DUMP_FRAME    path prefix; files are <prefix>.NNN.bmp
     // BM_DUMP_AFTER    first frame to dump (default 60)
@@ -699,10 +810,8 @@ bool D3DRenderer::RenderFrame(
             }
         }
     }
-#endif
-
-    return true;
 }
+#endif
 
 // =============================================================================
 // EnsureSourceTexture — shader'da orneklenebilir ara texture
@@ -772,8 +881,71 @@ bool D3DRenderer::EnsureSourceTexture(RenderTarget& rt, const D3D11_TEXTURE2D_DE
 // =============================================================================
 // Present — Render edilen frame'i ekrana goster
 // =============================================================================
+// =============================================================================
+// RenderSprite — imleci icerigin uzerine ciz
+// =============================================================================
+//
+// Called between RenderFrame and Present, so it composites onto the frame that
+// is already there rather than clearing it.
+// =============================================================================
+bool D3DRenderer::RenderSprite(size_t targetIndex, ID3D11ShaderResourceView* srv,
+                               float x, float y, float width, float height)
+{
+    if (targetIndex >= m_renderTargets.size() || !srv || !m_spriteVS || !m_spritePS)
+        return false;
+
+    RenderTarget& rt = m_renderTargets[targetIndex];
+    if (!rt.rtv || rt.width == 0 || rt.height == 0)
+        return false;
+
+    // Wholly off-target: nothing to do, and a degenerate rect is not worth
+    // sending to the GPU.
+    if (width <= 0.0f || height <= 0.0f ||
+        x + width <= 0.0f || y + height <= 0.0f ||
+        x >= static_cast<float>(rt.width) || y >= static_cast<float>(rt.height))
+        return false;
+
+    // Pixels -> NDC. Y flips: NDC grows upward, pixels downward.
+    const float fw = static_cast<float>(rt.width);
+    const float fh = static_cast<float>(rt.height);
+
+    const float rect[4] = {
+        (x / fw) * 2.0f - 1.0f,
+        1.0f - (y / fh) * 2.0f,
+        ((x + width)  / fw) * 2.0f - 1.0f,
+        1.0f - ((y + height) / fh) * 2.0f,
+    };
+
+    m_context->UpdateSubresource(m_spriteBuffer.Get(), 0, nullptr, rect, 0, 0);
+
+    m_context->OMSetRenderTargets(1, rt.rtv.GetAddressOf(), nullptr);
+
+    const float blendFactor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    m_context->OMSetBlendState(m_alphaBlend.Get(), blendFactor, 0xFFFFFFFFu);
+
+    m_context->IASetInputLayout(nullptr);
+    m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+
+    m_context->VSSetShader(m_spriteVS.Get(), nullptr, 0);
+    m_context->VSSetConstantBuffers(0, 1, m_spriteBuffer.GetAddressOf());
+
+    m_context->PSSetShader(m_spritePS.Get(), nullptr, 0);
+    m_context->PSSetShaderResources(0, 1, &srv);
+    m_context->PSSetSamplers(0, 1, m_samplerPoint.GetAddressOf());
+
+    m_context->Draw(4, 0);
+
+    // Leave blending off so the next frame's content pass is unaffected.
+    m_context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    return true;
+}
+
 void D3DRenderer::Present(size_t targetIndex, bool vSync)
 {
+#ifdef _DEBUG
+    MaybeDumpFrame(targetIndex);
+#endif
+
     if (targetIndex >= m_renderTargets.size())
         return;
 
