@@ -16,6 +16,8 @@
 #include "StatusSnapshot.h"
 #include "SettingsStore.h"
 #include "InputThread.h"
+#include "ViewportController.h"
+#include "ViewportSnapshot.h"
 #include "ControlPanel.h"
 
 #include <windows.h>
@@ -99,6 +101,15 @@ private:
     InputThread                 m_inputThread;
     StatusSnapshot              m_status;
     ControlPanel                m_controlPanel;
+
+    // The source rectangle and the edge-push pan. Owned here for lifetime, but
+    // mutated only on the input thread — see InputThread::Attach.
+    ViewportController          m_viewport;
+    ViewportSnapshot            m_viewportSnapshot;
+
+    // Push monitor rects and the settled zoom to the input thread. Called every
+    // frame; bumpLayout only on a topology change.
+    void PublishViewportRequests(bool bumpLayout);
 
     // Did the cursor actually move? Without this the per-frame mouse tracking
     // overwrites whatever focus tracking just set.

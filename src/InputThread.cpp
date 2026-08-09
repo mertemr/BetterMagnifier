@@ -226,11 +226,103 @@ void InputThread::RemoveHooks()
 // =============================================================================
 void InputThread::ThreadMain()
 {
+    // A thread timer (hwnd == nullptr) delivers WM_TIMER straight to this
+    // loop. It exists so a zoom change with the mouse perfectly still still
+    // reaches the controller: nothing else would pull the request through
+    // until the user moved the mouse.
+    SetTimer(nullptr, kSyncTimerId, kSyncTimerMs, nullptr);
+
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
     {
+        if (msg.message == WM_TIMER && msg.hwnd == nullptr)
+        {
+            SyncFromRequests();
+            PublishViewport();
+            continue;
+        }
+
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+    }
+
+    KillTimer(nullptr, kSyncTimerId);
+}
+
+void InputThread::Attach(ViewportController* controller, ViewportSnapshot* snapshot)
+{
+    m_viewport = controller;
+    m_snapshot = snapshot;
+}
+
+void InputThread::SetEdgePushConfig(const EdgePushConfig& cfg)
+{
+    m_cfgEnabled.store(cfg.enabled, std::memory_order_relaxed);
+    m_cfgBandFraction.store(cfg.bandFraction, std::memory_order_relaxed);
+}
+
+// =============================================================================
+// SyncFromRequests — render thread'in isteklerini controller'a uygula
+// =============================================================================
+//
+// Called from the mouse hook and from the sync timer. Idempotent, and cheap
+// when nothing changed: one double compare per monitor.
+// =============================================================================
+void InputThread::SyncFromRequests()
+{
+    if (!m_viewport || !m_snapshot)
+        return;
+
+    EdgePushConfig cfg;
+    cfg.enabled      = m_cfgEnabled.load(std::memory_order_relaxed);
+    cfg.bandFraction = m_cfgBandFraction.load(std::memory_order_relaxed);
+    m_viewport->SetConfig(cfg);
+
+    const double px = m_snapshot->pointerX.load(std::memory_order_relaxed);
+    const double py = m_snapshot->pointerY.load(std::memory_order_relaxed);
+
+    // Layout first: a zoom applied against a stale monitor rect would clamp
+    // srcOrigin to the wrong bound.
+    const std::uint64_t epoch = m_snapshot->layoutEpoch.load(std::memory_order_acquire);
+    if (epoch != m_seenLayoutEpoch)
+    {
+        m_seenLayoutEpoch = epoch;
+
+        const std::size_t count = m_snapshot->monitorCount.load(std::memory_order_relaxed);
+        m_viewport->SetMonitorCount(count);
+
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const MonitorViewportAtomic& a = m_snapshot->Monitor(i);
+            m_viewport->SetMonitorRect(i,
+                a.originX.load(std::memory_order_relaxed),
+                a.originY.load(std::memory_order_relaxed),
+                a.width.load(std::memory_order_relaxed),
+                a.height.load(std::memory_order_relaxed));
+        }
+        m_viewport->ReclampAll();
+    }
+
+    for (std::size_t i = 0; i < m_viewport->MonitorCount(); ++i)
+    {
+        const double want = m_snapshot->Monitor(i).requestedZoom.load(std::memory_order_relaxed);
+        if (want != m_viewport->Zoom(i))
+            m_viewport->SetZoom(i, want, px, py);
+    }
+}
+
+void InputThread::PublishViewport()
+{
+    if (!m_viewport || !m_snapshot)
+        return;
+
+    for (std::size_t i = 0; i < m_viewport->MonitorCount(); ++i)
+    {
+        const MonitorViewport& v = m_viewport->Viewport(i);
+        MonitorViewportAtomic& a = m_snapshot->Monitor(i);
+        a.srcOriginX.store(v.srcOriginX, std::memory_order_relaxed);
+        a.srcOriginY.store(v.srcOriginY, std::memory_order_relaxed);
+        a.zoom.store(v.zoom, std::memory_order_relaxed);
     }
 }
 
@@ -286,6 +378,43 @@ void InputThread::SetHijackMagnifierKeys(bool enable)
 // =============================================================================
 LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
+    // ── Pointer tracking and edge-push ──
+    //
+    // Outside the m_hijackMagnifierKeys check below on purpose: that flag
+    // governs whether we take over Magnifier's SHORTCUTS. Panning the view is
+    // not a shortcut, and turning shortcut takeover off must not freeze the
+    // magnified view in place.
+    //
+    // The event is not swallowed. Input scaling arrives in a later task; for
+    // now the OS keeps moving the cursor exactly as it always did, and this
+    // only advances srcOrigin.
+    if (nCode == HC_ACTION && wParam == WM_MOUSEMOVE && lParam &&
+        s_instance && s_instance->m_viewport && s_instance->m_snapshot)
+    {
+        auto* mm = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
+
+        if (!((mm->flags & LLMHF_INJECTED) && IgnoreInjectedInput()))
+        {
+            InputThread* self = s_instance;
+            const double px = static_cast<double>(mm->pt.x);
+            const double py = static_cast<double>(mm->pt.y);
+
+            self->SyncFromRequests();
+
+            const int mi = self->m_viewport->MonitorIndexAt(px, py);
+            if (mi >= 0 &&
+                !self->m_snapshot->Monitor(static_cast<std::size_t>(mi))
+                     .frozen.load(std::memory_order_relaxed))
+            {
+                self->m_viewport->OnPointerMoved(static_cast<std::size_t>(mi), px, py);
+            }
+
+            self->m_snapshot->pointerX.store(px, std::memory_order_relaxed);
+            self->m_snapshot->pointerY.store(py, std::memory_order_relaxed);
+            self->PublishViewport();
+        }
+    }
+
     if (nCode == HC_ACTION && s_instance && s_instance->m_target &&
         s_instance->m_hijackMagnifierKeys.load(std::memory_order_relaxed))
     {

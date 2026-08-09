@@ -341,6 +341,12 @@ bool App::InitializeComponents()
     // ── 5. Input thread ──
     // Hook'lar BURADA, render thread'de DEGIL (bkz. InputThread.h).
     // Basarisiz olursa scroll zoom calismaz ama uygulama ayakta kalir.
+    //
+    // Attach and the first layout publish must both happen BEFORE Start: the
+    // hook can fire on the very next mouse move, and it reads both.
+    m_inputThread.Attach(&m_viewport, &m_viewportSnapshot);
+    PublishViewportRequests(true);
+
     if (!m_inputThread.Start(m_messageHwnd,
                              m_settings.General().followMode,
                              m_settings.General().hijackMagnifierKeys))
@@ -432,10 +438,53 @@ int App::Run()
 // =============================================================================
 // Update — Her frame'de bir kez
 // =============================================================================
+// =============================================================================
+// PublishViewportRequests — render -> input thread
+// =============================================================================
+//
+// Zoom is mutated from eight places in this file. Rather than notifying the
+// input thread at each of them — where the failure mode of forgetting one is a
+// silent desync — the settled value is published once per frame. A call site
+// cannot forget to be included in a loop it does not know about.
+// =============================================================================
+void App::PublishViewportRequests(bool bumpLayout)
+{
+    const size_t count = m_overlays.size();
+    m_viewportSnapshot.monitorCount.store(count, std::memory_order_relaxed);
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
+        if (!mon)
+            continue;
+
+        MonitorViewportAtomic& a = m_viewportSnapshot.Monitor(i);
+
+        // Zoom off means zoom 1: the controller must not keep panning a
+        // monitor that is no longer magnified.
+        const double zoom = mon->zoom.isActive
+                          ? static_cast<double>(mon->zoom.zoomLevel) : 1.0;
+        a.requestedZoom.store(zoom, std::memory_order_relaxed);
+
+        a.originX.store(mon->bounds.left, std::memory_order_relaxed);
+        a.originY.store(mon->bounds.top,  std::memory_order_relaxed);
+        a.width.store(mon->Width(),  std::memory_order_relaxed);
+        a.height.store(mon->Height(), std::memory_order_relaxed);
+        a.frozen.store(mon->zoom.isFrozen, std::memory_order_relaxed);
+    }
+
+    // Release-ordered last, so the input thread that sees the new epoch also
+    // sees every rect written above it.
+    if (bumpLayout)
+        m_viewportSnapshot.layoutEpoch.fetch_add(1, std::memory_order_release);
+}
+
 void App::Update()
 {
     m_status.monitorCount.store(m_overlays.size(), std::memory_order_relaxed);
     m_presentedThisTick = false;
+
+    PublishViewportRequests(false);
 
     // ── Mouse pozisyonunu takip et (magnifier fareyi izler) ──
     POINT cursor{};
@@ -593,47 +642,30 @@ void App::RenderMonitor(size_t monitorIndex)
         const long srcW = (std::max)(1L, static_cast<long>(monW / zoom));
         const long srcH = (std::max)(1L, static_cast<long>(monH / zoom));
 
-        // Focal point ekran koordinatlarinda — monitor-local'a cevir
-        const long focalX = mon->zoom.focalPoint.x - mon->bounds.left;
-        const long focalY = mon->zoom.focalPoint.y - mon->bounds.top;
-
-        // ── IMLEC CAPALI DONUSUM (ortalama DEGIL) ──
+        // ── Source origin comes from ViewportController ──
         //
-        // Eskiden bolge focal point'in ORTASINA kuruluyordu:
-        //     srcOrigin = focal - srcSize/2
-        // Bunun sonucu: imlecin altindaki nokta overlay'in MERKEZINDE
-        // ciziliyordu, ama gercek imlec bitmap'i sistem tarafindan kendi
-        // gercek konumunda ciziliyor. Ikisi farkli yerde => gordugun yer ile
-        // tikladigin yer uyusmuyordu, zoom acikken Windows kullanilamiyordu.
+        // This replaces the anchored identity srcOrigin = focal * (1 - 1/zoom).
+        // That formula pinned the source to the cursor, which is what made a
+        // click land on what it appeared to point at — and also what made the
+        // view track the cursor on every single move, leaving no room for
+        // edge-push panning. The identity had to go for the view to hold still.
         //
-        // Simdi bolgeyi focal point'e CAPALIYORUZ:
-        //     srcOrigin = focal * (1 - 1/zoom)
+        // Click alignment is not lost, it moves: the real cursor is kept at
+        // round(pointer) and the magnified sprite is drawn where the user sees
+        // it. Until that sprite exists (a later task), clicks are misaligned
+        // while panning, which is expected and temporary.
         //
-        // Bu donusumde ekran konumu s, kaynak pikseli (srcOrigin + s/zoom)
-        // gosteriyor. s = focal icin:
-        //     focal*(1 - 1/zoom) + focal/zoom = focal
-        // Yani focal point'teki nokta ekranda TAM OLARAK focal point'e dusuyor.
-        // Buyutmenin sabit noktasi imlec. Gercek imlec altindaki buyutulmus
-        // icerige birebir oturuyor, koordinat donusumu yapmaya gerek yok —
-        // mevcut click-through zaten dogru yere gidiyor.
-        //
-        // CLAMP GEREKMIYOR: formul her focal konumunda sinir icinde kaliyor.
-        //   focal = 0     -> origin = 0
-        //   focal = monW  -> origin = monW*(1-1/zoom),
-        //                    sag kenar = origin + monW/zoom = monW
-        // Yani ekranin her yerine erisilebiliyor ve tasma olmuyor.
-        //
-        // Python analojisi: PIL'de resize degil, sabit bir noktayi koruyarak
-        // affine transform uygulamak — cv2.getRotationMatrix2D'nin center
-        // parametresi gibi.
-        const double invZoom = 1.0 / static_cast<double>(zoom);
+        // The controller lives on the input thread and advances per mouse
+        // event, so the pan stays proportional to mouse motion rather than to
+        // frame rate.
+        const MonitorViewportAtomic& vp = m_viewportSnapshot.Monitor(monitorIndex);
 
         RECT srcRect{};
-        srcRect.left = static_cast<long>(static_cast<double>(focalX) * (1.0 - invZoom));
-        srcRect.top  = static_cast<long>(static_cast<double>(focalY) * (1.0 - invZoom));
+        srcRect.left = static_cast<long>(vp.srcOriginX.load(std::memory_order_relaxed));
+        srcRect.top  = static_cast<long>(vp.srcOriginY.load(std::memory_order_relaxed));
 
-        // Yuvarlama ve focal point'in monitor disina tasabildigi durumlar
-        // (fare baska monitorde, freeze aktif) icin guvenlik agi.
+        // The snapshot can be one tick behind a resolution change, and a source
+        // rect outside the texture is a device removal, not a glitch.
         srcRect.left = std::clamp(srcRect.left, 0L, (std::max)(0L, monW - srcW));
         srcRect.top  = std::clamp(srcRect.top,  0L, (std::max)(0L, monH - srcH));
 
@@ -1033,6 +1065,13 @@ void App::OnFocusChanged(HWND focused)
     // KABUL EDILEN BEDEL: bu mod acikken capa imlecten kopuyor, dolayisiyla
     // tiklama gordugun yere gitmiyor. Ikisi ayni anda mumkun degil. Bu yuzden
     // varsayilan FollowMode::Mouse ve acilista uyari basiyoruz.
+    //
+    // INERT SINCE THE VIEWPORT MOVED TO ViewportController. focalPoint no
+    // longer feeds the source rect, so FollowMode::MouseAndFocus currently does
+    // nothing visible. Deliberately left rather than deleted: the state is
+    // still correct and the panel still exposes the mode. Reconnecting it means
+    // asking the controller to centre a monitor on a point, which is a small
+    // addition but belongs with the pointer work rather than ahead of it.
     target->zoom.focalPoint = center;
 }
 
@@ -1176,6 +1215,12 @@ void App::OnDisplayChange()
 
     // Yeni monitor bilgilerini snapshot'a yaz — panel basliklari guncellensin
     PublishMonitorInfo();
+
+    // Bump the layout epoch so the input thread re-reads every rect and
+    // re-clamps. Without this the controller keeps panning against the old
+    // resolution and srcOrigin sticks to a bound that no longer exists.
+    PublishViewportRequests(true);
+
     m_controlPanel.NotifyDisplayChange();
 
     LOG_INFO("Pipeline yeniden kuruldu ({} monitor)", m_overlays.size());

@@ -89,6 +89,9 @@
     <ClInclude Include="src\CursorRenderer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\ViewportSnapshot.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\App.h">
       <Filter>Header Files</Filter>
     </ClInclude>

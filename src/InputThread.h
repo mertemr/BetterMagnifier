@@ -17,10 +17,13 @@
 #define BETTER_MAGNIFIER_INPUT_THREAD_H
 
 #include "SettingsStore.h"   // FollowMode
+#include "ViewportController.h"
+#include "ViewportSnapshot.h"
 
 #include <windows.h>
 #include <thread>
 #include <atomic>
+#include <cstdint>
 
 namespace BetterMagnifier {
 
@@ -47,6 +50,15 @@ public:
     void SetFollowMode(FollowMode mode);
     void SetHijackMagnifierKeys(bool enable);
 
+    // Both objects are owned by App and outlive this thread. Call before Start.
+    //
+    // The controller is mutated ONLY on this thread: edge-push has to advance
+    // per mouse event to stay proportional to mouse motion rather than to frame
+    // rate, and that is this thread's event stream.
+    void Attach(ViewportController* controller, ViewportSnapshot* snapshot);
+
+    void SetEdgePushConfig(const EdgePushConfig& cfg);
+
 private:
     void ThreadMain();
     bool InstallHooks();
@@ -62,8 +74,33 @@ private:
     std::atomic<bool>  m_running{false};
     std::atomic<DWORD> m_threadId{0};   // Stop() posts here
 
+    // Pull render-thread requests (zoom, monitor layout) into the controller.
+    // Idempotent, and cheap when nothing changed: one compare per monitor.
+    void SyncFromRequests();
+
+    // Copy the controller's state out for the render thread.
+    void PublishViewport();
+
     std::atomic<FollowMode> m_followMode{FollowMode::Mouse};
     std::atomic<bool>       m_hijackMagnifierKeys{true};
+
+    ViewportController* m_viewport = nullptr;
+    ViewportSnapshot*   m_snapshot = nullptr;
+
+    // Split into scalars rather than std::atomic<EdgePushConfig>: the struct is
+    // 16 bytes and an atomic that wide is not guaranteed lock-free, which is
+    // not something to find out inside a low-level hook.
+    std::atomic<bool>  m_cfgEnabled{true};
+    std::atomic<float> m_cfgBandFraction{0.12f};
+
+    // Input thread only; no synchronisation needed.
+    std::uint64_t m_seenLayoutEpoch = 0;
+
+    // Zoom can change with the mouse perfectly still (a hotkey, the panel), and
+    // then nothing would pull the request through until the user moved. A timer
+    // covers that; 16 ms keeps the lag under one frame.
+    static constexpr UINT_PTR kSyncTimerId = 1;
+    static constexpr UINT     kSyncTimerMs = 16;
 
     HWND          m_target       = nullptr;
     HHOOK         m_mouseHook    = nullptr;
