@@ -77,6 +77,11 @@ private:
     void OnFocusChanged(HWND focused);
     void ApplySettings();
 
+    // The live-tunable subset, called at startup as well as on change.
+    // ApplySettings is only reachable from WM_APP_SETTINGS_CHANGED, so anything
+    // that lives only there never takes effect until the user changes something.
+    void ApplyPointerSettings();
+
     // Locking the workstation switches to the secure desktop, which tears down
     // our low-level hooks; Windows does not put them back. RegisterHotKey
     // bindings survive, the hooks do not, so Win+Plus and Ctrl+Alt+wheel go

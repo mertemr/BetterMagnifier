@@ -380,6 +380,10 @@ bool App::InitializeComponents()
     // ── 6. Statik monitor bilgilerini snapshot'a yaz ──
     PublishMonitorInfo();
 
+    // Push the loaded settings into the input thread. Without this the pointer
+    // and edge-push settings sat unread until the user changed one.
+    ApplyPointerSettings();
+
     if (PanelEnabled())
         OnShowPanel();
 
@@ -1307,6 +1311,50 @@ bool App::ResolveMonitorIndex(WPARAM wparam, size_t& outIndex) const
 // GUI once SettingsStore'u yazdi SONRA bu mesaji postaladi, yani buradaki
 // okuma guvenli — yaris yok.
 // =============================================================================
+// =============================================================================
+// ApplyPointerSettings — edge-push ve imlec ayarlarini input thread'e ver
+// =============================================================================
+//
+// Separate from ApplySettings because it has to run at STARTUP too, and
+// ApplySettings does not: it is only reachable from WM_APP_SETTINGS_CHANGED.
+// That gap was a real bug — everything in settings.ini below was ignored until
+// the user happened to change something, so a hand-edited file or a value saved
+// last session simply did not take effect. Reported as "the setting does nothing".
+//
+// Everything here is an atomic the input thread reads on its next event, so it
+// applies live: a slider is felt while it is being dragged.
+// =============================================================================
+void App::ApplyPointerSettings()
+{
+    const auto& g = m_settings.General();
+
+    EdgePushConfig cfg;
+    cfg.enabled      = (g.followMode == FollowMode::EdgePush);
+    cfg.bandFraction = g.edgeBandFraction;
+    m_inputThread.SetEdgePushConfig(cfg);
+
+    m_inputThread.Pointer().SetSpeed(g.pointerSpeed);
+    m_inputThread.Pointer().SetCompensation(g.pointerCompensation);
+    m_inputThread.Pointer().SetLockToMonitor(g.lockPointerToMonitor);
+
+    LOG_INFO("Pointer settings applied: speed={:.2f} comp={:.2f} lock={} "
+             "scaling={} edgePush={} band={:.2f}",
+             g.pointerSpeed, g.pointerCompensation,
+             g.lockPointerToMonitor ? "on" : "off",
+             g.pointerScaling ? "on" : "off",
+             cfg.enabled ? "on" : "off",
+             g.edgeBandFraction);
+
+    // Turning pointer scaling off has to give the real pointer back straight
+    // away, not on the next zoom change.
+    if (!g.pointerScaling && m_pointerCompositing)
+    {
+        SystemCursor::Restore();
+        m_inputThread.Pointer().SetEnabled(false);
+        m_pointerCompositing = false;
+    }
+}
+
 void App::ApplySettings()
 {
     LOG_INFO("Ayarlar uygulaniyor...");
@@ -1321,27 +1369,7 @@ void App::ApplySettings()
     m_inputThread.SetFollowMode(g.followMode);
     m_inputThread.SetHijackMagnifierKeys(g.hijackMagnifierKeys);
 
-    // ── Edge-push ve imlec, canli ──
-    // Every one of these takes effect on the next mouse event: they are atomics
-    // the input thread reads, not state it has to be restarted to pick up. That
-    // is what makes the panel's sliders usable — you drag and feel it.
-    EdgePushConfig cfg;
-    cfg.enabled      = (g.followMode == FollowMode::EdgePush);
-    cfg.bandFraction = g.edgeBandFraction;
-    m_inputThread.SetEdgePushConfig(cfg);
-
-    m_inputThread.Pointer().SetSpeed(g.pointerSpeed);
-    m_inputThread.Pointer().SetCompensation(g.pointerCompensation);
-    m_inputThread.Pointer().SetLockToMonitor(g.lockPointerToMonitor);
-
-    // Turning pointer scaling off has to give the real pointer back straight
-    // away, not on the next zoom change.
-    if (!g.pointerScaling && m_pointerCompositing)
-    {
-        SystemCursor::Restore();
-        m_inputThread.Pointer().SetEnabled(false);
-        m_pointerCompositing = false;
-    }
+    ApplyPointerSettings();
 
     // Mevcut zoom yeni sinirlarin disinda kaldiysa iceri cek
     for (size_t i = 0; i < m_monitorManager.GetMonitorCount(); ++i)
