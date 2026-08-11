@@ -13,26 +13,23 @@ namespace BetterMagnifier {
 namespace {
 
 // =============================================================================
-// Shader kaynagi — buyutmeyi yapan asil is burada
+// Shader source — this is where the magnification actually happens
 // =============================================================================
-// Eski kod CopySubresourceRegion kullaniyordu; o 1:1 piksel kopyalar,
-// OLCEKLEME YAPMAZ. Sonuc: zoom seviyesi kaynak bolgeyi kucultuyordu ama
-// goruntu buyumuyordu — 2x'te ekranin sol ust ceyregine kirpilmis bir kopya.
+// An earlier version used CopySubresourceRegion, which copies pixels 1:1 and
+// does not scale. Raising the zoom shrank the source region without enlarging
+// anything, so 2x produced a cropped copy of the top-left quarter of the
+// screen.
 //
-// Dogru cozum: kaynak bolgeyi (srcRect) UV koordinatina cevirip TUM ekrani
-// kaplayan bir ucgene bilinear ornekleme ile cizmek. Boylece kucuk bolge
-// ekran boyutuna GERILIR = buyutme.
+// The right approach is to turn srcRect into UV coordinates and sample it
+// across a triangle that covers the whole target. The small region gets
+// stretched to screen size, which is the magnification.
 //
-// Neden ucgen, dortgen degil?
-//   Ekrani kaplayan tek bir ucgen, iki ucgenden olusan bir quad'a gore hem
-//   daha az vertex hem de diagonal boyunca tekrar ornekleme yapmiyor.
-//   Standart "fullscreen triangle" hilesi.
+// One triangle rather than a two-triangle quad: fewer vertices, and no
+// resampling seam along the shared diagonal. The standard fullscreen-triangle
+// trick.
 //
-// Neden vertex buffer yok?
-//   SV_VertexID = kacinci vertex oldugumuz. Uc kosenin konumunu bundan
-//   hesapliyoruz. Vertex buffer da input layout da gerekmiyor.
-//   Python analojisi: for i in range(3) icinde koordinati hesaplamak,
-//   onceden hazirlanmis bir liste okumak yerine.
+// No vertex buffer and no input layout either — SV_VertexID gives the corner
+// index and the positions fall out of arithmetic on it.
 // =============================================================================
 constexpr char kShaderSource[] = R"HLSL(
 cbuffer UvParams : register(b0)
@@ -54,8 +51,8 @@ VSOut VSMain(uint vid : SV_VertexID)
     float2 corner = float2((vid << 1) & 2, vid & 2);
 
     VSOut o;
-    // corner 0..2 -> NDC -1..3 (x), 1..-3 (y). Y ters cevriliyor cunku
-    // NDC'de yukari +1, texture UV'sinde asagi +1.
+    // corner 0..2 maps to NDC -1..3 in x and 1..-3 in y. Y is flipped because
+    // NDC grows upward while texture UV grows downward.
     o.pos = float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
     o.uv  = uvRect.xy + corner * uvRect.zw;
     return o;
@@ -175,22 +172,14 @@ bool D3DRenderer::Initialize()
 // CreateDevice — D3D11 Device + Context + DXGI Factory
 // =============================================================================
 //
-// Python analojisi:
-//   pygame.display.init() veya moderngl.create_context()
-//   D3D11 Device = GPU ile konusma noktasi (komut gonderme)
-//   DeviceContext = "hemen simdi su komutu calistir" (immediate context)
-//
-// Debug Layer:
-//   Debug build'de D3D11_CREATE_DEVICE_DEBUG flag ekliyoruz.
-//   Bu flag ile DirectX validation layer aktif olur:
-//   - Yanlis API kullanimi varsa Output penceresinde uyari/hata gosterir
-//   - Memory leak'leri raporlar (ReportLiveDeviceObjects)
-//   - Performans etkisi var ama debug icin goldmine!
-//
+// Debug builds enable the D3D11 validation layer: misuse of the API shows up
+// as a warning in the debugger output instead of as undefined behaviour, and
+// ReportLiveDeviceObjects catches leaked interfaces at shutdown. It costs
+// performance, which is why it is Debug only.
 // =============================================================================
 bool D3DRenderer::CreateDevice()
 {
-    UINT createFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;  // Direct2D interop icin gerekli
+    UINT createFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;   // needed for Direct2D interop
 
 #ifdef _DEBUG
     // Debug build'de DirectX debug layer aktif
@@ -245,7 +234,7 @@ bool D3DRenderer::CreateDevice()
         }
     }
 
-    // ID3D11Device1'e upgrade (DXGI 1.2 swap chain icin gerekli)
+    // ID3D11Device1 is what the DXGI 1.2 swap chain path needs.
     hr = baseDevice.As(&m_device);
     if (FAILED(hr))
     {
@@ -261,32 +250,31 @@ bool D3DRenderer::CreateDevice()
     }
 
 #ifdef _DEBUG
-    // Debug interface'i al (live object report icin)
+    // Kept for ReportLiveDeviceObjects in the destructor.
     m_device.As(&m_debug);
 #endif
 
-    // ── DXGI Factory al ──
-    // Device'in bagli oldugu DXGI Factory'yi kullanmaliyiz.
-    // Yeni bir Factory olusturmak yerine mevcut olani almak best practice.
+    // Reach the factory the device was created from rather than making a new
+    // one; a swap chain created on a foreign factory is not guaranteed to work
+    // with this device.
     ComPtr<IDXGIDevice1> dxgiDevice;
     hr = m_device.As(&dxgiDevice);
     if (FAILED(hr))
     {
-        LOG_ERROR("IDXGIDevice1 QueryInterface basarisiz");
+        LOG_ERROR("IDXGIDevice1 QueryInterface failed");
         return false;
     }
 
-    // ── Frame latency = 1 ──
-    // DXGI varsayilani 3 frame kuyruk tutuyor. 75 Hz'de bu 40 ms'ye kadar
-    // girdi-ekran gecikmesi demek: fareyi oynatiyorsun, goruntu uc kare
-    // sonra yetisiyor. Bir magnifier'da bu "kasma" olarak hissediliyor.
+    // DXGI queues three frames by default, which at 75 Hz is up to 40 ms
+    // between moving the mouse and seeing the view follow. On a magnifier that
+    // reads as lag.
     //
-    // 1'e cekmek gecikmeyi tek kareye indiriyor. Bedeli: GPU ile CPU arasinda
-    // daha az tampon, yani cok agir sahnelerde throughput dusebilir — bizim
-    // is yukumuz tek bir fullscreen ucgen, sorun olmaz.
+    // One frame of latency costs buffering between CPU and GPU, which would
+    // hurt throughput on a heavy scene. The workload here is a single
+    // fullscreen triangle, so there is nothing to lose.
     hr = dxgiDevice->SetMaximumFrameLatency(1);
     if (FAILED(hr))
-        LOG_WARN("SetMaximumFrameLatency(1) basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_WARN("SetMaximumFrameLatency(1) failed: 0x{:08X}", static_cast<unsigned long>(hr));
     else
         LOG_INFO("Frame latency = 1 (varsayilan 3)");
 
@@ -316,21 +304,15 @@ bool D3DRenderer::CreateDevice()
 }
 
 // =============================================================================
-// CreateSamplerStates — Texture sampling kalitesi
+// CreateSamplerStates — how the source texture is filtered
 // =============================================================================
 //
-// Sampler state = texture'dan piksel okurken nasil filtre uygulayacagi.
+// Bilinear for content: smooth enough through roughly 3x, which covers most
+// use. A Lanczos shader would be a visible improvement past that and is not
+// written yet.
 //
-// Bilinear: Komsulari ortalayarak yumusak gecis yapar.
-//   Zoom 1x-3x arasi icin yeterli kalite.
-//   Python analojisi: PIL.Image.resize(size, Image.BILINEAR)
-//
-// Point (Nearest Neighbor): En yakin pikseli alir, filtre yok.
-//   Piksel-art veya 1:1 mapping icin.
-//   Python analojisi: PIL.Image.resize(size, Image.NEAREST)
-//
-// Lanczos shader ileride eklenecek (zoom >3x icin belirgin kalite fark1).
-//
+// Point sampling exists separately for the cursor sprite, where crisp edges
+// read better than a smooth blur. See RenderSprite.
 // =============================================================================
 bool D3DRenderer::CreateSamplerStates()
 {
@@ -357,12 +339,10 @@ bool D3DRenderer::CreateSamplerStates()
 // =============================================================================
 // CreateShaders — buyutme hattini kur
 // =============================================================================
-// Shader'lari calisma zamaninda derliyoruz (D3DCompile). Alternatif, build
-// sirasinda fxc ile .cso uretip dosyadan okumakti; runtime derleme tek seferlik
-// birkac ms surer ve exe'nin yaninda ekstra dosya tasimayi gerektirmez.
-//
-// Python analojisi: kaynak kodu string olarak tutup exec() ile derlemek —
-// ama burada hedef GPU byte code.
+// Compiled at run time with D3DCompile. The alternative is fxc at build time
+// and .cso files loaded from disk; that saves a few milliseconds once at
+// startup in exchange for shipping loose files next to the exe. Not a trade
+// worth making here.
 // =============================================================================
 bool D3DRenderer::CreateShaders()
 {
@@ -378,7 +358,7 @@ bool D3DRenderer::CreateShaders()
                             ComPtr<ID3DBlob>& blob) -> bool
     {
         ComPtr<ID3DBlob> errors;
-        // sizeof - 1: sondaki null terminator kaynak uzunluguna dahil degil.
+        // sizeof - 1: the trailing null is not part of the source length.
         const HRESULT compileHr = D3DCompile(
             kShaderSource, sizeof(kShaderSource) - 1,
             "BetterMagnifier.hlsl",
@@ -534,28 +514,20 @@ bool D3DRenderer::CreateShaders()
 }
 
 // =============================================================================
-// CreateSwapChainForWindow — Overlay penceresi icin swap chain
+// CreateSwapChainForWindow — one swap chain per overlay window
 // =============================================================================
 //
-// Swap Chain nedir?
-//   GPU'nun render ettigi image'i ekrana gostermek icin kullanilan mekanizma.
-//   "Flip model" (DXGI_SWAP_EFFECT_FLIP_DISCARD):
-//     - Modern ve verimli (eski BITBLT'ye gore)
-//     - GPU composition ile entegre (DWM = Desktop Window Manager)
-//     - V-Sync destegi dahili
-//
-//   Python analojisi: pygame.display.flip() veya tkinter canvas.update()
-//
+// One swap chain per overlay window. Which swap effect it gets is not a free
+// choice; see the comment on SwapEffect below.
 // =============================================================================
 bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, size_t index)
 {
     if (!m_dxgiFactory || !m_device)
     {
-        LOG_ERROR("CreateSwapChain: Device veya factory hazir degil!");
+        LOG_ERROR("CreateSwapChain: device or factory is not ready");
         return false;
     }
 
-    // index'e gore render target listesini buyut
     if (index >= m_renderTargets.size())
     {
         m_renderTargets.resize(index + 1);
@@ -563,26 +535,25 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
 
     auto& rt = m_renderTargets[index];
 
-    // Eski swap chain varsa temizle
+    // Release any previous chain for this index before creating another.
     rt.rtv.Reset();
     rt.swapChain.Reset();
 
     DXGI_SWAP_CHAIN_DESC1 swapDesc{};
     swapDesc.Width       = width;
     swapDesc.Height      = height;
-    swapDesc.Format      = DXGI_FORMAT_B8G8R8A8_UNORM;  // BGRA — Direct2D uyumlu
-    swapDesc.SampleDesc  = { 1, 0 };                     // No MSAA (overlay'de gerek yok)
+    swapDesc.Format      = DXGI_FORMAT_B8G8R8A8_UNORM;   // BGRA, Direct2D compatible
+    swapDesc.SampleDesc  = { 1, 0 };                     // no MSAA; nothing here is an edge
     swapDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    // ── Swap effect: layered pencere flip modeli KABUL ETMIYOR ──
-    // Overlay'in click-through olmasi icin WS_EX_LAYERED sart (bkz.
-    // OverlayWindow.cpp). Flip model (FLIP_DISCARD) layered pencerede
-    // CreateSwapChainForHwnd'i DXGI_ERROR_INVALID_CALL ile dusuruyor.
-    // Bu yuzden blt modeline (DISCARD) geciyoruz.
+
+    // Flip model refuses layered windows: CreateSwapChainForHwnd returns
+    // DXGI_ERROR_INVALID_CALL. The overlay has to be WS_EX_LAYERED to get
+    // click-through (see OverlayWindow.cpp), so this falls back to blt.
     //
-    // Bedeli: blt modelde DWM fazladan bir kopya yapiyor, latency biraz artiyor.
-    // Kazanci: girdi calisiyor. Uygulamanin butun amaci bu.
+    // Blt costs an extra DWM copy and a little latency. It buys working input,
+    // which is the whole point of the application.
     //
-    // BufferCount: blt DISCARD icin 1 yeterli ve standart.
+    // BufferCount 1 is the standard for blt DISCARD.
     if (UseFlipOverlay())
     {
         swapDesc.BufferCount = 2;
@@ -594,9 +565,9 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
         swapDesc.SwapEffect  = DXGI_SWAP_EFFECT_DISCARD;
     }
 
-    // HWND swap chain'de PREMULTIPLIED alpha DESTEKLENMEZ — sadece
-    // CreateSwapChainForComposition (DirectComposition) kabul eder.
-    // Overlay gorsel olarak opak oldugu icin IGNORE dogru secim.
+    // An HWND swap chain does not support premultiplied alpha; only
+    // CreateSwapChainForComposition does. The overlay is visually opaque
+    // anyway, so IGNORE is the correct choice rather than a compromise.
     swapDesc.AlphaMode   = DXGI_ALPHA_MODE_IGNORE;
     swapDesc.Flags       = 0;
 
@@ -604,19 +575,17 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
         m_device.Get(),
         hwnd,
         &swapDesc,
-        nullptr,    // Fullscreen desc (windowed kullanacagiz)
-        nullptr,    // Output restriction (yok)
+        nullptr,    // no fullscreen desc; the overlay is a windowed topmost
+        nullptr,    // no output restriction
         &rt.swapChain
     );
 
     if (FAILED(hr))
     {
-        LOG_ERROR("CreateSwapChainForHwnd basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_ERROR("CreateSwapChainForHwnd failed: 0x{:08X}", static_cast<unsigned long>(hr));
         return false;
     }
 
-    // ── Render Target View olustur ──
-    // Swap chain'in back buffer'ini render hedefi olarak kullanmak icin RTV gerekli.
     ComPtr<ID3D11Texture2D> backBuffer;
     hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
     if (FAILED(hr))
@@ -670,7 +639,7 @@ bool D3DRenderer::RenderFrame(
         if (!EnsureSourceTexture(rt, srcDesc))
             return false;
 
-        // Kopyalamadan once SRV bagini kes. Ayni kaynak hem shader girdisi
+        // Unbind the SRV before copying. The same resource cannot be a shader
         // hem kopya hedefi olamaz — D3D11 debug layer uyarir ve islem duser.
         ID3D11ShaderResourceView* const noSrv[1] = { nullptr };
         m_context->PSSetShaderResources(0, 1, noSrv);
@@ -683,8 +652,7 @@ bool D3DRenderer::RenderFrame(
         return false;
 
     // ── srcRect'i UV'ye cevir ──
-    // Piksel koordinati -> 0..1 arasi texture koordinati.
-    // Python analojisi: box = (l, t, r, b) piksel; UV = box / (W, H).
+    // Pixel coordinates to normalised texture coordinates.
     const long texW = static_cast<long>(rt.sourceWidth);
     const long texH = static_cast<long>(rt.sourceHeight);
     if (texW <= 0 || texH <= 0)
@@ -706,7 +674,6 @@ bool D3DRenderer::RenderFrame(
 
     m_context->UpdateSubresource(m_uvBuffer.Get(), 0, nullptr, &params, 0, 0);
 
-    // ── Pipeline'i kur ──
     D3D11_VIEWPORT viewport{};
     viewport.TopLeftX = 0.0f;
     viewport.TopLeftY = 0.0f;
@@ -724,7 +691,7 @@ bool D3DRenderer::RenderFrame(
     const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     m_context->ClearRenderTargetView(rt.rtv.Get(), clearColor);
 
-    // Vertex buffer ve input layout YOK — konumlar SV_VertexID'den geliyor.
+    // No vertex buffer and no input layout; positions come from SV_VertexID.
     m_context->IASetInputLayout(nullptr);
     m_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -814,14 +781,14 @@ void D3DRenderer::MaybeDumpFrame(size_t targetIndex)
 #endif
 
 // =============================================================================
-// EnsureSourceTexture — shader'da orneklenebilir ara texture
+// EnsureSourceTexture — an intermediate the shader can actually sample
 // =============================================================================
-// Desktop Duplication texture'i D3D11_BIND_SHADER_RESOURCE olmadan geldigi
-// icin uzerinde SRV acilamiyor. Ayni boyut/formatta, SRV bind'li kendi
-// texture'imizi tutup her frame'i oraya kopyaliyoruz.
+// Desktop Duplication hands over textures without D3D11_BIND_SHADER_RESOURCE,
+// so no SRV can be created on them. Every frame is copied into a texture of
+// the same size and format that does have the bind flag.
 //
-// Boyut degismediyse dokunmuyoruz — texture olusturmak pahali, her frame
-// yapilacak is degil.
+// A no-op when nothing changed. Creating textures is expensive and has no
+// business happening per frame.
 // =============================================================================
 bool D3DRenderer::EnsureSourceTexture(RenderTarget& rt, const D3D11_TEXTURE2D_DESC& srcDesc)
 {
@@ -839,8 +806,8 @@ bool D3DRenderer::EnsureSourceTexture(RenderTarget& rt, const D3D11_TEXTURE2D_DE
     rt.sourceHeight = 0;
     rt.sourceFormat = DXGI_FORMAT_UNKNOWN;
 
-    // Kaynagin tanimini temel al ama bayraklari kendimiz belirle:
-    // paylasim/staging bayraklarini tasimak istemiyoruz.
+    // Start from the source description but set the flags here: the sharing
+    // and staging flags the duplication texture carries must not come along.
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width          = srcDesc.Width;
     desc.Height         = srcDesc.Height;
@@ -864,7 +831,7 @@ bool D3DRenderer::EnsureSourceTexture(RenderTarget& rt, const D3D11_TEXTURE2D_DE
     hr = m_device->CreateShaderResourceView(rt.sourceTex.Get(), nullptr, &rt.sourceSrv);
     if (FAILED(hr))
     {
-        LOG_ERROR("Ara texture icin SRV olusturulamadi: 0x{:08X}",
+        LOG_ERROR("Could not create the SRV for the intermediate texture: 0x{:08X}",
             static_cast<unsigned long>(hr));
         rt.sourceTex.Reset();
         return false;
@@ -874,15 +841,15 @@ bool D3DRenderer::EnsureSourceTexture(RenderTarget& rt, const D3D11_TEXTURE2D_DE
     rt.sourceHeight = srcDesc.Height;
     rt.sourceFormat = srcDesc.Format;
 
-    LOG_DEBUG("Ara kaynak texture'i olusturuldu: {}x{}", srcDesc.Width, srcDesc.Height);
+    LOG_DEBUG("Intermediate source texture created: {}x{}", srcDesc.Width, srcDesc.Height);
     return true;
 }
 
 // =============================================================================
-// Present — Render edilen frame'i ekrana goster
+// Present — put the rendered frame on screen
 // =============================================================================
 // =============================================================================
-// RenderSprite — imleci icerigin uzerine ciz
+// RenderSprite — composite the cursor over the magnified content
 // =============================================================================
 //
 // Called between RenderFrame and Present, so it composites onto the frame that
@@ -989,15 +956,15 @@ void D3DRenderer::RemoveRenderTarget(size_t index)
 
 #ifdef _DEBUG
 // =============================================================================
-// DumpBackBuffer — render sonucunu diske yaz (sadece Debug)
+// DumpBackBuffer — write the rendered frame to disk (Debug only)
 // =============================================================================
-// Overlay penceresi ekran goruntusu araclarina gorunmez oldugu icin render'i
-// disaridan dogrulamanin tek yolu bu.
+// The overlay is invisible to screenshot tools, so this is the only way to see
+// what was actually rendered.
 //
-// Akis: back buffer (GPU) -> staging texture (CPU okunabilir) -> Map -> BMP.
-// GPU belleği CPU'dan dogrudan okunamaz; STAGING usage tam olarak bunun icin var.
+// back buffer (GPU) -> staging texture (CPU readable) -> Map -> BMP. GPU memory
+// cannot be read directly from the CPU; a STAGING texture exists for exactly
+// this.
 //
-// Python analojisi: GPU tensor'unu .cpu().numpy() ile almak.
 // =============================================================================
 bool D3DRenderer::DumpBackBuffer(size_t targetIndex, const wchar_t* path)
 {

@@ -38,17 +38,17 @@ bool HotkeyManager::Initialize(HWND hwnd, const GeneralSettings& settings)
 // Reregister — ayarlar degisince hotkey'leri yeniden kaydet
 // =============================================================================
 //
-// NEDEN VARSAYILANDA MOD_WIN KULLANMIYORUZ:
-//   Win+Z Windows 11'de Snap Layouts'a rezerve — RegisterHotKey basarisiz
-//   doner, sistem kisayollarini override edemeyiz. Win+<harf>
-//   kombinasyonlarinin cogu Windows tarafindan alinmis durumda.
-//   Ctrl+Alt+<harf> ise rezerve degil, guvenli alan.
+// Why the defaults are not Win+something: Windows 11 reserves Win+Z for Snap
+// Layouts and most other Win+<letter> combinations for itself, and
+// RegisterHotKey simply fails on a reserved one — a process cannot override a
+// system shortcut. Ctrl+Alt+<letter> is unclaimed territory.
 //
-//   Kullanici GUI'den Win+... secebilir ama sonucu gorur (kirmizi uyari).
-//   Win+Z'yi gercekten ele gecirmek icin InputThread'in klavye hook'u var
-//   (opt-in, Snap Layouts'u oldurur).
+// The panel still lets a Win+ combination be chosen; it just shows the failure.
+// Genuinely taking Win+Z needs the keyboard hook in InputThread, which is
+// opt-in because it also kills Snap Layouts.
 //
-// MOD_NOREPEAT: basili tutunca tekrarlamasin — toggle icin sart.
+// MOD_NOREPEAT because these are toggles: auto-repeat while held would flip
+// zoom on and off dozens of times a second.
 // =============================================================================
 UINT HotkeyManager::Reregister(const GeneralSettings& settings)
 {
@@ -58,8 +58,8 @@ UINT HotkeyManager::Reregister(const GeneralSettings& settings)
         return m_lastFailedMask;
     }
 
-    // Eskileri kaldir. Kayitli degillerse UnregisterHotKey sessizce
-    // basarisiz olur — sorun degil.
+    // Unconditional: UnregisterHotKey on an unregistered id fails quietly, and
+    // checking first would only add a branch that can go stale.
     UnregisterHotKey(m_hwnd, kHotkeyToggleZoom);
     UnregisterHotKey(m_hwnd, kHotkeyFreeze);
 

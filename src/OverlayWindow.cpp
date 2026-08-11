@@ -54,7 +54,7 @@ OverlayWindow& OverlayWindow::operator=(OverlayWindow&& other) noexcept
 }
 
 // =============================================================================
-// RegisterWindowClass — Overlay icin window class kaydi
+// RegisterWindowClass — window class for the overlay
 // =============================================================================
 bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
 {
@@ -82,32 +82,29 @@ bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
 }
 
 // =============================================================================
-// Create — Overlay penceresi olustur
+// Create — the per-monitor overlay window
 // =============================================================================
 //
-// NEDEN WS_EX_LAYERED SART (onemli mimari karar, bir kez YANLIS yapildi):
-//   Bir ara flip-model swap chain'i calistirmak icin WS_EX_LAYERED kaldirildi
-//   ve "tam ekran magnifier'a seffaflik gerekmez" diye gerekcelendirildi.
-//   Gorsel olarak dogruydu, GIRDI olarak yikiciydi: overlay butun tiklamalari
-//   yutmaya basladi, zoom acikken Windows kullanilamaz hale geldi.
+// WS_EX_LAYERED is mandatory, and this was got wrong once. It was dropped so a
+// flip-model swap chain could be used, justified as "a fullscreen magnifier
+// does not need transparency". Visually true, catastrophic for input: the
+// overlay swallowed every click and Windows became unusable while zoomed.
 //
-//   Sebep: WS_EX_TRANSPARENT tek basina ve WM_NCHITTEST'ten HTTRANSPARENT
-//   dondurmek click-through icin YETMIYOR. Guvenilir recete LAYERED |
-//   TRANSPARENT ikilisi.
+// WS_EX_TRANSPARENT alone is not enough, and neither is returning HTTRANSPARENT
+// from WM_NCHITTEST. LAYERED | TRANSPARENT together is the recipe that works.
 //
-//   Bedeli: flip-model layered pencereyi reddediyor, blt modeline dusuyoruz
-//   (bkz. D3DRenderer::CreateSwapChainForWindow). Latency biraz artiyor ama
-//   calisan bir girdi, daha hizli bir kullanilamazliktan iyidir.
+// The cost is real: flip model refuses layered windows, so the swap chain falls
+// back to blt (see D3DRenderer::CreateSwapChainForWindow). Slightly more
+// latency, in exchange for input that works at all.
 //
-//   SetLayeredWindowAttributes ile layered yapilan pencere normal redirection
-//   surface'ini KORUR, yani D3D cizimi calisir. UpdateLayeredWindow yolu
-//   olsaydi calismazdi — aradaki fark kritik.
+// One subtlety worth keeping: a window made layered via
+// SetLayeredWindowAttributes keeps its normal redirection surface, so D3D
+// rendering into it works. The UpdateLayeredWindow route would not.
 //
-// Window Styles Aciklamasi:
-//   WS_EX_LAYERED      — TRANSPARENT ile birlikte gercek click-through saglar
-//   WS_EX_TRANSPARENT  — Mouse olaylari bu pencereden gecer (click-through)
-//   WS_EX_TOPMOST      — Her zaman ustte (diger pencerelerin uzerinde)
-//   WS_EX_NOACTIVATE   — Tiklayinca focus almasin (calisan uygulama focus'unu kaybetmesin)
+//   WS_EX_LAYERED      with TRANSPARENT, gives real click-through
+//   WS_EX_TRANSPARENT  mouse events pass through to what is underneath
+//   WS_EX_TOPMOST      above ordinary windows
+//   WS_EX_NOACTIVATE   never takes focus from the app being magnified
 //   WS_EX_TOOLWINDOW   — Taskbar'da gorunmesin
 //   WS_POPUP           — Title bar, kenar cizgisi yok (tam seffaf)
 //
@@ -128,9 +125,8 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
                   | WS_EX_NOACTIVATE
                   | WS_EX_TOOLWINDOW;
 
-    // Layered mod (varsayilan): click-through icin sart.
-    // BM_OVERLAY_FLIP=1 ile eski flip-model davranisina donulur — girdi
-    // gecmez, sadece karsilastirma icin.
+    // Layered by default; BM_OVERLAY_FLIP=1 restores the flip-model behaviour,
+    // which has lower latency and no click-through. Kept for comparison only.
     if (!UseFlipOverlay())
         exStyle |= WS_EX_LAYERED;
 
@@ -159,9 +155,9 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
         return false;
     }
 
-    // ── Layered pencereyi tam opak yap ──
-    // Layered olmasinin sebebi girdi seffafligi, GORSEL seffaflik degil —
-    // alpha 255 (tam opak). Bu cagri olmadan layered pencere HIC cizilmez.
+    // Fully opaque. The window is layered for input transparency, not visual
+    // transparency — and without this call a layered window is never drawn at
+    // all.
     if (!UseFlipOverlay())
     {
         if (!SetLayeredWindowAttributes(m_hwnd, 0, 255, LWA_ALPHA))
@@ -176,9 +172,9 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
     // parcasi. Onlem alinmazsa overlay kendi icerigini yakalar → sonsuz ayna
     // (kamerayi kendi ekranina tutmak gibi).
     //
-    // WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+): pencere kullaniciya normal
-    // gorunur ama ekran yakalama API'lerine gorunmez. Tam istedigimiz sey.
-    // Eski Windows'ta basarisiz olur — o zaman feedback loop olusur, uyari veriyoruz.
+    // WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+): visible on screen, invisible
+    // to capture APIs — exactly what is needed here. Without it Desktop
+    // Duplication would capture our own output and feed it back.
     if (SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE))
     {
         m_excludedFromCapture = true;
@@ -186,8 +182,8 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
     else
     {
         m_excludedFromCapture = false;
-        LOG_WARN("SetWindowDisplayAffinity basarisiz ({}) — Windows 10 2004+ gerekiyor, "
-                 "feedback loop olusabilir", GetLastError());
+        LOG_WARN("SetWindowDisplayAffinity failed ({}), needs Windows 10 2004+ — "
+                 "capture feedback is possible", GetLastError());
     }
 
     LOG_INFO("Overlay window olusturuldu: monitor={}, pos=({},{}), size={}x{}, HWND=0x{:X}",
@@ -234,8 +230,8 @@ void OverlayWindow::EnsureTopmost()
     if (!m_hwnd || !m_visible)
         return;
 
-    // SWP_NOACTIVATE: focus calmayacagiz.
-    // SWP_NOMOVE | SWP_NOSIZE: sadece z-order degisiyor, geometri sabit.
+    // Z-order only: NOMOVE and NOSIZE keep the geometry, NOACTIVATE keeps the
+    // focus where the user put it.
     SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }

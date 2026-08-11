@@ -15,10 +15,8 @@ namespace BetterMagnifier {
 namespace {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Buyuk/kucuk harf duyarsiz string_view karsilastirmasi
-// ─────────────────────────────────────────────────────────────────────────────
-// _wcsicmp null-terminated bekliyor, string_view oyle olmak zorunda degil —
-// elle karsilastiriyoruz.
+// Case-insensitive compare done by hand: _wcsicmp wants null-terminated input
+// and a string_view is not obliged to be.
 bool EqualsCI(std::wstring_view a, std::wstring_view b)
 {
     if (a.size() != b.size())
@@ -76,11 +74,12 @@ UINT VirtualKeyFromName(std::wstring_view name)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INI float yardimcilari
-// ─────────────────────────────────────────────────────────────────────────────
-// INI'de float tipi yok — metin uzerinden gidiyoruz.
-// Neden std::to_wstring degil? O locale'e bagli, ondalik ayraci virgul
-// olabilir (Turkce locale!) ve sonra wcstof onu okuyamaz. std::format
-// sabit "." kullanir — dosya tasinabilir kalir.
+// INI has no float type, so these go through text.
+//
+// std::format rather than std::to_wstring: to_wstring is locale-dependent and
+// will happily write "1,25" on a locale that uses a decimal comma, which
+// wcstof then reads back as 1. std::format always emits '.', so the file stays
+// portable between machines.
 float ReadFloat(const std::wstring& file, const std::wstring& section,
                 const wchar_t* key, float fallback)
 {
@@ -118,10 +117,9 @@ bool WriteInt(const std::wstring& file, const std::wstring& section,
 // =============================================================================
 // "Ctrl+Alt+Z" -> (MOD_CONTROL|MOD_ALT, 'Z')
 //
-// Python analojisi: parts = text.split("+"); *mods, key = parts
-//
-// ONEMLI: cikti parametrelerine SADECE tam basaridan sonra yaziyoruz.
-// Yariyolda yazsak, gecersiz girdide cagiranin mevcut hotkey'i bozulurdu.
+// The output parameters are written only after the whole string has parsed.
+// Writing as we go would corrupt the caller's current binding whenever the
+// input turned out to be invalid halfway through.
 // =============================================================================
 bool ParseHotkey(std::wstring_view text, UINT& modifiers, UINT& vk)
 {
@@ -143,7 +141,7 @@ bool ParseHotkey(std::wstring_view text, UINT& modifiers, UINT& vk)
 
         if (plus == std::wstring_view::npos)
         {
-            // Son parca — tus olmali
+            // Last piece: it has to be the key, not another modifier.
             const UINT parsedVk = VirtualKeyFromName(piece);
             if (parsedVk == 0)
                 return false;
@@ -165,9 +163,9 @@ bool ParseHotkey(std::wstring_view text, UINT& modifiers, UINT& vk)
 // =============================================================================
 // FormatHotkey
 // =============================================================================
-// Sabit sira: Ctrl, Alt, Shift, Win. Round-trip kararliligi icin sart —
-// ayni (modifiers, vk) her zaman ayni metni uretmeli, yoksa dosyaya yazip
-// geri okumak degeri kaydirir.
+// Fixed order: Ctrl, Alt, Shift, Win. The round trip has to be stable — the
+// same (modifiers, vk) must always produce the same text, or writing the file
+// and reading it back would drift.
 // =============================================================================
 std::wstring FormatHotkey(UINT modifiers, UINT vk)
 {
@@ -195,9 +193,8 @@ std::wstring FormatHotkey(UINT modifiers, UINT vk)
 // FilePath — %APPDATA%\BetterMagnifier\settings.ini
 // =============================================================================
 // SHGetKnownFolderPath modern API (Vista+); eski SHGetFolderPath deprecated.
-// CoTaskMemFree ile serbest birakmak ZORUNLU — yoksa leak.
-//
-// Python analojisi: os.path.join(os.getenv("APPDATA"), "BetterMagnifier", ...)
+// The returned buffer is owned by the caller and must go back through
+// CoTaskMemFree.
 // =============================================================================
 #ifdef _DEBUG
 namespace {
@@ -250,15 +247,14 @@ bool SettingsStore::Load()
     std::error_code ec;
     if (!std::filesystem::exists(path, ec))
     {
-        LOG_INFO("Ayar dosyasi yok, varsayilanlar kullanilacak");
-        return true;   // Ilk calistirma — hata degil
+        LOG_INFO("No settings file, using defaults");
+        return true;   // First run is not a failure
     }
 
     const std::wstring file = path.wstring();
 
-    // ── Hotkey'ler ──
-    // ParseHotkey basarisizsa cikti parametrelerine dokunmuyor, m_general
-    // zaten varsayilanda — yani bozuk deger sessizce varsayilana duser.
+    // ParseHotkey leaves its outputs alone on failure and m_general already
+    // holds the defaults, so a malformed entry falls back on its own.
     {
         wchar_t buf[64]{};
         GetPrivateProfileStringW(L"General", L"ToggleHotkey", L"", buf, 64, file.c_str());
@@ -351,9 +347,8 @@ bool SettingsStore::Load()
             ms.zoomStep = ReadFloat(file, section, L"ZoomStep", 0.25f);
             ms.lastZoom = ReadFloat(file, section, L"LastZoom", 2.0f);
 
-            // Mantiksiz degerler varsayilana duser. Elle duzenlenebilir bir
-            // dosyada bu sart — kullanici MaxZoom=0 yazarsa uygulama
-            // kullanilamaz hale gelmemeli.
+            // Nonsense falls back per field. This file is meant to be
+            // hand-editable, and MaxZoom=0 should not brick the application.
             if (ms.minZoom  <= 0.0f)       ms.minZoom  = 1.0f;
             if (ms.maxZoom  <= ms.minZoom) ms.maxZoom  = 10.0f;
             if (ms.zoomStep <= 0.0f)       ms.zoomStep = 0.25f;
@@ -489,9 +484,8 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(vk == VK_F12);
     }
 
-    // ── 5. ParseHotkey: bozuk girdi ciktiya DOKUNMAZ ──
-    // GUI icin kritik: kullanici sacma bir sey yazdiginda mevcut hotkey
-    // calismaya devam etmeli.
+    // ParseHotkey must not touch its outputs on bad input. This matters for the
+    // panel: typing nonsense should leave the working binding working.
     {
         UINT mods = 0xDEAD, vk = 0xBEEF;
         BM_SELFCHECK(!ParseHotkey(L"", mods, vk));
@@ -503,7 +497,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(!ParseHotkey(L"Bogus+Z", mods, vk));
         BM_SELFCHECK(mods == 0xDEAD && vk == 0xBEEF);
 
-        BM_SELFCHECK(!ParseHotkey(L"Ctrl+Alt", mods, vk));   // son parca tus degil
+        BM_SELFCHECK(!ParseHotkey(L"Ctrl+Alt", mods, vk));   // no key, only modifiers
         BM_SELFCHECK(mods == 0xDEAD && vk == 0xBEEF);
 
         BM_SELFCHECK(!ParseHotkey(L"Ctrl+F99", mods, vk));   // F24'ten buyuk
@@ -518,7 +512,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(FormatHotkey(MOD_CONTROL, VK_F5) == L"Ctrl+F5");
     }
 
-    // ── 7. Round-trip: format -> parse ayni degeri verir ──
+    // Round trip: format then parse returns the same pair.
     {
         const UINT origMods = MOD_CONTROL | MOD_SHIFT;
         const UINT origVk   = 'Q';
@@ -556,7 +550,7 @@ void SettingsStoreSelfCheck()
         std::filesystem::remove(temp, ec);      // leftovers from an aborted run
         SetSettingsPathOverride(temp);
 
-        // ── 9. Dosya yoksa varsayilanlar, true doner ──
+        // No file: defaults, and Load still succeeds.
         SettingsStore fresh;
         BM_SELFCHECK(fresh.Load());
         BM_SELFCHECK(fresh.General().toggleVk == 'Z');

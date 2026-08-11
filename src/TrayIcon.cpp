@@ -116,10 +116,12 @@ void TrayIcon::ShowContextMenu()
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, kMenuExit, L"Exit");
 
-    // Menunun dogru pozisyonda acilmasi icin
     POINT pt;
     GetCursorPos(&pt);
-    SetForegroundWindow(m_hwnd);  // Menu focus icin gerekli (Win32 quirk)
+
+    // Required before TrackPopupMenu: without a foreground owner the menu does
+    // not dismiss when you click away from it.
+    SetForegroundWindow(m_hwnd);
 
     UINT cmd = TrackPopupMenu(
         hMenu,

@@ -15,21 +15,19 @@ namespace BetterMagnifier {
 namespace {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sentetik (enjekte edilmis) girdiyi yoksay
-// ─────────────────────────────────────────────────────────────────────────────
-// SendInput ile uretilen olaylar LLKHF_INJECTED / LLMHF_INJECTED bayragini
-// tasiyor. Bunlari yoksaymamizin iki sebebi var:
+// Events produced by SendInput carry LLKHF_INJECTED / LLMHF_INJECTED. Ignoring
+// them by default, for two reasons.
 //
-// 1. Otomasyon uygulamayi surukleyemesin. Test betigi ya da baska bir arac
-//    Win/Ctrl/Alt basip birakirken process olur veya olay kaybolursa modifier
-//    MANTIKSAL OLARAK BASILI kalabiliyor. O andan sonra kullanicinin her
-//    "+"/"-" tusu veya tekerlek hareketi zoom komutu gibi yorumlaniyor ve
-//    uygulama kendi kendine zoom yapiyor gorunuyor. Tam olarak bu yasandi.
+// First, automation must not be able to drive the application. If a script
+// dies between pressing and releasing Win, Ctrl or Alt — or the release event
+// is simply lost — that modifier stays logically down, and from then on every
+// "+", "-" or wheel tick the user makes reads as a zoom command. The app
+// appears to zoom on its own. This happened.
 //
-// 2. Bir magnifier'in gercek fiziksel girdiye tepki vermesi gerekiyor.
-//    Baska bir programin bizi uzaktan surmesi icin bir sebep yok.
+// Second, a magnifier should respond to the physical input in front of it.
+// There is no reason for another process to be steering it remotely.
 //
-// BM_ALLOW_INJECTED=1 ile kapatilabilir — sadece otomatik dogrulama icin.
+// BM_ALLOW_INJECTED=1 turns the filter off, for scripted verification only.
 bool IgnoreInjectedInput()
 {
     static const bool allow = []() {
@@ -53,13 +51,9 @@ InputThread::~InputThread()
 // Start — thread'i baslat, hook kurulumunu bekle
 // =============================================================================
 //
-// Neden std::promise ile bekliyoruz?
-//   Hook'lar thread ICINDE kurulmali (o thread'in kuyruguna baglanacaklar).
-//   Ama Start()'in cagirana "hook'lar hazir" veya "kurulamadi" demesi lazim.
-//   promise/future tam bu is icin: thread sonucu yaziyor, Start okuyor.
-//
-// Python analojisi: concurrent.futures.Future, ya da threading.Event +
-// bir sonuc degiskeni.
+// Start blocks on a promise because the hooks must be installed from inside the
+// thread — they attach to that thread's queue — yet the caller needs to know
+// whether they came up. The thread writes the result, Start reads it.
 // =============================================================================
 bool InputThread::Start(HWND targetHwnd, FollowMode initialMode, bool hijackMagnifierKeys)
 {
@@ -128,12 +122,14 @@ bool InputThread::InstallHooks()
         LOG_ERROR("WH_MOUSE_LL kurulamadi: {}", GetLastError());
         return false;
     }
-    LOG_INFO("  Mouse hook aktif (input thread'de)");
+    LOG_INFO("  Mouse hook installed (on the input thread)");
 
-    // ── Klavye hook'u (Win+Z ele gecirme) ──
-    // Her zaman kuruyoruz ama sadece hijackMagnifierKeys acikken olay yutuyoruz.
-    // Kur/kaldir yapmaktansa atomic bayrak okumak hem ucuz hem yaris kosulsuz.
-    // Basarisiz olursa kritik degil — sadece Win+arti/eksi devralinmaz.
+    // Always installed; whether it swallows anything is an atomic flag read in
+    // the callback. Cheaper than installing and removing the hook on every
+    // settings change, and free of the races that would come with it.
+    //
+    // Failure is not fatal — it only means the Magnifier shortcuts are not
+    // taken over.
     m_keyboardHook = SetWindowsHookExW(
         WH_KEYBOARD_LL,
         LowLevelKeyboardProc,
@@ -144,15 +140,14 @@ bool InputThread::InstallHooks()
         LOG_WARN("WH_KEYBOARD_LL kurulamadi: {} — Win+arti/eksi devralma devre disi",
             GetLastError());
     else
-        LOG_INFO("  Klavye hook'u aktif");
+        LOG_INFO("  Keyboard hook installed");
 
-    // ── Klavye odagi hook'u ──
-    // SetWindowEventHook(EVENT_OBJECT_FOCUS): sistemde odak degisince haber verir.
-    // WINEVENT_OUTOFCONTEXT: callback BIZIM thread'imizde cagrilir (DLL
-    // enjeksiyonu yok) — bu yuzden bu thread'in mesaj loop'u olmak zorunda.
-    // WINEVENT_SKIPOWNPROCESS: kendi pencerelerimiz (overlay, panel) tetiklemesin.
-    // Aralik EVENT_OBJECT_SHOW..EVENT_OBJECT_FOCUS: hem odak degisimini hem de
-    // yeni pencere gosterimini (dropdown, flyout) yakaliyor. Handler filtreliyor.
+    // WINEVENT_OUTOFCONTEXT delivers the callback on this thread instead of
+    // injecting a DLL, which is why this thread must pump messages.
+    // SKIPOWNPROCESS keeps our own overlay and panel from triggering it.
+    //
+    // The SHOW..FOCUS range covers both focus changes and newly shown windows
+    // such as dropdowns and flyouts; the handler sorts out which is which.
     m_focusHook = SetWinEventHook(
         EVENT_OBJECT_SHOW, EVENT_OBJECT_FOCUS,
         nullptr,
@@ -161,14 +156,14 @@ bool InputThread::InstallHooks()
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
     if (!m_focusHook)
-        LOG_WARN("EVENT_OBJECT_* hook kurulamadi: {} — odak takibi ve popup "
-                 "tespiti devre disi", GetLastError());
+        LOG_WARN("EVENT_OBJECT_* hook failed: {} — focus tracking and popup "
+                 "detection are off", GetLastError());
     else
-        LOG_INFO("  Odak + popup hook'u aktif");
+        LOG_INFO("  Focus and popup hook installed");
 
-    // ── Menu popup hook'u ──
-    // Tepsi sag tik menusu gibi klasik menuler EVENT_SYSTEM_MENUPOPUPSTART
-    // uretiyor. Ayri hook cunku o olay 0x0006, yukarideki aralik 0x8002+.
+    // Classic menus, such as the tray's context menu, raise
+    // EVENT_SYSTEM_MENUPOPUPSTART instead. It needs its own hook because that
+    // event is 0x0006 while the range above starts at 0x8002.
     m_popupHook = SetWinEventHook(
         EVENT_SYSTEM_MENUPOPUPSTART, EVENT_SYSTEM_MENUPOPUPSTART,
         nullptr,
@@ -216,13 +211,13 @@ void InputThread::RemoveHooks()
 }
 
 // =============================================================================
-// ThreadMain — hook'larin yasamasi icin gereken mesaj loop'u
+// ThreadMain — the message loop the hooks need in order to be called
 // =============================================================================
-// Bu loop hicbir pencereye ait degil (thread-only mesajlar). Tek isi hook
-// callback'lerinin cagrilabilmesi icin thread'i "mesaj pompalayan" halde tutmak.
+// No window is involved; these are thread-only messages. The loop exists purely
+// to keep this thread pumping so the hook callbacks can run.
 //
-// GetMessage kullaniyoruz, PeekMessage DEGIL: burada render yapmiyoruz,
-// bloklamak dogrusu — CPU %0.
+// GetMessage rather than PeekMessage: nothing is rendered here, so blocking is
+// the correct behaviour and costs no CPU while idle.
 // =============================================================================
 void InputThread::ThreadMain()
 {
@@ -413,23 +408,25 @@ void InputThread::SetHijackMagnifierKeys(bool enable)
 
     if (prev != enable)
     {
-        LOG_INFO("Magnifier kisayol devralma {}{}",
-            enable ? "ACIK" : "KAPALI",
-            enable ? " — Win+arti/eksi, Ctrl+Alt+tekerlek, Win+orta tik bize geliyor"
+        LOG_INFO("Magnifier shortcut takeover {}{}",
+            enable ? "ON" : "OFF",
+            enable ? " — Win+Plus/Minus, Ctrl+Alt+wheel and Win+middle-click come to us"
                    : "");
     }
 }
 
 // =============================================================================
-// LowLevelMouseProc — HIZLI DONMELI
+// LowLevelMouseProc — MUST RETURN FAST
 // =============================================================================
 //
-// Bu callback sistemdeki her fare olayinda cagriliyor. Icinde is yapmak yasak:
-// sadece ilgilendigimiz olayi PostMessage ile render thread'e atip donuyoruz.
+// Called for every mouse event in the system. Doing work in here is not an
+// option: the interesting events are handed to the render thread by
+// PostMessage and the callback returns.
 //
-// PostMessage (SendMessage DEGIL) kritik: SendMessage hedef thread'in mesaji
-// ISLEMESINI bekler — render thread Present'te blokluysa bu hook'u kilitler
-// ve LowLevelHooksTimeout'a takilir.
+// PostMessage, never SendMessage. SendMessage waits for the target thread to
+// process the message, and the render thread can be blocked in Present for a
+// whole frame — which would stall this callback into LowLevelHooksTimeout and
+// get the hook uninstalled.
 // =============================================================================
 LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
@@ -478,18 +475,17 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
     {
         auto* data = reinterpret_cast<MSLLHOOKSTRUCT*>(lParam);
 
-        // Sentetik fare olaylarini yoksay (bkz. IgnoreInjectedInput)
+        // Synthetic mouse events are ignored; see IgnoreInjectedInput.
         if (data && (data->flags & LLMHF_INJECTED) && IgnoreInjectedInput())
             return CallNextHookEx(nullptr, nCode, wParam, lParam);
 
-        // ── Ctrl+Alt+tekerlek = zoom adimi ──
+        // Ctrl+Alt+wheel steps zoom. Windows Magnifier's own combination,
+        // taken over here.
         //
-        // Windows Magnifier'in kendi kombinasyonu, ondan deviraliyoruz.
-        //
-        // NEDEN DUZ TEKERLEK DEGIL: hook olayi yutmadigi surece alttaki
-        // uygulamaya da gidiyor. Duz tekerlekle zoom yapinca sayfa hem
-        // zoom'laniyor hem kayiyordu. Ctrl+Alt+tekerlegi YUTARAK aliyoruz,
-        // boylece cift etki bitiyor ve duz tekerlek normal kaydirmaya donuyor.
+        // Not the bare wheel: unless the hook swallows an event it also reaches
+        // the application underneath, so plain-wheel zoom scrolled the page at
+        // the same time. Swallowing Ctrl+Alt+wheel ends the double effect and
+        // leaves the bare wheel scrolling normally.
         if (wParam == WM_MOUSEWHEEL && data)
         {
             const bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -508,9 +504,9 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
 
         // ── Win + orta tik = zoom bolgesini sabitle/coz ──
         //
-        // Elin zaten farede, klavyeye gitmiyorsun. MBUTTONUP'i da yutuyoruz,
-        // yoksa alttaki uygulama yarim bir orta tiklama gorur (bazi
-        // tarayicilarda bu yeni sekme acar).
+        // Freeze from the mouse, since the hand is already there. MBUTTONUP is
+        // swallowed too: leaving it through hands the application below half a
+        // middle click, which in a browser opens a tab.
         if (wParam == WM_MBUTTONDOWN || wParam == WM_MBUTTONUP)
         {
             const bool winDown =
@@ -529,42 +525,43 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
         }
     }
 
-    // Chain'i MUTLAKA devam ettir — yoksa diger uygulamalar fare olaylarini
-    // alamaz. return 1 sadece yukarida, olayi bilincli yuttugumuz yerlerde.
+    // Always continue the chain. Returning 1 above is deliberate on the few
+    // events we mean to swallow; dropping the rest would starve every other
+    // application of mouse input.
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
 // =============================================================================
-// LowLevelKeyboardProc — Windows Magnifier kisayollarini devral
+// LowLevelKeyboardProc — take over the Windows Magnifier shortcuts
 // =============================================================================
 //
-// return 1 = olayi YUT (chain'e gitmez, Windows gormez).
+// Returning 1 swallows the event: it never reaches the chain, and Windows does
+// not see it.
 //
-// NEDEN HOOK, RegisterHotKey DEGIL:
-//   Win+arti / Win+eksi Windows Magnifier'a rezerve. RegisterHotKey bunlari
-//   ALAMAZ, basarisiz doner. Sistem kisayolunu gercekten devralmanin tek yolu
-//   low-level hook'ta olayi yutmak.
+// Why a hook rather than RegisterHotKey:
+//   Win+Plus and Win+Minus are reserved for the Windows Magnifier.
+//   RegisterHotKey cannot claim them; it just fails. Swallowing the event in a
+//   low-level hook is the only way to actually take a system shortcut.
 //
-// DEVRALINANLAR (Win basiliyken):
-//   VK_OEM_PLUS  / VK_ADD      -> zoom adim +  (zoom kapaliysa ACAR)
-//   VK_OEM_MINUS / VK_SUBTRACT -> zoom adim -  (minZoom'a inince KAPATIR)
+// Taken over, while Win is held:
+//   VK_OEM_PLUS  / VK_ADD      -> step zoom up   (turns zoom ON if it is off)
+//   VK_OEM_MINUS / VK_SUBTRACT -> step zoom down (turns it OFF at minZoom)
 //
-//   Hem ana klavye sirasi (OEM_*) hem numpad (ADD/SUBTRACT): Windows
-//   Magnifier ikisini de kabul ediyor, biz de edelim.
+//   Both the main row and the numpad, because the Windows Magnifier accepts
+//   both and the muscle memory goes with it.
 //
-// NE YUTMUYORUZ:
-//   Win tusunun KENDISINI. Yutsak Start menusu, Win+D, Win+E hepsi bozulur.
-//   Sadece Win basiliyken ilgili tusun KeyDown'unu yutuyoruz.
+// Not swallowed: the Win key itself. Eating that would break the Start menu,
+// Win+D, Win+E and everything else. Only the KeyDown of the paired key goes.
 //
-// KAYBEDILEN: hijack acikken Windows'un kendi Magnifier'i bu tuslarla
-// acilmaz. Istenen davranis tam olarak bu.
+// The trade is deliberate: with takeover on, these keys no longer start the
+// Windows Magnifier. That is the point.
 //
-// YUTAMADIKLARIMIZ (kernel/Winlogon korumali, kod ile engellenemez):
-//   Ctrl+Alt+Del, Win+L. Mimari olarak erisimimizin disinda.
+// Out of reach entirely, protected by the kernel and Winlogon: Ctrl+Alt+Del
+// and Win+L. No hook can intercept those.
 //
-// ADMIN NOTU: yuksek integrity'li pencere odaktayken (Task Manager, UAC) hook
-// devreye girmez. DXGI Desktop Duplication da secure desktop'ta calismadigi
-// icin sinir zaten orada — ek kisit getirmiyor.
+// A hook also does not fire while a higher-integrity window has focus (Task
+// Manager, a UAC prompt). Desktop Duplication does not work on the secure
+// desktop either, so the boundary is already there and this adds nothing to it.
 // =============================================================================
 LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
@@ -574,13 +571,13 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
     {
         auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
 
-        // Sentetik tus olaylarini yoksay (bkz. IgnoreInjectedInput)
+        // Synthetic key events are ignored; see IgnoreInjectedInput.
         if (kb && (kb->flags & LLKHF_INJECTED) && IgnoreInjectedInput())
             return CallNextHookEx(nullptr, nCode, wParam, lParam);
 
         if (kb)
         {
-            // Win tusu basili mi? 0x8000 biti = su an basili.
+            // 0x8000 is the "currently down" bit.
             const bool winDown =
                 (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
                 (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
@@ -600,27 +597,27 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
                 }
             }
 
-            // ── PANIK CIKISI: Ctrl+Alt+Shift+Q ──
+            // ── Panic exit: Ctrl+Alt+Shift+Q ──
             //
-            // Neden gerekli: overlay tam ekran, topmost ve opak. Render thread
-            // herhangi bir sebeple bloklanirsa mesaj pompalamayi birakir,
-            // WM_HOTKEY islenmez ve kullanici ekranin arkasinda mahsur kalir —
-            // gorev yoneticisinden kapatmak zorunda kalindi, bir kez oldu.
+            // The overlay is fullscreen, topmost and opaque. If the render
+            // thread wedges for any reason it stops pumping messages, WM_HOTKEY
+            // never arrives, and the user is stranded behind an image of their
+            // own desktop. That happened once and cost a trip to Task Manager.
             //
-            // Bu tus INPUT thread'de isleniyor; o thread hicbir zaman
-            // bloklanmiyor (hook callback'leri sadece PostMessage edip donuyor).
-            // Yani render thread olmus olsa bile bu yol calisir.
+            // This runs on the input thread, which never blocks — its callbacks
+            // only PostMessage and return — so the path survives a dead render
+            // thread, which is the entire point.
             //
-            // NEDEN ShowWindow ILE OVERLAY'LERI GIZLEMIYORUZ: pencereler render
-            // thread'e ait. Baska thread'den gizlemek o thread'in isbirligini
-            // gerektiriyor — wedge durumunda tam da olmayan sey bu.
-            // Kesin calisan tek sey process'i bitirmek.
+            // Hiding the overlays with ShowWindow instead would not do: the
+            // windows belong to the render thread, and hiding them from another
+            // thread needs that thread's cooperation. In a wedge that is
+            // precisely what is missing. Ending the process always works.
             if (kb->vkCode == 'Q'
                 && (GetAsyncKeyState(VK_CONTROL) & 0x8000)
                 && (GetAsyncKeyState(VK_MENU)    & 0x8000)
                 && (GetAsyncKeyState(VK_SHIFT)   & 0x8000))
             {
-                // Iki kez tetiklenmesin (tus tekrari)
+                // Key repeat would otherwise run this several times.
                 static std::atomic<bool> panicStarted{false};
                 if (!panicStarted.exchange(true, std::memory_order_relaxed))
                 {
@@ -667,15 +664,14 @@ void CALLBACK InputThread::WinEventProc(
     if (!hwnd || !s_instance || !s_instance->m_target)
         return;
 
-    // ── Yeni popup/menu dogdu -> topmost'u ANINDA yeniden iddia et ──
+    // A popup or menu just appeared: re-assert topmost immediately.
     //
-    // Menuler ve dropdown'lar HWND_TOPMOST ile ve bizden SONRA olusturuluyor,
-    // yani z-order'da uzerimize cikiyorlar ve kullanici popup'i iki kez
-    // goruyor. Periyodik yoklama dropdown'lar icin cok yavas: dropdown
-    // saniyenin altinda bir surede acilip kullaniliyor.
+    // Menus and dropdowns are created HWND_TOPMOST and created after us, so
+    // they land above the overlay and the user sees the popup twice. Polling is
+    // far too slow for a dropdown, which opens and is used inside a second.
     //
-    // EVENT_OBJECT_SHOW cok sik tetikleniyor; rate limit motor tarafinda
-    // (App::MessageWndProc) yapiliyor, burada sadece haber veriyoruz.
+    // EVENT_OBJECT_SHOW fires constantly. Rate limiting lives on the engine
+    // side, in App::MessageWndProc; this only reports.
     if (event == EVENT_SYSTEM_MENUPOPUPSTART || event == EVENT_OBJECT_SHOW)
     {
         PostMessageW(s_instance->m_target, WM_APP_ASSERT_TOPMOST, 0, 0);

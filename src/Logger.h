@@ -1,28 +1,15 @@
 #pragma once
 
-// =============================================================================
-// Logger.h — Thread-Safe, RAII-Based Logging System
-// =============================================================================
+// Thread-safe logger built on std::format and std::source_location.
 //
-// Python analojisi:
-//   Python'da: logging.getLogger(__name__).info("mesaj")
-//   Burada:    LOG_INFO("mesaj")  veya  LOG_INFO("değer: {}", 42)
+// Writes to a file and to the debugger output at once; every line carries a
+// timestamp, thread id, level and file:line. Flushed per line, because the log
+// matters most when the process is about to die and buffered output would take
+// the interesting part with it.
 //
-// Özellikler:
-//   1. Thread-safe (mutex ile korunur — Python'daki threading.Lock gibi)
-//   2. Hem dosyaya hem VS Output penceresine yazar (OutputDebugStringW)
-//   3. Her satırda: timestamp, thread ID, log seviyesi, dosya:satır
-//   4. Release build'de LOG_DEBUG tamamen kaldırılır (zero overhead)
-//   5. Singleton pattern — tek bir global Logger instance
-//   6. RAII — Logger yıkıldığında dosya otomatik kapanır
-//
-// Kullanım:
-//   LOG_INFO("Uygulama başlatıldı");
-//   LOG_WARN("Zoom level sınırda: {}", zoomLevel);
-//   LOG_ERROR("DXGI capture başarısız: 0x{:08X}", hr);
-//   LOG_DEBUG("Frame time: {}ms", deltaMs);  // Release'de yok olur
-//
-// =============================================================================
+//   LOG_INFO ("Overlay created: {}x{}", w, h);
+//   LOG_ERROR("DXGI capture failed: 0x{:08X}", hr);
+//   LOG_DEBUG("Frame time: {} ms", deltaMs);   // compiled out in Release
 
 #ifndef BETTER_MAGNIFIER_LOGGER_H
 #define BETTER_MAGNIFIER_LOGGER_H
@@ -41,9 +28,6 @@
 
 namespace BetterMagnifier {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Log Seviyeleri
-// ─────────────────────────────────────────────────────────────────────────────
 enum class LogLevel : int
 {
     Debug = 0,
@@ -51,10 +35,9 @@ enum class LogLevel : int
     Warn  = 2,
     Error = 3,
     Fatal = 4,
-    Off   = 5  // Logging'i tamamen kapat
+    Off   = 5
 };
 
-// Seviye ismini string olarak almak için (log satırında gösterilir)
 constexpr std::string_view LogLevelToString(LogLevel level)
 {
     switch (level)
@@ -70,52 +53,35 @@ constexpr std::string_view LogLevelToString(LogLevel level)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Logger Singleton
-// ─────────────────────────────────────────────────────────────────────────────
-// Python'da:  logger = logging.getLogger()
-// C++'ta:     Logger& log = Logger::Instance()
-//
-// Singleton neden? Uygulama genelinde tek bir log dosyası ve tek bir mutex.
-// Farklı thread'lerden aynı dosyaya yazmak data race oluşturur — mutex bunu engeller.
-//
-// RAII neden? Logger stackte veya static storage'da yaşar.
-// Program sonlandığında destructor otomatik çalışır → dosya kapanır, flush yapılır.
-// Python'da "with open() as f:" gibi düşün — ama scope program ömrü kadar geniş.
-// ─────────────────────────────────────────────────────────────────────────────
+// One log file and one mutex for the whole process. A magic static gives
+// thread-safe lazy construction and destruction at exit, which closes and
+// flushes the stream without anyone having to remember to.
 class Logger
 {
 public:
-    // ── Singleton Access ──
-    // Python'da:  logger = logging.getLogger()
-    // C++'ta:     Logger::Instance()
-    // "static local" pattern: İlk çağrıda oluşturulur, program sonunda yıkılır.
-    // C++11'den beri thread-safe garantili (magic statics).
     static Logger& Instance()
     {
         static Logger instance;
         return instance;
     }
 
-    // ── Initialization ──
-    // Programın en başında bir kez çağrılır.
-    // logDirectory: Log dosyasının yazılacağı dizin.
-    // minLevel: Bu seviyenin altındaki loglar yazılmaz.
+    // Call once at startup. Entries below minLevel are dropped.
     bool Initialize(const std::filesystem::path& logDirectory = L".",
                     LogLevel minLevel = LogLevel::Debug)
     {
-        std::lock_guard lock(m_mutex);  // Python: with self._lock:
+        std::lock_guard lock(m_mutex);
 
         m_minLevel = minLevel;
 
-        // Log dizinini oluştur (yoksa)
         std::error_code ec;
         std::filesystem::create_directories(logDirectory, ec);
         if (ec)
         {
-            OutputDebugStringW(L"[Logger] Log dizini oluşturulamadı!\n");
+            OutputDebugStringW(L"[Logger] Could not create the log directory\n");
             return false;
         }
 
-        // Dosya adı: BetterMagnifier_2026-03-02_11-40-50.log
+        // One file per run, named for the start time: BetterMagnifier_2026-03-02_11-40-50.log
         const auto now = std::chrono::system_clock::now();
         const auto timeT = std::chrono::system_clock::to_time_t(now);
         std::tm localTm{};
@@ -130,13 +96,12 @@ public:
         m_fileStream.open(fullPath, std::ios::out | std::ios::app);
         if (!m_fileStream.is_open())
         {
-            OutputDebugStringW(L"[Logger] Log dosyası açılamadı!\n");
+            OutputDebugStringW(L"[Logger] Could not open the log file\n");
             return false;
         }
 
         m_initialized = true;
 
-        // İlk log satırı
         WriteRaw("════════════════════════════════════════════════════════════");
         WriteRaw(std::format("  BetterMagnifier Logger Initialized"));
         WriteRaw(std::format("  Log File: {}", fullPath.string()));
@@ -145,27 +110,19 @@ public:
         return true;
     }
 
-    // ── Ana Log Fonksiyonu ──
-    // Python'da:  logger.info("mesaj %s", değer)
-    // C++'ta:     Log(LogLevel::Info, loc, "mesaj {}", değer)
-    //
-    // std::format kullanıyoruz — Python f-string'in C++20 karşılığı.
-    // source_location → __FILE__ ve __LINE__'ın modern, type-safe hali.
-    // Makro yerine fonksiyon parametresi olarak geçiyor.
+    // source_location is taken as a parameter rather than read here: it has to
+    // be captured at the call site, which is what the LOG_* macros do.
     template<typename... Args>
     void Log(LogLevel level,
              const std::source_location& loc,
              std::format_string<Args...> fmt,
              Args&&... args)
     {
-        // Minimum seviye kontrolü — bu seviyenin altındakiler ignore edilir
         if (level < m_minLevel)
             return;
 
-        // Mesajı formatla
         std::string message = std::format(fmt, std::forward<Args>(args)...);
 
-        // Timestamp al
         const auto now = std::chrono::system_clock::now();
         const auto timeT = std::chrono::system_clock::to_time_t(now);
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -173,18 +130,17 @@ public:
         std::tm localTm{};
         localtime_s(&localTm, &timeT);
 
-        // Dosya adından sadece filename kısmını al (path olmadan)
+        // Filename only; source_location gives the full build path, which is
+        // noise in every line.
         std::string_view fileFullPath = loc.file_name();
         auto lastSlash = fileFullPath.find_last_of("\\/");
         std::string_view fileName = (lastSlash != std::string_view::npos)
             ? fileFullPath.substr(lastSlash + 1)
             : fileFullPath;
 
-        // Thread ID
         auto threadId = std::this_thread::get_id();
 
-        // Final log satırı formatı:
-        // [14:30:45.123] [INFO ] [T:12345] [main.cpp:42] Mesaj burada
+        // [14:30:45.123] [INFO ] [T:12345] [main.cpp:42] message
         std::string logLine = std::format(
             "[{:02d}:{:02d}:{:02d}.{:03d}] [{}] [T:{:5}] [{}:{}] {}",
             localTm.tm_hour, localTm.tm_min, localTm.tm_sec,
@@ -196,28 +152,23 @@ public:
             message
         );
 
-        // Thread-safe yazma
         {
             std::lock_guard lock(m_mutex);
 
-            // 1. Dosyaya yaz (varsa)
             if (m_fileStream.is_open())
             {
                 m_fileStream << logLine << '\n';
-                // Her satırda flush — bu app'te log frequency düşük,
-                // performans etkisi yok. Crash/kill durumunda veri kaybını önler.
+
+                // Flushed per line. Volume here is low enough that it costs
+                // nothing measurable, and the lines worth reading are usually
+                // the ones written just before something killed the process.
                 m_fileStream.flush();
             }
 
-            // 2. VS Output penceresine yaz (Debug build'de çok faydalı!)
-            // OutputDebugStringW, Visual Studio'nun "Output" penceresinde görünür.
-            // Python'daki print() gibi ama IDE'nin debug output'una gider.
             std::wstring wLogLine(logLine.begin(), logLine.end());
             wLogLine += L'\n';
             OutputDebugStringW(wLogLine.c_str());
 
-            // 3. Console'a da yaz (varsa — debug sırasında console attach edilebilir)
-            // Error ve üstünü stderr'e, diğerlerini stdout'a
             if (level >= LogLevel::Error)
                 std::cerr << logLine << '\n';
             else
@@ -270,13 +221,12 @@ private:
         Shutdown();
     }
 
-    // Singleton — kopyalama ve taşıma yasak
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
     Logger(Logger&&) = delete;
     Logger& operator=(Logger&&) = delete;
 
-    // ── Raw yazma (header/footer için) ──
+    // Unformatted, for the banner lines. Assumes the mutex is already held.
     void WriteRaw(std::string_view text)
     {
         if (m_fileStream.is_open())
@@ -289,42 +239,25 @@ private:
         OutputDebugStringW(wText.c_str());
     }
 
-    // ── Thread ID'yi okunabilir integer'a çevir ──
+    // std::thread::id has no numeric conversion, so the hash stands in. Only
+    // needs to be stable and distinct within a run, not meaningful.
     static unsigned int GetThreadIdAsInt(std::thread::id id)
     {
-        // std::thread::id doğrudan integer'a çevrilemez.
-        // Bu hack ile hash'ini alıp unsigned int'e cast ediyoruz.
         return static_cast<unsigned int>(std::hash<std::thread::id>{}(id));
     }
 
-    // ── Üye Değişkenler ──
-    std::mutex          m_mutex;                            // Thread safety
-    std::ofstream       m_fileStream;                       // Log dosyası
-    LogLevel            m_minLevel = LogLevel::Debug;       // Minimum log seviyesi
-    bool                m_initialized = false;              // Init edildi mi?
+    std::mutex    m_mutex;
+    std::ofstream m_fileStream;
+    LogLevel      m_minLevel    = LogLevel::Debug;
+    bool          m_initialized = false;
 };
 
 } // namespace BetterMagnifier
 
-// =============================================================================
-// LOG MAKROLARI
-// =============================================================================
-//
-// Neden fonksiyon değil de makro?
-// → source_location::current() çağrıldığı yerin bilgisini yakalar.
-//   Eğer helper fonksiyon içine koysaydık, her zaman helper'ın
-//   satır numarasını gösterirdi — log'da işe yaramaz.
-//
-// C++20 ile source_location default parametre olarak da geçilebilir,
-// ama makro yaklaşımı mevcut C++ ekosisteminde daha yaygın ve tanıdık.
-//
-// Kullanım:
-//   LOG_INFO("Uygulama başlatılıyor...");
-//   LOG_WARN("Zoom: {} — sınıra yaklaşıldı", zoomLevel);
-//   LOG_ERROR("DXGI hatası: 0x{:08X}", hr);
-//   LOG_DEBUG("Frame delta: {}ms", dt);   // Release'de no-op
-//
-// =============================================================================
+// Macros rather than functions with a defaulted source_location parameter.
+// A default argument is evaluated at the call site and would work, but the
+// macro keeps the capture visible at the point of use and matches what every
+// other logging header in this ecosystem does.
 
 #define LOG_INFO(fmt, ...)                                                      \
     BetterMagnifier::Logger::Instance().Log(                                    \
@@ -350,10 +283,8 @@ private:
         std::source_location::current(),                                        \
         fmt, ##__VA_ARGS__)
 
-// ── LOG_DEBUG — Release build'de tamamen yok olur ──
-// Python'da:  if __debug__: logger.debug(...)
-// C++'ta:     #ifdef _DEBUG bloğu. Release build'de preprocessor bu satırları
-//             tamamen kaldırır — zero overhead, hiçbir runtime maliyeti yok.
+// Compiled out entirely in Release, arguments included, so a LOG_DEBUG on a hot
+// path costs nothing there.
 #ifdef _DEBUG
     #define LOG_DEBUG(fmt, ...)                                                 \
         BetterMagnifier::Logger::Instance().Log(                                \

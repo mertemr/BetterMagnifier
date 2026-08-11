@@ -17,11 +17,7 @@ bool MonitorManager::Initialize()
 
     m_monitors.clear();
 
-    // ── 1. EnumDisplayMonitors ile tum monitorleri listele ──
-    // Python analojisi: screeninfo.get_monitors()
-    // Windows bu callback fonksiyonunu her monitor icin bir kez cagirir.
-    // lParam ile "this" pointer'ini geciyoruz ki callback icinden
-    // m_monitors vector'une erisim olsun.
+    // lParam carries "this" so the static callback can reach m_monitors.
     if (!EnumDisplayMonitors(nullptr, nullptr, EnumMonitorCallback, reinterpret_cast<LPARAM>(this)))
     {
         LOG_ERROR("EnumDisplayMonitors basarisiz!");
@@ -34,19 +30,18 @@ bool MonitorManager::Initialize()
         return false;
     }
 
-    LOG_INFO("{} adet monitor bulundu", m_monitors.size());
+    LOG_INFO("Found {} monitor(s)", m_monitors.size());
 
-    // ── 2. Her monitor icin detayli bilgileri doldur ──
     for (auto& mon : m_monitors)
     {
         PopulateMonitorDetails(mon);
     }
 
-    // ── 3. DXGI adapter/output eslestirmesi ──
     if (!MatchDXGIOutputs())
     {
-        LOG_WARN("DXGI output eslestirmesi kismen basarisiz — bazi monitorler capture edilemeyebilir");
-        // Kritik degil, devam edebiliriz
+        // Not fatal: an unmatched output only means that monitor cannot be
+        // captured, and the rest still work.
+        LOG_WARN("DXGI output matching partially failed, some monitors may not capture");
     }
 
     LogAllMonitors();
@@ -81,12 +76,12 @@ void MonitorManager::Refresh()
     {
         PopulateMonitorDetails(mon);
 
-        // Eski zoom state'i geri yukle (ayni device name ile eslesen monitor varsa)
+        // Carry zoom state across a topology change, keyed by device name.
         auto it = savedZoomStates.find(mon.deviceName);
         if (it != savedZoomStates.end())
         {
             mon.zoom = it->second;
-            LOG_DEBUG("Zoom state korundu: {} -> level={:.2f}", 
+            LOG_DEBUG("Zoom state preserved: {} -> level={:.2f}",
                 ToUtf8(mon.deviceName),
                 mon.zoom.zoomLevel);
         }
@@ -97,11 +92,9 @@ void MonitorManager::Refresh()
 }
 
 // =============================================================================
-// EnumMonitorCallback — Her monitor icin Windows tarafindan cagirilir
+// EnumMonitorCallback — invoked by Windows once per monitor
 // =============================================================================
-// Bu bir "static" fonksiyon — class instance'ina erisimi yok.
-// Bu yuzden lParam ile "this" pointer'ini geciyoruz.
-// Python'da: lambda self=self: self.monitors.append(...)
+// Static, as the Win32 signature requires, so the instance arrives via lParam.
 // =============================================================================
 BOOL CALLBACK MonitorManager::EnumMonitorCallback(
     HMONITOR hMon, HDC /*hDC*/, LPRECT lpRect, LPARAM lParam)
@@ -118,16 +111,15 @@ BOOL CALLBACK MonitorManager::EnumMonitorCallback(
 
     self->m_monitors.push_back(std::move(info));
 
-    return TRUE;  // TRUE = devam et (sonraki monitor), FALSE = dur
+    return TRUE;   // FALSE would stop the enumeration early
 }
 
 // =============================================================================
-// PopulateMonitorDetails — Tek bir monitor icin detayli bilgileri doldur
+// PopulateMonitorDetails — name, bounds, DPI and refresh rate for one monitor
 // =============================================================================
 void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
 {
-    // ── 1. MONITORINFOEX ile temel bilgiler ──
-    // Python'da: win32api.GetMonitorInfo(hMonitor)
+    // MONITORINFOEX rather than MONITORINFO: the device name comes with it.
     MONITORINFOEXW monInfo{};
     monInfo.cbSize = sizeof(monInfo);
 
@@ -157,12 +149,10 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
     }
     else
     {
-        LOG_WARN("GetDpiForMonitor basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_WARN("GetDpiForMonitor failed: 0x{:08X}", static_cast<unsigned long>(hr));
     }
 
-    // ── 3. Refresh Rate ──
-    // DEVMODE yapisinda monitorun refresh rate'i (Hz) var.
-    // 60Hz, 144Hz, 240Hz gibi — v-sync icin lazim.
+    // Refresh rate, needed to pace Present against the right vblank.
     DEVMODEW devMode{};
     devMode.dmSize = sizeof(devMode);
 
@@ -319,7 +309,7 @@ MonitorInfo* MonitorManager::FindByPoint(POINT pt)
             return &mon;
     }
 
-    // Hicbir monitorde degilse, Windows'un MonitorFromPoint'ini kullan
+    // Outside every monitor rect: let Windows pick the nearest.
     HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     return FindByHandle(hMon);
 }
@@ -331,7 +321,7 @@ MonitorInfo* MonitorManager::GetPrimaryMonitor()
         if (mon.isPrimary)
             return &mon;
     }
-    // Primary yoksa ilkini don
+    // No monitor flagged primary; the first will do.
     if (!m_monitors.empty())
         return &m_monitors[0];
     return nullptr;
