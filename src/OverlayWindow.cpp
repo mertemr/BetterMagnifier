@@ -105,13 +105,8 @@ bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
 //   WS_EX_TRANSPARENT  mouse events pass through to what is underneath
 //   WS_EX_TOPMOST      above ordinary windows
 //   WS_EX_NOACTIVATE   never takes focus from the app being magnified
-//   WS_EX_TOOLWINDOW   — Taskbar'da gorunmesin
-//   WS_POPUP           — Title bar, kenar cizgisi yok (tam seffaf)
-//
-// Python analojisi:
-//   tkinter: root.attributes("-alpha", 0.0, "-topmost", True)
-//   PyQt: Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.WindowTransparentForInput
-//
+//   WS_EX_TOOLWINDOW   keeps it out of the taskbar and Alt+Tab
+//   WS_POPUP           no title bar and no border
 // =============================================================================
 bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, size_t monitorIndex)
 {

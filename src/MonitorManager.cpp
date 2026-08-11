@@ -59,9 +59,7 @@ void MonitorManager::Refresh()
 
     std::lock_guard lock(m_mutex);
 
-    // Mevcut zoom state'leri koru — yeni listeye aktarilacak
-    // Python analojisi: 
-    //   old_states = {mon.device_name: mon.zoom for mon in self.monitors}
+    // Keep the current zoom states so they can be carried into the new list.
     std::unordered_map<std::wstring, ZoomState> savedZoomStates;
     for (const auto& mon : m_monitors)
     {
@@ -137,9 +135,10 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
     }
 
     // ── 2. Per-Monitor DPI ──
-    // Windows 8.1+ API — her monitörun gerçek DPI değerini alır.
-    // 96 DPI = %100 scaling, 144 DPI = %150, 192 DPI = %200
-    // Bu değer zoom hesaplamasında ve overlay boyutlandırmada lazım.
+    // Windows 8.1+, and the only way to get a per-monitor DPI rather than the
+    // system one.
+    // 96 DPI is 100% scaling, 144 is 150%, 192 is 200%. Needed for overlay
+    // sizing and reported in the panel.
     UINT dpiX = 96, dpiY = 96;
     HRESULT hr = GetDpiForMonitor(info.hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
     if (SUCCEEDED(hr))
@@ -180,19 +179,15 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
 // Hangi IDXGIOutput'un hangi fiziksel monitore denk geldigini bilmemiz lazim.
 // Eslestirme: DXGI_OUTPUT_DESC.Monitor == MonitorInfo.hMonitor
 //
-// COM Release Sirasi (KRITIK!):
-//   Bu fonksiyonda olusturulan COM objeleri (Factory, Adapter, Output):
-//   - ComPtr<T> kullanıyoruz → scope bitince otomatik Release
-//   - Manuel Release yapmaya GEREK YOK (Python GC gibi dusun)
-//   - Ama Output pointer'ini MonitorInfo'ya kaydediyoruz → 
-//     onun omru MonitorInfo'nun omru kadar uzar
+// Lifetime: the factory, adapters and outputs created here are held in ComPtr
+// and released when the scope ends. The exception is the output pointer stored
+// into MonitorInfo, whose lifetime then follows that MonitorInfo — which is
+// why a display change has to tear the whole chain down rather than patch it.
 // =============================================================================
 bool MonitorManager::MatchDXGIOutputs()
 {
-    LOG_INFO("DXGI output eslestirmesi basliyor...");
+    LOG_INFO("Matching DXGI outputs");
 
-    // DXGI Factory olustur — tum GPU adapter'larina erisim noktası
-    // Python analojisi: factory = DXGIFactory.create()
     ComPtr<IDXGIFactory1> factory;
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
     if (FAILED(hr))
@@ -203,8 +198,7 @@ bool MonitorManager::MatchDXGIOutputs()
 
     bool anyMatched = false;
 
-    // Her GPU adapter'ini iterate et
-    // Python analojisi: for i, adapter in enumerate(factory.get_adapters()):
+    // Walk every adapter; a machine can have more than one GPU.
     for (UINT adapterIdx = 0; ; adapterIdx++)
     {
         ComPtr<IDXGIAdapter1> adapter;
@@ -227,8 +221,7 @@ bool MonitorManager::MatchDXGIOutputs()
             ToUtf8(adapterDesc.Description),
             adapterDesc.DedicatedVideoMemory / (1024 * 1024));
 
-        // Her adapter'in output'larini iterate et
-        // Python analojisi: for j, output in enumerate(adapter.get_outputs()):
+        // Enumerate the outputs on this adapter.
         for (UINT outputIdx = 0; ; outputIdx++)
         {
             ComPtr<IDXGIOutput> output;
@@ -298,9 +291,7 @@ MonitorInfo* MonitorManager::FindByHandle(HMONITOR hMon)
     return nullptr;
 }
 
-// Bir noktanin hangi monitorde oldugunu bul
-// Python analojisi: 
-//   next((m for m in monitors if m.rect.contains(point)), None)
+// Which monitor contains a point.
 MonitorInfo* MonitorManager::FindByPoint(POINT pt)
 {
     for (auto& mon : m_monitors)

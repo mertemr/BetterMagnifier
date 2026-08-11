@@ -188,7 +188,7 @@ bool D3DRenderer::CreateDevice()
     LOG_DEBUG("D3D11 Debug Layer AKTIF");
 #endif
 
-    // Feature level listesi — en yüksekten en düşüğe dene
+    // Highest first; D3D11CreateDevice picks the first the adapter supports.
     D3D_FEATURE_LEVEL featureLevels[] = {
         D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,

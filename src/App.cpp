@@ -1,31 +1,22 @@
 // =============================================================================
-// App.cpp — Ana Uygulama Orkestratoru Implementation
+// App — orchestrator
 // =============================================================================
 //
-// Python analojisi:
-//   class App:
-//       def __init__(self): ...
-//       def run(self):
-//           while self.running:
-//               self.pump_events()
-//               self.update()
+// Glue. Owns the components, starts them in the right order and wires them
+// together; does no real work itself.
 //
-// Bu sinif "tutkal" (glue) katmani. Kendi basina is yapmiyor, sadece
-// component'leri dogru sirada baslatip birbirine bagliyor:
+//   MonitorManager  which monitors exist, and the zoom state of each
+//   D3DRenderer     the GPU device and one swap chain per monitor
+//   DXGICapture     one Desktop Duplication session per monitor
+//   OverlayWindow   one fullscreen click-through window per monitor
+//   InputThread     the low-level hooks, on a thread of their own
+//   HotkeyManager   the RegisterHotKey bindings
+//   TrayIcon        tray menu
 //
-//   MonitorManager  → hangi monitorler var, her birinin zoom state'i
-//   D3DRenderer     → GPU device + her monitor icin swap chain
-//   DXGICapture     → her monitor icin desktop duplication session
-//   OverlayWindow   → her monitor icin tam ekran click-through pencere
-//   HotkeyManager   → Win+Z / Win+Shift+Z / mouse wheel
-//   TrayIcon        → sag tik menusu, cift tik toggle
-//
-// INIT SIRASI KRITIK:
-//   MonitorManager once cagrilmali (kac monitor var bilmeliyiz)
-//   D3DRenderer sonra (device lazim)
-//   Overlay + SwapChain + Capture per-monitor (device'a bagimli)
-//   Hotkey + Tray en son (message window'a bagimli)
-//
+// The startup order is not arbitrary: MonitorManager first because the monitor
+// count drives everything after it, then the D3D device, then the per-monitor
+// overlay/swap chain/capture triple that depends on the device, and finally
+// the hotkeys and tray, which need the message window.
 // =============================================================================
 
 #include "pch.h"
@@ -63,15 +54,15 @@ bool PanelEnabled()
 }
 
 // =============================================================================
-// ApplyStartWithWindows — HKCU Run anahtari
+// ApplyStartWithWindows — the HKCU Run entry
 // =============================================================================
-// HKCU, HKLM degil: HKLM admin ister ve makine genelinde yazar. Exe yolu
-// degisirse anahtar bayatlar, ama her ayar degisiminde yeniden yaziyoruz.
+// HKCU rather than HKLM: HKLM needs administrator rights and writes for every
+// user on the machine. The entry goes stale if the exe moves, but it is
+// rewritten on every settings change.
 //
-// DIKKAT: uygulama requireAdministrator ile derleniyor. Windows, Run altindaki
-// yukseltme isteyen bir girdiyi oturum acilisinda sessizce atlayabilir —
-// guvenilir yol "en yuksek ayricaliklarla" bir Zamanlanmis Gorev. Panel bunu
-// ipucu metninde soyluyor; burada basit olan yapiliyor.
+// Caveat worth knowing: if the binary requires elevation, Windows may silently
+// skip a Run entry at logon. The reliable route in that case is a scheduled
+// task with highest privileges, which is not built. The panel says so.
 // =============================================================================
 bool ApplyStartWithWindows(bool enable)
 {
@@ -112,7 +103,7 @@ bool ApplyStartWithWindows(bool enable)
     else
     {
         st = RegDeleteValueW(key, kValueName);
-        // Deger zaten yoksa istenen son durum saglanmis sayilir.
+        // Already absent counts as success: the requested end state holds.
         ok = (st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND);
 
         if (!ok)
@@ -181,17 +172,13 @@ bool App::Initialize(HINSTANCE hInstance)
 }
 
 // =============================================================================
-// CreateMessageWindow — Gizli mesaj penceresi
+// CreateMessageWindow — an invisible but real window
 // =============================================================================
 //
-// Neden gorunmez ama GERCEK bir pencere (HWND_MESSAGE degil)?
-//   RegisterHotKey ve Shell_NotifyIcon bir HWND istiyor. HWND_MESSAGE parent'li
-//   "message-only window" bunlarin ikisinde de calisir AMA tray context menu'de
-//   sorun cikarir: TrackPopupMenu'nun menuyu dogru kapatmasi icin pencerenin
-//   foreground olabilmesi gerekir, message-only pencereler foreground olamaz.
-//   Bu yuzden normal bir WS_POPUP pencere aciyoruz ve hic ShowWindow demiyoruz.
-//
-// Python analojisi: tkinter'da root.withdraw() — pencere var ama gorunmez.
+// A real WS_POPUP that is simply never shown, not a message-only window.
+// RegisterHotKey and Shell_NotifyIcon both work with HWND_MESSAGE, but the
+// tray's context menu does not: TrackPopupMenu needs an owner that can become
+// foreground in order to dismiss correctly, and a message-only window cannot.
 // =============================================================================
 bool App::CreateMessageWindow()
 {
@@ -265,26 +252,20 @@ void App::OnSessionUnlock()
 // =============================================================================
 bool App::InitializeComponents()
 {
-    // ── 0. Ayarlar ──
-    // Diger her sey ayarlara bagli olabilir, en once yukleniyor.
-    // Dosya yoksa varsayilanlarla devam eder — ilk calistirma hata degil.
+    // Settings first; everything below can depend on them. A missing file is
+    // not an error, it is a first run.
     m_settings.Load();
 
-    // MouseAndFocus acikken capa imlecten koparak odaklanan pencereye gidiyor,
-    // dolayisiyla TIKLAMA GORDUGUN YERE GITMIYOR (bkz. OnFocusChanged).
-    // Ikisi ayni anda mumkun degil. Ayar dosyasi eski varsayilanla yazilmis
-    // olabilir, o yuzden sessizce degistirmek yerine uyariyoruz.
+    // Warn rather than silently override: the file may predate the change.
     if (m_settings.General().followMode == FollowMode::MouseAndFocus)
     {
-        LOG_WARN("FollowMode=MouseAndFocus — zoom bolgesi klavye odagini takip "
-                 "edecek AMA tiklama hizalamasi bozulur. Tiklamanin dogru yere "
-                 "gitmesini istiyorsan settings.ini'de FollowMode=Mouse yap.");
+        LOG_WARN("FollowMode=MouseAndFocus currently has no visible effect — the "
+                 "source rect no longer follows focalPoint. See OnFocusChanged.");
     }
 
-    // ── 1. Monitorler ──
     if (!m_monitorManager.Initialize())
     {
-        LOG_ERROR("MonitorManager baslatilamadi");
+        LOG_ERROR("MonitorManager initialisation failed");
         return false;
     }
 
@@ -315,33 +296,29 @@ bool App::InitializeComponents()
         OverlayWindow overlay;
         if (!overlay.Create(m_hInstance, *mon, i))
         {
-            LOG_ERROR("Monitor {} icin overlay olusturulamadi — bu monitor atlaniyor", i);
+            LOG_ERROR("Overlay creation failed for monitor {}, skipping it", i);
             continue;
         }
 
-        // Swap chain (overlay'in HWND'sine bagli)
         if (!m_renderer.CreateSwapChainForWindow(
                 overlay.GetHwnd(),
                 static_cast<UINT>(mon->Width()),
                 static_cast<UINT>(mon->Height()),
                 i))
         {
-            LOG_ERROR("Monitor {} icin swap chain olusturulamadi", i);
-            // Overlay'i yine tutuyoruz — hotkey/tray calismaya devam etsin
+            // Keep the overlay anyway so the hotkeys and tray still work.
+            LOG_ERROR("Swap chain creation failed for monitor {}", i);
         }
 
-        // Desktop Duplication
         DXGICapture capture;
         if (mon->dxgiOutput)
         {
             if (!capture.Initialize(m_renderer.GetDevice(), mon->dxgiOutput.Get()))
-            {
-                LOG_ERROR("Monitor {} icin capture baslatilamadi", i);
-            }
+                LOG_ERROR("Capture initialisation failed for monitor {}", i);
         }
         else
         {
-            LOG_WARN("Monitor {} icin DXGI output yok — capture edilemez", i);
+            LOG_WARN("No DXGI output for monitor {}, it cannot be captured", i);
         }
 
         m_overlays.push_back(std::move(overlay));
@@ -350,20 +327,18 @@ bool App::InitializeComponents()
 
     if (m_overlays.empty())
     {
-        LOG_ERROR("Hicbir monitor icin overlay olusturulamadi");
+        LOG_ERROR("No overlay could be created for any monitor");
         return false;
     }
 
-    // ── 4. Hotkey + Tray (message window'a bagli) ──
     m_hotkeyManager.Initialize(m_messageHwnd, m_settings.General());
     m_trayIcon.Create(m_messageHwnd, m_hInstance);
 
     m_status.hotkeyFailedMask.store(m_hotkeyManager.LastFailedMask(),
                                     std::memory_order_release);
 
-    // ── 5. Input thread ──
-    // Hook'lar BURADA, render thread'de DEGIL (bkz. InputThread.h).
-    // Basarisiz olursa scroll zoom calismaz ama uygulama ayakta kalir.
+    // The hooks live on their own thread, not this one; see InputThread.h.
+    // Failure here costs wheel zoom and pointer scaling but not the app.
     //
     // Attach and the first layout publish must both happen BEFORE Start: the
     // hook can fire on the very next mouse move, and it reads both.
@@ -374,10 +349,9 @@ bool App::InitializeComponents()
                              m_settings.General().followMode,
                              m_settings.General().hijackMagnifierKeys))
     {
-        LOG_WARN("InputThread baslatilamadi — mouse wheel zoom devre disi");
+        LOG_WARN("InputThread failed to start — wheel zoom and pointer scaling are off");
     }
 
-    // ── 6. Statik monitor bilgilerini snapshot'a yaz ──
     PublishMonitorInfo();
 
     // Push the loaded settings into the input thread. Without this the pointer
@@ -391,16 +365,16 @@ bool App::InitializeComponents()
 }
 
 // =============================================================================
-// SetupCallbacks — Component'leri birbirine bagla
+// SetupCallbacks — wire the components together
 // =============================================================================
-// Python analojisi: button.config(command=self.on_click)
-// Lambda'lar "this"i yakaliyor — App yasadigi surece gecerli.
+// The lambdas capture "this" and stay valid for as long as App does, which is
+// the whole process lifetime.
 // =============================================================================
 void App::SetupCallbacks()
 {
     m_hotkeyManager.SetToggleZoomCallback([this] { OnToggleZoom(); });
     m_hotkeyManager.SetFreezeCallback([this] { OnFreeze(); });
-    // Scroll artik InputThread'den WM_APP_SCROLL_ZOOM olarak geliyor.
+    // Wheel zoom arrives from InputThread as WM_APP_ZOOM_STEP.
 
     m_trayIcon.SetToggleCallback([this] { OnToggleZoom(); });
     m_trayIcon.SetExitCallback([] { PostQuitMessage(0); });
@@ -412,35 +386,33 @@ void App::SetupCallbacks()
 }
 
 // =============================================================================
-// Run — Hybrid message loop (game-loop pattern)
+// Run — hybrid message and render loop
 // =============================================================================
 //
-// GetMessage yerine PeekMessage:
-//   GetMessage mesaj gelene kadar BLOKLAR — render dongusu durur.
-//   PeekMessage bloklamaz — mesaj yoksa hemen doner, biz render yapabiliriz.
+// PeekMessage rather than GetMessage: GetMessage blocks until a message
+// arrives, which would stop the render loop dead. Peek returns immediately
+// when the queue is empty and the frame gets rendered in that gap.
 //
-// Frame pacing:
-//   Zoom aktifse Present(vSync=true) bizi monitor refresh rate'ine kilitler
-//   (60/144 Hz). Bu dogal frame limiter — ekstra Sleep gerekmez.
-//   Zoom pasifse hicbir sey render edilmiyor, o zaman CPU'yu yakmamak icin
-//   kisa Sleep koyuyoruz.
+// Pacing comes from Present with vSync while zoom is active, which locks the
+// loop to the refresh rate for free. With zoom off nothing is presented, so
+// there is no such brake and the loop sleeps instead of spinning.
 // =============================================================================
 int App::Run()
 {
     if (!m_initialized)
     {
-        LOG_ERROR("Run() cagirildi ama App initialize edilmemis!");
+        LOG_ERROR("Run() called before Initialize()");
         return 1;
     }
 
     m_running = true;
     MSG msg{};
 
-    LOG_INFO("Message loop basladi");
+    LOG_INFO("Message loop started");
 
     while (m_running)
     {
-        // ── Bekleyen tum mesajlari isle ──
+        // Drain the queue before rendering.
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
         {
             if (msg.message == WM_QUIT)
@@ -604,16 +576,16 @@ void App::Update()
             if (m_overlays[i].IsVisible())
                 m_overlays[i].Hide();
 
-            // Zoom kapaliyken FPS anlamsiz — panelde "—" gorunmesi icin sifirla
+            // FPS is meaningless with zoom off; zero it so the panel shows a dash.
             const size_t slot = (i < StatusSnapshot::kMaxMonitors)
                               ? i : StatusSnapshot::kMaxMonitors - 1;
             st.fps.store(0.0f, std::memory_order_relaxed);
             m_lastFrameTime[slot] = {};
 
-            // Son cizilen bolgeyi de sifirla. Yoksa zoom tekrar acildiginda
-            // ayni bolge cikarsa "degisen yok" deyip cizimi atlariz —
-            // FLIP_DISCARD'da Present sonrasi back buffer icerigi TANIMSIZ,
-            // yani ekranda cop gorunur.
+            // Clear the remembered rect too. Without this, zooming back in on
+            // the same region reads as "nothing changed" and the draw is
+            // skipped — and after a Present the back buffer contents are
+            // undefined, so what appears on screen is garbage.
             m_lastSrcRect[slot] = RECT{};
             continue;
         }
@@ -623,11 +595,9 @@ void App::Update()
         if (!m_overlays[i].IsVisible())
             m_overlays[i].Show();
 
-        // ── Freeze aktif degilse focal point'i fareye kilitle ──
-        //
-        // ONEMLI: sadece fare GERCEKTEN HAREKET ETTIYSE. Yoksa klavye odagi
-        // takibinin (OnFocusChanged) yazdigi focal point'i her frame eziyoruz
-        // ve Tab ile odak degistirmek hicbir sey yapmiyor gibi gorunuyor.
+        // Only when the cursor has genuinely moved. Updating unconditionally
+        // overwrites whatever OnFocusChanged wrote on every frame, which makes
+        // focus following look like it does nothing at all.
         const bool cursorMoved = (cursor.x != m_lastCursorPos.x)
                               || (cursor.y != m_lastCursorPos.y);
 
@@ -636,56 +606,41 @@ void App::Update()
             mon->zoom.focalPoint = cursor;
         }
 
-        // ── Capture recovery (fullscreen oyun acilip kapaninca) ──
+        // Duplication is lost on things like a fullscreen game taking the
+        // output. Retrying is free; failure just means trying again next frame.
         if (m_captures[i].NeedsReinit())
-        {
             m_captures[i].Reinitialize();
-            // Basarisiz olduysa sorun degil — sonraki frame tekrar denenir
-        }
 
         RenderMonitor(i);
     }
 
     UpdatePointerCompositing(anyActive);
 
-    // Hicbir monitor aktif degil → bosa CPU yakma.
-    // Zoom aktifse Present(vSync) bizi zaten refresh rate'e kilitliyor.
-    // ponytail: sabit 8ms; idle'da MsgWaitForMultipleObjects daha dogru olur
-    // ama olay bazli uyanma icin overlay/hotkey akisini yeniden kurmak gerekir.
-    // Periyodik yedek: olay bazli tetikleme (WM_APP_ASSERT_TOPMOST) asil yol,
-    // bu sadece kacan durumlar icin ag. 250 ms yeterince seyrek.
+    // A periodic backstop only. The real mechanism is event-driven
+    // (WM_APP_ASSERT_TOPMOST); this catches whatever slips past it, and is
+    // rate-limited inside AssertOverlaysTopmost.
     if (anyActive)
         AssertOverlaysTopmost();
 
-    // ── Bosa donmeyi engelle ──
-    // Zoom aktifken Present(vSync) loop'u dogal olarak frame hizina kilitler.
-    // Ama hicbir monitore Present etmediysek (zoom kapali, ya da hicbir sey
-    // degismedigi icin cizim atlandi) o fren yok — loop CPU'yu yakar.
+    // Present with vSync paces the loop while zoom is on. When nothing was
+    // presented — zoom off, or the frame skipped because nothing changed —
+    // that brake is absent and the loop would spin a core.
     //
-    // 4 ms, degisimi fark etmek icin yeterince kisa (240 Hz'lik yoklama),
-    // bos dongu icin yeterince uzun.
+    // 4 ms is short enough to notice a change (a 240 Hz poll) and long enough
+    // to not be a spin.
     if (!m_presentedThisTick)
         Sleep(anyActive ? 4 : 8);
 
-    // Bir sonraki frame'de "fare hareket etti mi" karsilastirmasi icin
     m_lastCursorPos = cursor;
 }
 
 // =============================================================================
-// RenderMonitor — Tek monitor icin capture → render → present
+// RenderMonitor — capture, render and present one monitor
 // =============================================================================
 //
-// Zoom matematigi:
-//   Ekran 1920x1080, zoom = 2.0x ise:
-//     Kaynak bolge = 1920/2 x 1080/2 = 960x540
-//     Bu 960x540 bolge, 1920x1080 overlay'e gerilir → 2x buyume
-//
-//   Focal point = bu bolgenin merkezi (genelde fare pozisyonu).
-//   Bolge monitor sinirlarini asmasin diye clamp ediyoruz.
-//
-// Python analojisi:
-//   w, h = mon_w / zoom, mon_h / zoom
-//   left = clamp(focal_x - w/2, 0, mon_w - w)
+// The arithmetic: on a 1920x1080 monitor at 2x, the source region is 960x540,
+// stretched across the full 1920x1080 overlay. Where that region sits comes
+// from ViewportController, not from here.
 // =============================================================================
 void App::RenderMonitor(size_t monitorIndex)
 {
@@ -700,21 +655,18 @@ void App::RenderMonitor(size_t monitorIndex)
     if (!capture.IsInitialized())
         return;
 
-    // ── Frame yakala ──
-    // timeout 0 = bloklamadan sor: yeni frame varsa al, yoksa hemen don.
-    // Bloklamiyoruz cunku frame gelmese de eski goruntuyu tekrar sunmamiz gerekir
-    // (yoksa fare hareket ederken zoom bolgesi guncellenmez).
+    // Timeout 0: take a frame if one is ready, otherwise return immediately.
+    // Blocking would be wrong — with no new frame we still need to re-present
+    // the previous one, or the view would not follow a moving source rect.
     CapturedFrame frame = capture.AcquireFrame(0);
 
-    // Yeni frame GELMESE DE ciziyoruz.
+    // Drawn even when no new frame arrived.
     //
-    // Desktop Duplication ekran icerigi degismedikce frame vermez. Eskiden
-    // sadece isNewFrame durumunda render ediliyordu; sabit bir ekranda fareyi
-    // gezdirince zoom bolgesi oldugu yerde kaliyordu. Renderer son frame'in
-    // kopyasini tuttugu icin artik focal point degistiginde onu yeniden
-    // olceklendirip sunabiliyoruz.
+    // Desktop Duplication produces nothing while the screen content is static.
+    // Rendering only on isNewFrame meant that on a still screen, moving the
+    // mouse left the magnified region frozen where it was. The renderer keeps a
+    // copy of the last frame, so a moved source rect can be re-sampled from it.
     {
-        // ── Zoom bolgesini hesapla (monitor-local koordinatlar) ──
         // Zoom comes from the SNAPSHOT, not from MonitorManager, and the
         // distinction is the whole fix for the slide-in artefact while zooming.
         //
@@ -735,8 +687,8 @@ void App::RenderMonitor(size_t monitorIndex)
             static_cast<float>(vp.zoom.load(std::memory_order_relaxed)),
             ZoomState::kMinZoom);
 
-        // Yeni frame yoksa frame.width/height sifir gelir — monitor
-        // boyutuna duseriyoruz (capture zaten monitor boyutunda acildi).
+        // With no new frame the width and height come back zero; fall back to
+        // the monitor size, which is what the capture was opened at anyway.
         const long monW = (frame.width  > 0) ? static_cast<long>(frame.width)  : mon->Width();
         const long monH = (frame.height > 0) ? static_cast<long>(frame.height) : mon->Height();
 
@@ -841,10 +793,8 @@ void App::RenderMonitor(size_t monitorIndex)
             }
         }
 
-        // ── Degisen bir sey yoksa hic cizme ──
-        // Ne yeni frame geldi, ne kaynak bolge oynadi, ne de imlec kimildadi:
-        // ekranda gosterilecek yeni bir sey yok. Present cagirmak sadece
-        // vSync'te bloklayip GPU yakmak olurdu.
+        // Nothing new: no frame, no source movement, no cursor movement.
+        // Presenting anyway would only block on vSync and burn GPU time.
         const RECT& lastRect = m_lastSrcRect[rectSlot];
 
         const bool rectSame = (lastRect.left   == srcRect.left)
@@ -866,7 +816,7 @@ void App::RenderMonitor(size_t monitorIndex)
         m_lastSpritePos[rectSlot]   = spritePos;
         m_lastSpriteShape[rectSlot] = spriteShape;
 
-        // Yeni frame varsa onu ver; yoksa nullptr = "son frame'i tekrar kullan".
+        // nullptr means "re-use the last frame".
         ID3D11Texture2D* newFrame = (frame.isNewFrame && frame.texture)
                                   ? frame.texture.Get()
                                   : nullptr;
@@ -900,25 +850,24 @@ void App::RenderMonitor(size_t monitorIndex)
                 static_cast<float>(shape.height) * scale);
         }
 
-        // ── vSync SADECE flip modda ──
-        // Layered pencerede Present, DWM'in layered surface'ini guncellemesini
-        // gerektiriyor; 2560x1440'ta bu pahali. Ustune vblank beklemesi
-        // eklenince render thread yuz milisaniyelerce bloklanip mesaj
-        // pompalamayi birakiyor — WM_HOTKEY islenmiyor, uygulama donuyor.
-        // Gozlenen davranis buydu: tuslar bir sure calisti, sonra tamamen sustu.
+        // vSync only in flip mode.
         //
-        // Layered modda vSync KAPALI. Tearing riski var ama donan bir
-        // uygulamadan iyidir. Frame hizini "degisen yok -> cizme" mantigi ve
-        // asagidaki Sleep zaten sinirliyor.
+        // On a layered window, Present makes DWM update the layered surface,
+        // which at 2560x1440 is expensive on its own. Waiting for vblank on top
+        // of that blocked the render thread for hundreds of milliseconds at a
+        // time, so it stopped pumping messages, WM_HOTKEY went unprocessed and
+        // the application appeared to hang. That was the observed behaviour:
+        // the keys worked for a while and then went silent entirely.
+        //
+        // So layered mode runs without vSync. Tearing is possible; a frozen
+        // application is worse. Frame rate is already bounded by the
+        // nothing-changed check above and the sleep in Update.
         m_renderer.Present(monitorIndex, UseFlipOverlay());
         m_presentedThisTick = true;
 
-        // ── FPS olcumu ──
-        // Present'ten SONRA olcuyoruz, cunku vSync bekleyisi de frame
-        // suresinin parcasi. Iki frame arasi sureyi 1/dt ile FPS'e ceviriyoruz.
-        //
-        // Python analojisi: time.perf_counter() farki. Fark: steady_clock
-        // monotonic garantisi veriyor — sistem saati geri alinsa bile bozulmaz.
+        // Measured after Present, because the vSync wait is part of the frame.
+        // steady_clock rather than system_clock: it is monotonic, so the
+        // reading survives the wall clock being adjusted underneath it.
         const auto now = std::chrono::steady_clock::now();
         const size_t slot = (monitorIndex < StatusSnapshot::kMaxMonitors)
                           ? monitorIndex : StatusSnapshot::kMaxMonitors - 1;
@@ -941,28 +890,28 @@ void App::RenderMonitor(size_t monitorIndex)
         lastTime = now;
     }
 
-    // AcquireFrame'den sonra HER DURUMDA ReleaseFrame — yoksa sonraki
-    // AcquireFrame "frame already acquired" ile patlar.
+    // Unconditional after AcquireFrame: skipping it makes the next
+    // AcquireFrame fail with "frame already acquired".
     capture.ReleaseFrame();
 }
 
 // =============================================================================
 // AssertOverlaysTopmost — menu/popup'larin uzerinde kal
 // =============================================================================
-// Iki kaynaktan cagriliyor:
-//   1. WM_APP_ASSERT_TOPMOST — input thread yeni bir popup/menu dogdugunu
-//      gorunce (EVENT_SYSTEM_MENUPOPUPSTART / EVENT_OBJECT_SHOW). ASIL YOL:
-//      dropdown'lar saniyenin altinda acilip kullaniliyor, yoklama yetismiyor.
-//   2. Update() her turda — kacan durumlar icin yedek ag.
+// Two callers:
+//   1. WM_APP_ASSERT_TOPMOST, when the input thread sees a popup or menu
+//      appear. This is the real path — a dropdown opens and is used inside a
+//      second, far faster than any poll would catch.
+//   2. Update, every tick, as a backstop for whatever slips past.
 //
-// RATE LIMIT: EVENT_OBJECT_SHOW cok sik tetikleniyor. 40 ms alt sinir, iki
-// ardisik frame'den kisa; kullanici farki gormez ama SetWindowPos firtinasi
-// ve z-order gurultusu olusmaz.
+// Rate limited because EVENT_OBJECT_SHOW fires constantly. 40 ms is under two
+// frames, so it is invisible to the user, but it stops a SetWindowPos storm
+// and the z-order churn that comes with it.
 // =============================================================================
 void App::AssertOverlaysTopmost()
 {
-    // BM_NO_TOPMOST_FIGHT=1 ile kapatilabilir — popup canli kalir ama
-    // buyutulmez ve cift gorunur (bkz. pch.h FightPopupZOrder).
+    // BM_NO_TOPMOST_FIGHT=1 disables this: popups stay live but unmagnified
+    // and doubled. See FightPopupZOrder in pch.h.
     if (!FightPopupZOrder())
         return;
 
@@ -984,17 +933,16 @@ void App::AssertOverlaysTopmost()
         }
     }
 
-    // Hicbir overlay gorunmuyorsa zaman damgasini guncellemiyoruz — zoom
-    // acildiginda ilk popup icin rate limit bosa harcanmasin.
+    // Only stamp the time when something was actually asserted, so the rate
+    // limit is not already spent on the first popup after zoom comes on.
     if (any)
         m_lastTopmostAssert = now;
 }
 
 // =============================================================================
-// PublishMonitorInfo — statik monitor bilgilerini snapshot'a yaz
+// PublishMonitorInfo — the static monitor fields, for the panel's card headers
 // =============================================================================
-// Panel bunlari kart basliklarinda gosteriyor. Sadece init ve
-// WM_DISPLAYCHANGE'de cagriliyor — her frame degil.
+// Init and WM_DISPLAYCHANGE only. None of this changes per frame.
 // =============================================================================
 void App::PublishMonitorInfo()
 {
@@ -1034,7 +982,7 @@ void App::OnToggleZoom()
     size_t index = 0;
     if (!ResolveMonitorIndex(kFocusedMonitor, index))
     {
-        LOG_WARN("Fare hicbir monitorde bulunamadi, toggle atlandi");
+        LOG_WARN("Cursor is on no known monitor, toggle skipped");
         return;
     }
 
@@ -1069,21 +1017,19 @@ void App::ToggleZoomOnMonitor(size_t i)
             ? std::clamp(ms.lastZoom, ms.minZoom, ms.maxZoom)
             : std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
 
-        // GUVENLIK AGI: 1.0x'te acmak "zoom calismiyor" demek.
-        // Bozuk/eski bir settings.ini (LastZoom=1) bu duruma yol
-        // aciyordu; kullanici dosyayi silmeden de duzelsin diye
-        // burada tabana basiyoruz.
+        // Turning zoom on at 1.0x reads as "zoom is broken". A stale
+        // settings.ini with LastZoom=1 used to produce exactly that, so the
+        // floor is enforced here rather than expecting anyone to delete a file.
         if (startZoom <= ms.minZoom)
             startZoom = std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
 
         m_monitorManager.SetZoom(i, startZoom);
-        m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Aktif");
+        m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: on");
     }
     else
     {
-        // Kapaniyor — kullanilan seviyeyi SIMDI sakla.
-        // Shutdown'a birakmak calismiyordu: orada zoomLevel coktan
-        // 1.0'a sifirlanmis oluyor ve LastZoom=1 diske yaziliyordu.
+        // Save the level in use now, not at shutdown. By then zoomLevel has
+        // already been reset to 1.0 and LastZoom=1 is what reaches the disk.
         if (wasActive
             && m_settings.General().rememberZoomLevel
             && levelInUse > ms.minZoom)
@@ -1093,7 +1039,7 @@ void App::ToggleZoomOnMonitor(size_t i)
             m_settings.SetMonitor(mon->deviceName, updated);
         }
 
-        m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Pasif");
+        m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: off");
     }
 }
 
@@ -1126,12 +1072,13 @@ void App::OnFreeze()
 //   Zoom KAPALI + yon(+)  -> ac (baslangic seviyesinde)
 //   Zoom ACIK  + yon(+)   -> bir adim buyut
 //   Zoom ACIK  + yon(-)   -> bir adim kucult; minZoom'a inince KAPAT
-//   Zoom KAPALI + yon(-)  -> hicbir sey (kapali olani daha fazla kapatamayiz)
+//   off + down  -> nothing; there is nothing below off
 //
-// Fare tekerlegi icin eski davranistan farki: eskiden sadece zoom AKTIFKEN
-// tepki veriyordu cunku duz tekerlek yutulmuyordu ve normal kaydirmayi
-// bozmamak gerekiyordu. Artik Ctrl+Alt+tekerlek yutuluyor, yani kombinasyon
-// bize ait — zoom'u acmasi da mesru.
+// Stepping up turns zoom ON, which it did not used to. The old behaviour only
+// responded while zoom was already active, because the bare wheel was not
+// swallowed and stealing it would have broken normal scrolling. Now that
+// Ctrl+Alt+wheel is swallowed the combination is ours, and using it to turn
+// zoom on is fair game.
 // =============================================================================
 void App::OnZoomStep(int direction)
 {
@@ -1167,7 +1114,7 @@ void App::OnZoomStep(int direction)
                 : std::clamp(ms.minZoom + ms.zoomStep, ms.minZoom, ms.maxZoom);
 
             m_monitorManager.SetZoom(i, startZoom);
-            m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Aktif");
+            m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: on");
 
             LOG_INFO("Monitor {} zoom acildi ({:.2f}x) — Win+arti / Ctrl+Alt+tekerlek", i, startZoom);
             return;
@@ -1194,7 +1141,7 @@ void App::OnZoomStep(int direction)
             }
 
             m_monitorManager.ToggleZoom(i);
-            m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: Pasif");
+            m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: off");
             LOG_INFO("Monitor {} zoom kapandi (minZoom'a inildi)", i);
         }
 
@@ -1203,13 +1150,13 @@ void App::OnZoomStep(int direction)
 }
 
 // =============================================================================
-// OnFocusChanged — klavye odagi degisti, focal point'i oraya kaydir
+// OnFocusChanged — keyboard focus moved, follow it
 // =============================================================================
-// Odaklanan pencerenin MERKEZINI focal point yapiyoruz. Daha isabetli olan
-// caret pozisyonu UI Automation gerektiriyor ve uygulama bazinda tutarsiz
-// calisiyor — kapsam disi.
+// Targets the centre of the focused window. The caret position would be more
+// precise, but reading it needs UI Automation and works inconsistently from
+// one application to the next; out of scope.
 //
-// Freeze aktifse dokunmuyoruz: kullanici bilincli olarak sabitlemis.
+// Left alone while frozen: the user pinned the view on purpose.
 // =============================================================================
 void App::OnFocusChanged(HWND focused)
 {
@@ -1233,33 +1180,29 @@ void App::OnFocusChanged(HWND focused)
     if (!target)
         return;
 
-    // Sadece zoom AKTIF ve frozen DEGILSE kaydir
+    // Only when that monitor is actually magnified and not frozen.
     if (!target->zoom.isActive || target->zoom.isFrozen)
         return;
 
-    // ── SetCursorPos DENENDI VE GERI ALINDI ──
+    // SetCursorPos was tried here and reverted.
     //
-    // Fikir su idi: "capa == imlec" degismez kuralini korumak icin capa'yi
-    // degil IMLECI tasimak. Boylece odak takibi ile tiklama hizalamasi
-    // birbirini bozmayacakti.
+    // The idea was to move the CURSOR rather than the anchor, preserving the
+    // "anchor == cursor" invariant so focus following and click alignment could
+    // both hold at once.
     //
-    // Pratikte yikici cikti. Imleci tasimak, yeni konumdaki pencerede
-    // hover/odak tetikliyor -> yeni EVENT_OBJECT_FOCUS -> yeni tasima ->
-    // GERI BESLEME DONGUSU. Context menusunde asagi inerken imlec yukari
-    // firliyor, ekran disina cikiyor.
+    // It was destructive in practice. Moving the pointer triggers hover and
+    // focus in whatever now sits under it, which raises another
+    // EVENT_OBJECT_FOCUS, which moves it again: a feedback loop. Walking down a
+    // context menu sent the pointer flying up and off the screen.
     //
-    // "Imlec odaklanan pencerenin icindeyse dokunma" korumasi da yetmedi:
-    // menu acikken odak menuye degil SAHIBI pencereye gidebiliyor, o zaman
-    // imlec o pencerenin disinda kaliyor ve merkeze firlatiliyor.
+    // Guarding with "skip if the cursor is already inside the focused window"
+    // did not save it either — a menu can leave focus on its owner window while
+    // the pointer sits in the menu, so the guard misses and the pointer gets
+    // thrown to the owner's centre.
     //
-    // Ders: imleci kullanicidan habersiz tasimak, konuma tepki veren her UI
-    // ile yaris haline giriyor. Bir magnifier bunu yapmamali.
-    //
-    // Simdi sadece capa'yi tasiyoruz — eski, ongorulebilir davranis.
-    //
-    // KABUL EDILEN BEDEL: bu mod acikken capa imlecten kopuyor, dolayisiyla
-    // tiklama gordugun yere gitmiyor. Ikisi ayni anda mumkun degil. Bu yuzden
-    // varsayilan FollowMode::Mouse ve acilista uyari basiyoruz.
+    // The lesson: moving the pointer without the user asking races every piece
+    // of UI that reacts to pointer position. A magnifier has no business doing
+    // it.
     //
     // INERT SINCE THE VIEWPORT MOVED TO ViewportController. focalPoint no
     // longer feeds the source rect, so FollowMode::MouseAndFocus currently does
@@ -1306,13 +1249,14 @@ bool App::ResolveMonitorIndex(WPARAM wparam, size_t& outIndex) const
 }
 
 // =============================================================================
-// ApplySettings — GUI ayarlari degistirdi, motora uygula
+// ApplySettings — settings changed, push them into the engine
 // =============================================================================
-// GUI once SettingsStore'u yazdi SONRA bu mesaji postaladi, yani buradaki
-// okuma guvenli — yaris yok.
+// The panel writes SettingsStore and only then posts the message, so reading
+// here is safe without synchronisation. That ordering is load-bearing; reverse
+// it and this reads values that have not been written yet.
 // =============================================================================
 // =============================================================================
-// ApplyPointerSettings — edge-push ve imlec ayarlarini input thread'e ver
+// ApplyPointerSettings — push the pointer and edge-push settings to the input thread
 // =============================================================================
 //
 // Separate from ApplySettings because it has to run at STARTUP too, and
@@ -1390,10 +1334,11 @@ void App::ApplySettings()
 }
 
 // =============================================================================
-// OnShowPanel — kontrol panelini goster
+// OnShowPanel — open the control panel
 // =============================================================================
-// Panel kendi STA thread'inde yasiyor; ilk cagri thread'i kuruyor. Windows App
-// Runtime yoksa panel acilmaz, cekirdek etkilenmez (bkz. ControlPanel.h).
+// The panel lives on its own STA thread; the first call creates it. Without the
+// Windows App Runtime the panel does not open and the magnifier is unaffected.
+// See ControlPanel.h.
 // =============================================================================
 void App::OnShowPanel()
 {
@@ -1401,19 +1346,19 @@ void App::OnShowPanel()
 }
 
 // =============================================================================
-// OnDisplayChange — Monitor takildi/cikarildi/cozunurluk degisti
+// OnDisplayChange — a monitor was added, removed or resized
 // =============================================================================
 //
-// MonitorManager::Refresh() listeyi SIFIRDAN kuruyor — eski MonitorInfo'daki
-// dxgiOutput pointer'lari gecersiz oluyor. Bu yuzden capture/overlay/swap chain
-// zincirinin TAMAMINI yikip yeniden kurmak zorundayiz.
+// MonitorManager::Refresh rebuilds the list from scratch, which invalidates
+// every dxgiOutput pointer the old MonitorInfo held. The whole
+// capture/overlay/swap-chain chain therefore has to be torn down and rebuilt,
+// not patched.
 //
-// Zoom state'leri MonitorManager device name uzerinden koruyor, onlari
-// kaybetmiyoruz.
+// Zoom state survives: MonitorManager carries it across keyed by device name.
 // =============================================================================
 void App::OnDisplayChange()
 {
-    LOG_INFO("Display degisikligi — pipeline yeniden kuruluyor");
+    LOG_INFO("Display change — rebuilding the pipeline");
 
     // Yikma sirasi: capture (duplication session) → swap chain → overlay pencere
     m_captures.clear();
@@ -1468,12 +1413,10 @@ void App::OnDisplayChange()
 }
 
 // =============================================================================
-// MessageWndProc — Gizli mesaj penceresinin mesaj isleyicisi
+// MessageWndProc — window procedure for the hidden message window
 // =============================================================================
-//
-// Neden static? Win32 WndProc'lar C fonksiyon pointer'i olmak zorunda,
-// member function olamaz. s_instance ile App'e ulasiyoruz.
-// Python'da bu sorun yok — bound method zaten callable.
+// Static because a WndProc must be a plain function pointer; the instance is
+// reached through s_instance.
 // =============================================================================
 LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -1497,8 +1440,8 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_APP_ZOOM_STEP:
         if (s_instance)
         {
-            // wParam kZoomIn (1) veya kZoomOut ((WPARAM)-1).
-            // WPARAM isaretsiz — isaretli okumak icin intptr_t'den geciyoruz.
+            // kZoomOut is (WPARAM)-1 and WPARAM is unsigned, so the round trip
+            // goes through intptr_t to read the sign back.
             const int dir = (static_cast<intptr_t>(wParam) > 0) ? +1 : -1;
             s_instance->OnZoomStep(dir);
         }
@@ -1586,19 +1529,17 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 }
 
 // =============================================================================
-// Shutdown — Ters sirada yik
+// Shutdown — tear down in dependency order
 // =============================================================================
-//
-// C++ RAII kurali: son olusturulan ilk yikilir (LIFO).
-// Burada elle sirayi zorluyoruz cunku member declaration sirasi bizim
-// istedigimiz yikma sirasi degil.
+// Forced by hand rather than left to destructors: member declaration order is
+// not the order these have to die in.
 // =============================================================================
 void App::Shutdown()
 {
     if (!m_initialized)
         return;
 
-    LOG_INFO("App kapatiliyor...");
+    LOG_INFO("App shutting down");
 
     m_running = false;
 
@@ -1608,8 +1549,8 @@ void App::Shutdown()
     UpdatePointerCompositing(false);
     m_cursorCache.Clear();
 
-    // 0. GUI thread'i once durdur — panel m_settings ve m_status'a pointer
-    // tutuyor, onlar gecersizlesmeden thread'in gitmesi lazim.
+    // GUI thread first: the panel holds pointers to m_settings and m_status and
+    // has to be gone before those become invalid.
     m_controlPanel.Stop();
 
     // 1. Input thread'i sonra durdur — hook'lar kalkmadan mesaj penceresini
@@ -1651,13 +1592,12 @@ void App::Shutdown()
             if (!mon)
                 continue;
 
-            // SADECE zoom acik olan monitorler icin yaz.
+            // Only monitors that are currently zoomed.
             //
-            // Eskiden kosulsuz yaziliyordu; zoom kapali bir monitorde
-            // zoomLevel 1.0 oldugu icin LastZoom=1 kaydediliyordu ve bir
-            // sonraki acilista zoom 1.0x'te "aciliyordu" — yani hic
-            // buyutmuyordu. Kapatma anindaki seviye zaten OnToggleZoom'da
-            // saklaniyor.
+            // Writing unconditionally stored LastZoom=1 for every idle monitor,
+            // because an inactive monitor's zoomLevel is 1.0. The next session
+            // then "turned on" at 1.0x and magnified nothing. The level in use
+            // at the moment of switching off is already saved in OnToggleZoom.
             if (!mon->zoom.isActive)
                 continue;
 

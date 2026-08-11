@@ -322,9 +322,8 @@ bool SettingsStore::Load()
         GetPrivateProfileIntW(L"General", L"LockPointerToMonitor", 1, file.c_str()) != 0;
 
     // ── Per-monitor section'lari ──
-    // GetPrivateProfileSectionNamesW tum section isimlerini '\0' ile ayrilmis
-    // tek bir buffer'da veriyor, sonu cift '\0'.
-    // Python analojisi: config.sections()
+    // GetPrivateProfileSectionNamesW returns every section name in one buffer,
+    // separated by '\0' and terminated by a double '\0'.
     {
         std::vector<wchar_t> names(8192);
         const DWORD len = GetPrivateProfileSectionNamesW(
@@ -443,10 +442,10 @@ void SettingsStore::SetMonitor(const std::wstring& deviceName, const MonitorSett
 
 #ifdef _DEBUG
 // =============================================================================
-// Self-Check — assert tabanli
+// Self-check
 // =============================================================================
-// Framework yok, fixture yok. Mantik bozulursa uygulama Debug'da aninda duser.
-// Python analojisi: if __name__ == "__main__" icindeki assert'ler.
+// No framework and no fixtures. If the logic breaks, a Debug build stops at
+// the assertion instead of misbehaving quietly later.
 // =============================================================================
 void SettingsStoreSelfCheck()
 {
