@@ -28,6 +28,8 @@
 
 #include <windows.h>
 #include <atomic>
+#include <climits>
+#include <cstdint>
 
 namespace BetterMagnifier {
 
@@ -112,6 +114,15 @@ private:
     // anything more and the only thing left beyond it is the next monitor.
     bool EdgeIsSaturated(std::size_t index, int edge) const;
 
+    // The last few SetCursorPos targets. An injected move at one of them that
+    // is not the newest is our own echo arriving late, and has to be dropped
+    // rather than allowed to pull the cursor backwards. Four covers more of our
+    // own moves than can plausibly be in flight at once.
+    static constexpr std::size_t kRecentTargets = 4;
+
+    void RememberTarget(POINT target);
+    bool WasRecentTarget(POINT p) const;
+
     ViewportController* m_viewport = nullptr;
     ViewportSnapshot*   m_snapshot = nullptr;
 
@@ -125,6 +136,18 @@ private:
     double       m_y = 0.0;
     POINT        m_lastSet{0, 0};
     EdgeBreakout m_breakout;
+
+    // LONG_MIN rather than zero: (0,0) is the primary monitor's top-left corner
+    // and a real place for a foreign SetCursorPos to aim at.
+    POINT       m_recent[kRecentTargets]{ {LONG_MIN, LONG_MIN}, {LONG_MIN, LONG_MIN},
+                                          {LONG_MIN, LONG_MIN}, {LONG_MIN, LONG_MIN} };
+    std::size_t m_recentNext = 0;
+
+    // Diagnostics only, written in the hook and read on disable. Atomic for the
+    // cross-thread read, relaxed because nothing is ordered against them.
+    std::atomic<std::uint64_t> m_echoLive{0};
+    std::atomic<std::uint64_t> m_echoStale{0};
+    std::atomic<std::uint64_t> m_foreignInjected{0};
 };
 
 #ifdef _DEBUG

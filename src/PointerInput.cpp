@@ -130,6 +130,20 @@ void PointerInput::SetEnabled(bool enabled)
         m_snapshot->pointerScaled.store(enabled, std::memory_order_relaxed);
 
     LOG_INFO("Pointer scaling {}", enabled ? "ON" : "OFF");
+
+    // Reported on the way out, where logging is free, because the hook must not
+    // log. These three numbers are the only evidence of how the injected path
+    // actually behaves on a given machine, and every guess about it so far has
+    // had to be paid for later: echoLive near zero would mean SetCursorPos is
+    // not echoing here at all, and a large foreign count means something else
+    // is driving the cursor.
+    if (!enabled)
+    {
+        LOG_INFO("Injected moves this session: echo={} staleEcho={} foreign={}",
+                 m_echoLive.exchange(0, std::memory_order_relaxed),
+                 m_echoStale.exchange(0, std::memory_order_relaxed),
+                 m_foreignInjected.exchange(0, std::memory_order_relaxed));
+    }
 }
 
 void PointerInput::Resync()
@@ -147,6 +161,20 @@ void PointerInput::Resync()
         m_snapshot->pointerX.store(m_x, std::memory_order_relaxed);
         m_snapshot->pointerY.store(m_y, std::memory_order_relaxed);
     }
+}
+
+void PointerInput::RememberTarget(POINT target)
+{
+    m_recent[m_recentNext] = target;
+    m_recentNext = (m_recentNext + 1) % kRecentTargets;
+}
+
+bool PointerInput::WasRecentTarget(POINT p) const
+{
+    for (const POINT& t : m_recent)
+        if (t.x == p.x && t.y == p.y)
+            return true;
+    return false;
 }
 
 bool PointerInput::EdgeIsSaturated(std::size_t index, int edge) const
@@ -193,14 +221,37 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
     };
 
     // Our own SetCursorPos comes back through the hook as an injected event at
-    // exactly the position we set. Anything else injected is a foreign
-    // SetCursorPos — a game, RDP, returning from Ctrl+Alt+Del — and means our V
-    // is stale, so resync rather than treating it as motion.
+    // exactly the position we set. Three cases, and they need three different
+    // answers — treating them as two is what made clicks land wrong now and
+    // then.
     if (data.flags & LLMHF_INJECTED)
     {
         if (p.x == m_lastSet.x && p.y == m_lastSet.y)
-            return true;            // our echo: consume, change nothing
+        {
+            // Our latest move, and the cursor is already sitting here. Pass it
+            // on without touching V: this event IS the WM_MOUSEMOVE the window
+            // underneath gets. Swallowing it, as this used to, left
+            // applications with no pointer motion at all while zoomed — hover,
+            // drag and text selection went by whatever moves happened to leak
+            // through, which is exactly the intermittent misbehaviour reported.
+            // It cannot move the cursor anywhere new, so nothing is risked.
+            m_echoLive.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
 
+        if (WasRecentTarget(p))
+        {
+            // A stale echo: one of our earlier targets, overtaken by a newer
+            // SetCursorPos before it was delivered. Letting it through would
+            // drag the cursor back to a position it has already left, and V
+            // would go on measuring deltas from somewhere the cursor is not.
+            m_echoStale.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+
+        // Foreign SetCursorPos — a game, RDP, returning from Ctrl+Alt+Del. It
+        // means our V is stale, so resync rather than treating it as motion.
+        m_foreignInjected.fetch_add(1, std::memory_order_relaxed);
         Resync();
         return false;
     }
@@ -306,6 +357,13 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
     const POINT target{ static_cast<LONG>(std::lround(m_x)),
                         static_cast<LONG>(std::lround(m_y)) };
 
+    // Recorded BEFORE the call, not after. The echo can be delivered from
+    // inside SetCursorPos itself, and a m_lastSet written afterwards would
+    // arrive too late for the test above to recognise our own move — which
+    // would send it down the foreign-injected path and resync mid-motion.
+    m_lastSet = target;
+    RememberTarget(target);
+
     if (!SetCursorPos(target.x, target.y))
     {
         // The OS cursor is now somewhere we did not put it, and every later
@@ -318,8 +376,6 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
         Resync();
         return true;
     }
-
-    m_lastSet = target;
 
     m_snapshot->pointerX.store(m_x, std::memory_order_relaxed);
     m_snapshot->pointerY.store(m_y, std::memory_order_relaxed);
