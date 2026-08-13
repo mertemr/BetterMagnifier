@@ -108,13 +108,20 @@ void TrayIcon::ShowContextMenu()
     if (!hMenu) return;
 
     AppendMenuW(hMenu, MF_STRING, kMenuToggle, L"Toggle Zoom (Ctrl+Alt+Z)");
+
+    // Only when something is wired up: the control panel is behind BM_PANEL=1.
+    if (m_onSettings)
+        AppendMenuW(hMenu, MF_STRING, kMenuSettings, L"Settings...");
+
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, kMenuExit, L"Exit");
 
-    // Menunun dogru pozisyonda acilmasi icin
     POINT pt;
     GetCursorPos(&pt);
-    SetForegroundWindow(m_hwnd);  // Menu focus icin gerekli (Win32 quirk)
+
+    // Required before TrackPopupMenu: without a foreground owner the menu does
+    // not dismiss when you click away from it.
+    SetForegroundWindow(m_hwnd);
 
     UINT cmd = TrackPopupMenu(
         hMenu,
@@ -127,6 +134,9 @@ void TrayIcon::ShowContextMenu()
     {
     case kMenuToggle:
         if (m_onToggle) m_onToggle();
+        break;
+    case kMenuSettings:
+        if (m_onSettings) m_onSettings();
         break;
     case kMenuExit:
         if (m_onExit) m_onExit();

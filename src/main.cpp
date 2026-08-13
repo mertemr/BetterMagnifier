@@ -1,87 +1,88 @@
-// =============================================================================
-// main.cpp — BetterMagnifier Entry Point
-// =============================================================================
-//
-// Python analojisi:
-//   Python'da:  if __name__ == "__main__": main()
-//   C++'ta:     WinMain() — Windows GUI uygulamalarının entry point'i
-//
-// Normal C++ programları main() ile başlar (Console uygulamaları).
-// Windows GUI uygulamaları WinMain() ile başlar — fark:
-//   - Console penceresi açılmaz
-//   - Windows bize HINSTANCE (uygulama kimliği) verir
-//   - Bu HINSTANCE'ı pencere oluşturmak için kullanırız
-//
-// Message Loop:
-//   Python'da: asyncio.run() veya Qt'daki app.exec_() gibi event loop.
-//   Windows'ta: GetMessage/PeekMessage + DispatchMessage döngüsü.
-//   Her klavye tuşu, mouse hareketi, pencere olayı bu döngüden geçer.
-//   Biz "hybrid" model kullanıyoruz:
-//     - PeekMessage (non-blocking) + render loop = oyun motoru pattern'i
-//     - Mesaj yoksa render/update yapabiliriz — boşa CPU harcamak yerine
-//       DXGI frame capture ve render bu boşlukta çalışır
-//
-// =============================================================================
+// Process entry point and one-time setup: DPI mode, the single-instance mutex,
+// COM, the logger, and the diagnostic command lines. Everything past that lives
+// in App.
 
 #include "pch.h"
 #include "App.h"
+#include "SettingsStore.h"
+#include "ViewportController.h"
+#include "SystemCursor.h"
+#include "CursorRenderer.h"
 #include "Logger.h"
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Forward Declarations (ileride App sınıfı buralara bağlanacak)
-// ─────────────────────────────────────────────────────────────────────────────
+#include <cwchar>
 
-// DPI Awareness ayarla — bu uygulama multi-monitor DPI farkını doğru handle edecek
 static void SetupDpiAwareness();
-
-// Konsol penceresi attach (Debug build'de log'ları görmek için)
 static void AttachDebugConsole();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// WinMain — Program Entry Point
-// ─────────────────────────────────────────────────────────────────────────────
-// Python'daki "if __name__ == '__main__':" karşılığı.
-//
-// Parametreler:
-//   hInstance    — Bu EXE'nin kimlik numarası. Pencere oluştururken lazım.
-//   hPrevInstance — Her zaman NULL (Win16 kalıntısı, ignore et).
-//   lpCmdLine   — Komut satırı argümanları (Python'daki sys.argv gibi).
-//   nCmdShow    — Pencere nasıl gösterilsin (minimize, maximize, normal).
-// ─────────────────────────────────────────────────────────────────────────────
 int WINAPI wWinMain(
     _In_ HINSTANCE hInstance,
-    _In_opt_ HINSTANCE /*hPrevInstance*/,  // Kullanılmıyor — isim vermeye gerek yok
+    _In_opt_ HINSTANCE /*hPrevInstance*/,
     _In_ LPWSTR /*lpCmdLine*/,
     _In_ int /*nCmdShow*/)
 {
-    // ── 1. DPI Awareness ──
-    // Multi-monitor setup'ta her monitörün farklı DPI'ı olabilir.
-    // Bu çağrı olmadan Windows bize yalan söyler — 96 DPI varsayar
-    // ve uygulamayı bulanık şekilde ölçekler (DPI Virtualization).
-    // Per-Monitor DPI Aware V2 = en doğru ve modern mod.
+    // Per-Monitor V2. Without it Windows reports a flat 96 DPI and scales the
+    // window itself, which on a magnifier means blurring the thing whose whole
+    // job is to be legible.
     SetupDpiAwareness();
 
-    // ── 2. Debug Console (sadece Debug build'de) ──
 #ifdef _DEBUG
     AttachDebugConsole();
 #endif
 
-    // ── 3. COM Initialize ──
-    // COM = Component Object Model — Windows'un nesne paylaşım sistemi.
-    // Python analojisi: Python'da import etmeden önce sys.path ayarlamak gibi.
-    // DirectX, DXGI, Direct2D hepsi COM tabanlıdır — önce init etmeliyiz.
+    // ── Single instance ──
     //
-    // COINIT_MULTITHREADED: Birden fazla thread COM objelerine erişebilir.
-    // Magnifier'da capture thread + render thread + UI thread olacak.
+    // Two copies stack two fullscreen topmost overlays, install two global hook
+    // chains, and open Desktop Duplication twice on the same output. The result
+    // is stutter plus input nobody can reason about, because which overlay
+    // swallowed a click is anyone's guess.
+    //
+    // A named mutex rather than a lock file: the kernel closes the handle when
+    // the process dies, so a crash cannot leave the lock held.
+    //
+    // Diagnostic modes are exempt. They run pure logic and exit without
+    // opening a window, installing a hook or touching Desktop Duplication, so
+    // none of the reasons above apply to them. The exemption is not a nicety:
+    // without it the self-check cannot run while the app is running, which is
+    // exactly when you most want to check something — and worse, it blocks on
+    // the "already running" message box, so a script waiting on it hangs
+    // forever instead of failing.
+    const bool diagnosticRun =
+        std::wcsstr(GetCommandLineW(), L"--self-check")   != nullptr ||
+        std::wcsstr(GetCommandLineW(), L"--dump-cursors") != nullptr;
+
+    HANDLE singleInstance = nullptr;
+    if (!diagnosticRun)
+    {
+        singleInstance = CreateMutexW(nullptr, TRUE, L"BetterMagnifier_SingleInstance_Mutex");
+        if (!singleInstance || GetLastError() == ERROR_ALREADY_EXISTS)
+        {
+            if (singleInstance)
+                CloseHandle(singleInstance);
+
+            MessageBoxW(nullptr,
+                L"BetterMagnifier is already running.\n\n"
+                L"Look for the tray icon.",
+                L"BetterMagnifier", MB_ICONINFORMATION | MB_OK);
+            return 0;
+        }
+    }
+
+    // ── COM ──
+    // MTA because D3D11, DXGI and Desktop Duplication are touched from the
+    // render thread while the tray and hotkeys live on this one. The panel
+    // needs STA, which is why it gets a thread of its own.
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr))
     {
-        MessageBoxW(nullptr, L"COM başlatılamadı!", L"BetterMagnifier", MB_ICONERROR);
+        MessageBoxW(nullptr, L"COM initialisation failed.",
+                    L"BetterMagnifier", MB_ICONERROR);
         return 1;
     }
 
-    // ── 4. Logger Initialize ──
-    // Log dosyası EXE'nin yanındaki "logs" klasörüne yazılacak.
+    // ── Logger ──
+    // Next to the exe rather than in %APPDATA%: this is a development log, and
+    // it should be where the binary is when someone goes looking for it.
     {
         wchar_t exePath[MAX_PATH]{};
         GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -90,44 +91,124 @@ int WINAPI wWinMain(
         auto& logger = BetterMagnifier::Logger::Instance();
         if (!logger.Initialize(logDir, BetterMagnifier::LogLevel::Debug))
         {
-            MessageBoxW(nullptr, L"Logger başlatılamadı!", L"BetterMagnifier", MB_ICONWARNING);
-            // Kritik değil — devam edebiliriz, sadece log yazılmaz
+            // Not fatal. Running without a log beats not running.
+            MessageBoxW(nullptr, L"Logger initialisation failed.",
+                        L"BetterMagnifier", MB_ICONWARNING);
         }
     }
 
     LOG_INFO("═══════════════════════════════════════════════════");
-    LOG_INFO("  BetterMagnifier v0.1.0 başlatılıyor...");
+    LOG_INFO("  BetterMagnifier v0.1.0 starting");
     LOG_INFO("═══════════════════════════════════════════════════");
     LOG_INFO("HINSTANCE: 0x{:X}", reinterpret_cast<uintptr_t>(hInstance));
 
-    // Preprocessor directive'ler (#ifdef) makro argümanı içinde kullanılamaz.
-    // Python analojisi: f"Debug: {'yes' if __debug__ else 'no'}"
-    // C++'ta: constexpr if veya compile-time sabit ile çözüyoruz.
+    // A constant rather than #ifdef inside the macro call: preprocessor
+    // directives cannot appear in a macro argument list.
 #ifdef _DEBUG
     constexpr bool kIsDebugBuild = true;
 #else
     constexpr bool kIsDebugBuild = false;
 #endif
-    LOG_INFO("Debug build: {}", kIsDebugBuild ? "EVET" : "HAYIR");
+    LOG_INFO("Debug build: {}", kIsDebugBuild ? "yes" : "no");
 
-    // ── 5. App'i başlat ve çalıştır ──
-    // Tüm iş App sınıfında: component init, message loop, capture/render, cleanup.
-    // WinMain'in tek sorumluluğu process seviyesi kurulum (DPI, COM, Logger).
+    // ── Pointer-hiding capability ──
     //
-    // Neden ayrı scope ({ }) içinde?
-    //   App destructor'ı CoUninitialize'dan ÖNCE çalışmalı — içindeki tüm
-    //   COM nesneleri (D3D device, DXGI swap chain) COM hâlâ ayaktayken
-    //   serbest bırakılmalı. Scope bitince destructor garantili çalışır.
-    //   Python analojisi: with App() as app: app.run()
+    // Probed before anything else can want it, and before the self-check exit,
+    // so `--self-check` reports the result too. Whether MagShowSystemCursor
+    // works decides whether pointer compositing may be on by default: the
+    // SetSystemCursor fallback outlives the process, so a kill from Task
+    // Manager would leave the user with no pointer at all.
+    BetterMagnifier::SystemCursor::Probe();
+    BetterMagnifier::SystemCursor::InstallGuards();
+
+    // ── Debug self-check ──
+    // The two components with pure logic in them. Failing here beats failing as
+    // strange behaviour halfway through a session.
+#ifdef _DEBUG
+    // Route CRT diagnostics to stderr rather than a dialog. This does NOT cover
+    // <cassert> — _wassert opens a message box regardless in a GUI subsystem
+    // build, which is why the suite uses BM_SELFCHECK instead.
+    _set_error_mode(_OUT_TO_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+
+    BetterMagnifier::SettingsStoreSelfCheck();
+    BetterMagnifier::ViewportControllerSelfCheck();
+
+    // --self-check runs the pure-logic assertions and exits, so the suite is
+    // scriptable. Without it the process would go on to open windows and never
+    // return, and there would be no way to gate a commit on the asserts.
+    if (std::wcsstr(GetCommandLineW(), L"--self-check") != nullptr)
+    {
+        LOG_INFO("Self-check complete, exiting (--self-check)");
+        return 0;
+    }
+
+    // --dump-cursors decodes the standard cursors to BMP for eyeball checking.
+    // Cursor decoding cannot be asserted: whether the monochrome AND/XOR
+    // unpacking is right is a question about what the picture looks like, and
+    // "some pixels are set" would pass for a solid black square too.
+    if (std::wcsstr(GetCommandLineW(), L"--dump-cursors") != nullptr)
+    {
+        // const, not constexpr: IDC_* are MAKEINTRESOURCEW casts, which are
+        // not constant expressions.
+        struct Shape { const wchar_t* name; LPCWSTR id; };
+        const Shape kShapes[] = {
+            { L"arrow",   IDC_ARROW   },
+            { L"ibeam",   IDC_IBEAM   },   // monochrome path
+            { L"wait",    IDC_WAIT    },   // colour with alpha
+            { L"hand",    IDC_HAND    },
+            { L"sizeall", IDC_SIZEALL },
+            { L"cross",   IDC_CROSS   },   // monochrome path
+        };
+
+        wchar_t dir[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"TEMP", dir, MAX_PATH) == 0)
+            wcscpy_s(dir, L".");
+
+        int failures = 0;
+        for (const Shape& s : kShapes)
+        {
+            BetterMagnifier::CursorBitmap bmp;
+            if (!BetterMagnifier::DecodeCursor(LoadCursorW(nullptr, s.id), bmp))
+            {
+                LOG_ERROR("DecodeCursor failed for {}", ToUtf8(s.name));
+                ++failures;
+                continue;
+            }
+
+            wchar_t path[MAX_PATH]{};
+            swprintf_s(path, L"%ls\\bm-cursor-%ls.bmp", dir, s.name);
+            if (!BetterMagnifier::WriteCursorBitmapFile(bmp, path))
+            {
+                LOG_ERROR("Could not write {}", ToUtf8(path));
+                ++failures;
+                continue;
+            }
+
+            LOG_INFO("cursor {}: {}x{} hotspot ({},{}) -> {}",
+                     ToUtf8(s.name), bmp.width, bmp.height,
+                     bmp.hotspotX, bmp.hotspotY, ToUtf8(path));
+        }
+
+        LOG_INFO("Cursor dump complete, {} failure(s)", failures);
+        return failures == 0 ? 0 : 3;
+    }
+#endif
+
+    // App owns everything past this point. The extra scope is load-bearing: its
+    // destructor releases D3D and DXGI interfaces, and those must go while COM
+    // is still initialised. Letting it run to the end of the function would put
+    // the release after CoUninitialize.
     int exitCode = 0;
     {
         BetterMagnifier::App app;
 
         if (!app.Initialize(hInstance))
         {
-            LOG_ERROR("App baslatilamadi — cikiliyor");
+            LOG_ERROR("App initialisation failed, exiting");
             MessageBoxW(nullptr,
-                L"BetterMagnifier başlatılamadı.\nDetaylar için logs klasörüne bakın.",
+                L"BetterMagnifier could not start.\nSee the logs folder for details.",
                 L"BetterMagnifier", MB_ICONERROR);
             exitCode = 1;
         }
@@ -137,77 +218,50 @@ int WINAPI wWinMain(
         }
     }
 
-    // ── 6. Cleanup (RAII sırası önemli!) ──
-    // C++'ta "cleanup sırası" kritiktir. Genel kural:
-    //   "Son oluşturulan → ilk yıkılır" (LIFO — stack gibi)
-    //
-    // DirectX/COM cleanup sırası:
-    //   1. Render kaynakları (texture, shader, buffer)
-    //   2. Swap chain
-    //   3. Device context
-    //   4. Device
-    //   5. DXGI Factory
-    //   6. COM Uninitialize
-    //
-    // Yanlış sıra = crash veya COM leak. ComPtr<T> RAII ile bu sıra
-    // büyük ölçüde otomatik oluyor, ama dikkatli olmak lazım.
-
-    LOG_INFO("BetterMagnifier kapatılıyor...");
+    LOG_INFO("BetterMagnifier shutting down");
     LOG_INFO("Exit code: {}", exitCode);
 
     BetterMagnifier::Logger::Instance().Shutdown();
 
     CoUninitialize();
 
+    // Windows drops the handle on process exit anyway; releasing it explicitly
+    // states the intent.
+    if (singleInstance)
+    {
+        ReleaseMutex(singleInstance);
+        CloseHandle(singleInstance);
+    }
+
     return exitCode;
 }
 
-// =============================================================================
-// DPI Awareness Setup
-// =============================================================================
-// Neden önemli?
-// Windows varsayılan olarak uygulamaları "DPI unaware" kabul eder.
-// Bu durumda 4K monitörde (200% DPI) uygulama 1080p gibi render edilip
-// bulanık şekilde büyütülür. Magnifier uygulaması MUTLAKA pixel-perfect olmalı.
-//
-// Per-Monitor DPI Aware V2 (en iyi mod):
-//   - Her monitörde doğru DPI kullanılır
-//   - Non-client area (title bar, scrollbar) da otomatik ölçeklenir
-//   - WM_DPICHANGED mesajıyla DPI değişikliği bildirilir
-// =============================================================================
+// A DPI-unaware process gets bitmap-stretched by the compositor on a scaled
+// display. For a magnifier that is fatal: it would blur the one thing the
+// application exists to keep sharp. Per-Monitor V2 also scales the non-client
+// area and delivers WM_DPICHANGED, which matters with mixed-DPI displays.
 static void SetupDpiAwareness()
 {
-    // Windows 10 1703+ API — en modern ve doğru yöntem
-    // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
     {
-        // Fallback: eski API (Windows 8.1+)
-        // Bu da olmazsa Windows varsayılanı kullanır (system DPI aware)
-        OutputDebugStringW(L"[DPI] Per-Monitor V2 ayarlanamadı, fallback deneniyor...\n");
+        // Windows falls back to system-DPI-aware on its own. Worth knowing
+        // about, not worth failing over.
+        OutputDebugStringW(L"[DPI] Per-Monitor V2 unavailable, using the system default\n");
     }
 }
 
-// =============================================================================
-// Debug Console Attach
-// =============================================================================
-// GUI uygulamalarında (SubSystem: Windows) varsayılan olarak console penceresi
-// açılmaz. Debug sırasında std::cout/cerr çıktılarını görmek için
-// bir console penceresi oluşturup stdout/stderr'i yönlendiriyoruz.
-//
-// Release build'de bu fonksiyon çağrılmaz — #ifdef _DEBUG ile korunuyor.
-// =============================================================================
+// A /SUBSYSTEM:WINDOWS binary has no console, so stdout and stderr go nowhere.
+// Debug builds get one so CRT diagnostics and stream output are visible.
 static void AttachDebugConsole()
 {
-    // Konsol penceresi oluştur
     if (AllocConsole())
     {
-        // stdout, stderr, stdin'i yeni konsola yönlendir
         FILE* fp = nullptr;
         (void)freopen_s(&fp, "CONOUT$", "w", stdout);
         (void)freopen_s(&fp, "CONOUT$", "w", stderr);
         (void)freopen_s(&fp, "CONIN$", "r", stdin);
 
-        // C++ stream'leri de senkronize et
+        // The iostream objects cached their old, failed state.
         std::cout.clear();
         std::cerr.clear();
         std::cin.clear();

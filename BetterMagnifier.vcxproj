@@ -26,33 +26,61 @@
     <ProjectGuid>{ecc887c3-bba1-464a-a2d4-79c18a7dc563}</ProjectGuid>
     <RootNamespace>BetterMagnifier</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+
+    <!-- ── Windows App SDK / WinUI 3, for the control panel only ──
+         Every one of these was needed to get an XAML island up; the reasoning
+         is recorded in spike/xaml-island-thread/FINDINGS.md.
+
+         ResolveNuGetPackages=false: PackageReference in a C++ project drags in
+         the old ResolveNuGetPackageAssets task, which looks for a managed
+         TargetFramework in project.assets.json and fails with "the sequence
+         contains no elements". The .props/.targets we actually need are
+         imported separately.
+
+         WindowsPackageType=None: turns on the SDK auto-initializer, which runs
+         the bootstrapper in the right order while the module loads. Calling
+         MddBootstrapInitialize by hand resolves the framework package but does
+         not finish initialising WinUI.
+
+         UseWinUI: enables the WinUI targets and resources.pri generation. -->
+    <ResolveNuGetPackages>false</ResolveNuGetPackages>
+    <WindowsPackageType>None</WindowsPackageType>
+    <AppxPackage>false</AppxPackage>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
   </PropertyGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
 
+  <!-- Toolset'i sabit bir surume (v143) pinlemiyoruz. Kurulu Visual Studio
+       hangi toolset'i getiriyorsa onu kullaniyoruz: VS2022 -> v143,
+       VS18 -> v145. Sabit pin, o toolset kurulu degilse MSB8020 ile
+       daha derlemeye baslamadan patliyor.
+       Python analojisi: requirements.txt'te "requests==2.28.1" yerine
+       "requests" yazmak — ortamda ne varsa onunla calis. -->
+  <PropertyGroup Label="Configuration">
+    <PlatformToolset Condition="'$(PlatformToolset)'==''">$(DefaultPlatformToolset)</PlatformToolset>
+  </PropertyGroup>
+
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -83,6 +111,22 @@
     <IntDir>$(ProjectDir)obj\$(Configuration)-$(Platform)\</IntDir>
   </PropertyGroup>
 
+  <!-- The bootstrap import library lives in the foundation sub-package, whose
+       version differs from the main package and is chosen transitively. That
+       package's .props adds the include path but NOT the lib path, so we point
+       at it by hand. Bump this when the Microsoft.WindowsAppSDK version below
+       changes: windowsappsdk 1.8.250916003 -> foundation 1.8.250906002.
+       (A glob was tried: item lists inside ItemDefinitionGroup are illegal,
+       MSB4164.) WasdkPlatform maps MSBuild's "Win32" onto the package's "x86".
+       This has to sit AFTER Microsoft.Cpp.props: NuGetPackageRoot comes from the
+       generated nuget props and is still empty before that import. -->
+  <PropertyGroup>
+    <WasdkFoundationVersion>1.8.250906002</WasdkFoundationVersion>
+    <WasdkPlatform Condition="'$(Platform)'=='Win32'">x86</WasdkPlatform>
+    <WasdkPlatform Condition="'$(WasdkPlatform)'==''">$(Platform)</WasdkPlatform>
+    <WasdkLibDir>$(NuGetPackageRoot)microsoft.windowsappsdk.foundation\$(WasdkFoundationVersion)\lib\native\$(WasdkPlatform)</WasdkLibDir>
+  </PropertyGroup>
+
   <!-- Debug Win32 -->
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -99,8 +143,17 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
+      <!-- GECICI: AsInvoker, gelistirme/test icin. Elevation'in getirdigi
+           surekli UAC penceresi bazi pencere/etkilesim testlerini engelliyordu.
+           Yayin oncesi RequireAdministrator'a geri alinacak (bkz. docs/STATUS.md).
+           Deger burada, manifest'te degil: mt.exe iki farkli level degerini
+           birlestiremiyor (c1010001). Bkz. src\app.manifest -->
+      <UACExecutionLevel>AsInvoker</UACExecutionLevel>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- windowsapp.lib: C++/WinRT runtime.
+           Microsoft.WindowsAppRuntime.Bootstrap.lib: the auto-initializer. -->
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;dwmapi.lib;windowsapp.lib;Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(WasdkLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
 
@@ -122,10 +175,19 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
+      <!-- GECICI: AsInvoker, gelistirme/test icin. Elevation'in getirdigi
+           surekli UAC penceresi bazi pencere/etkilesim testlerini engelliyordu.
+           Yayin oncesi RequireAdministrator'a geri alinacak (bkz. docs/STATUS.md).
+           Deger burada, manifest'te degil: mt.exe iki farkli level degerini
+           birlestiremiyor (c1010001). Bkz. src\app.manifest -->
+      <UACExecutionLevel>AsInvoker</UACExecutionLevel>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- windowsapp.lib: C++/WinRT runtime.
+           Microsoft.WindowsAppRuntime.Bootstrap.lib: the auto-initializer. -->
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;dwmapi.lib;windowsapp.lib;Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(WasdkLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
 
@@ -145,8 +207,17 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
+      <!-- GECICI: AsInvoker, gelistirme/test icin. Elevation'in getirdigi
+           surekli UAC penceresi bazi pencere/etkilesim testlerini engelliyordu.
+           Yayin oncesi RequireAdministrator'a geri alinacak (bkz. docs/STATUS.md).
+           Deger burada, manifest'te degil: mt.exe iki farkli level degerini
+           birlestiremiyor (c1010001). Bkz. src\app.manifest -->
+      <UACExecutionLevel>AsInvoker</UACExecutionLevel>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- windowsapp.lib: C++/WinRT runtime.
+           Microsoft.WindowsAppRuntime.Bootstrap.lib: the auto-initializer. -->
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;dwmapi.lib;windowsapp.lib;Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(WasdkLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
 
@@ -168,10 +239,19 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
+      <!-- GECICI: AsInvoker, gelistirme/test icin. Elevation'in getirdigi
+           surekli UAC penceresi bazi pencere/etkilesim testlerini engelliyordu.
+           Yayin oncesi RequireAdministrator'a geri alinacak (bkz. docs/STATUS.md).
+           Deger burada, manifest'te degil: mt.exe iki farkli level degerini
+           birlestiremiyor (c1010001). Bkz. src\app.manifest -->
+      <UACExecutionLevel>AsInvoker</UACExecutionLevel>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- windowsapp.lib: C++/WinRT runtime.
+           Microsoft.WindowsAppRuntime.Bootstrap.lib: the auto-initializer. -->
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dxguid.lib;d3dcompiler.lib;Shcore.lib;Wtsapi32.lib;dwmapi.lib;windowsapp.lib;Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(WasdkLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
 
@@ -188,12 +268,56 @@
     <ClCompile Include="src\OverlayWindow.cpp" />
     <ClCompile Include="src\HotkeyManager.cpp" />
     <ClCompile Include="src\TrayIcon.cpp" />
+    <ClCompile Include="src\SettingsStore.cpp" />
+    <ClCompile Include="src\InputThread.cpp" />
+    <ClCompile Include="src\ViewportController.cpp" />
+    <ClCompile Include="src\SystemCursor.cpp" />
+    <ClCompile Include="src\CursorRenderer.cpp" />
+    <ClCompile Include="src\PointerInput.cpp" />
+    <ClCompile Include="src\ControlPanel.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pinned to the 1.8 line on purpose: 2.3.1 access-violated inside
+         Application::Start, and the runtime installed on the dev machine is
+         Microsoft.WindowsAppRuntime.1.8. A newer package raises the minimum
+         version the auto-initializer asks for, and then no runtime is found. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.250916003" />
+    <PackageReference Include="Microsoft.Windows.CppWinRT" Version="3.0.260715.1" />
+  </ItemGroup>
+
+  <!-- Anything C++/WinRT generates is compiled without our precompiled header
+       and without warnings-as-error: it neither includes pch.h nor was written
+       to survive Level4. Our own files still have to be clean.
+       A Condition on %(Filename) inside ItemDefinitionGroup is illegal here
+       (MSB4190), so the metadata is stamped on just before the compile. -->
+  <Target Name="RelaxGeneratedWinRTSources" BeforeTargets="ClCompile">
+    <ItemGroup>
+      <ClCompile Condition="$([System.String]::Copy('%(Identity)').Contains('Generated Files'))">
+        <TreatWarningAsError>false</TreatWarningAsError>
+        <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      </ClCompile>
+    </ItemGroup>
+  </Target>
+
+  <!-- Manifest — yonetici yetkisi zorunlu (bkz. src\app.manifest) -->
+  <ItemGroup>
+    <Manifest Include="src\app.manifest" />
   </ItemGroup>
 
   <!-- Header Files -->
   <ItemGroup>
     <ClInclude Include="src\pch.h" />
     <ClInclude Include="src\Logger.h" />
+    <ClInclude Include="src\AppMessages.h" />
+    <ClInclude Include="src\StatusSnapshot.h" />
+    <ClInclude Include="src\SettingsStore.h" />
+    <ClInclude Include="src\InputThread.h" />
+    <ClInclude Include="src\ViewportController.h" />
+    <ClInclude Include="src\SystemCursor.h" />
+    <ClInclude Include="src\CursorRenderer.h" />
+    <ClInclude Include="src\ViewportSnapshot.h" />
+    <ClInclude Include="src\PointerInput.h" />
     <ClInclude Include="src\App.h" />
     <ClInclude Include="src\MonitorManager.h" />
     <ClInclude Include="src\D3DRenderer.h" />
@@ -201,6 +325,7 @@
     <ClInclude Include="src\OverlayWindow.h" />
     <ClInclude Include="src\HotkeyManager.h" />
     <ClInclude Include="src\TrayIcon.h" />
+    <ClInclude Include="src\ControlPanel.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

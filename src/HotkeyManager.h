@@ -1,22 +1,26 @@
 #pragma once
 
-// =============================================================================
-// HotkeyManager.h — Global Hotkeys + Mouse Scroll Hook
-// =============================================================================
+// Global hotkeys through RegisterHotKey.
+//
+// The low-level mouse and keyboard hooks live in InputThread; they cannot run
+// here (see InputThread.h). RegisterHotKey is window-bound: WM_HOTKEY goes to
+// whichever window registered it, so this stays on the render thread with the
+// message window.
+//
+// Registration goes through the OS, so it FAILS when another process already
+// owns the combination. Reporting that failure matters.
 
 #ifndef BETTER_MAGNIFIER_HOTKEY_MANAGER_H
 #define BETTER_MAGNIFIER_HOTKEY_MANAGER_H
 
+#include "SettingsStore.h"
+
 #include <windows.h>
 #include <functional>
-#include <atomic>
-#include <thread>
 
 namespace BetterMagnifier {
 
-// Hotkey action callback tipleri
-using HotkeyCallback  = std::function<void()>;
-using ScrollCallback  = std::function<void(int delta, POINT mousePos)>;
+using HotkeyCallback = std::function<void()>;
 
 class HotkeyManager
 {
@@ -27,42 +31,32 @@ public:
     HotkeyManager(const HotkeyManager&) = delete;
     HotkeyManager& operator=(const HotkeyManager&) = delete;
 
-    // ── Initialization ──
-    // hwnd: Hotkey mesajlarinin gonderilecegi pencere
-    bool Initialize(HWND hwnd);
+    bool Initialize(HWND hwnd, const GeneralSettings& settings);
     void Shutdown();
 
-    // ── Callback Registration ──
-    void SetToggleZoomCallback(HotkeyCallback cb)  { m_onToggleZoom = std::move(cb); }
-    void SetFreezeCallback(HotkeyCallback cb)      { m_onFreeze = std::move(cb); }
-    void SetScrollCallback(ScrollCallback cb)      { m_onScroll = std::move(cb); }
+    // Unregisters the old bindings and registers the ones in settings.
+    // Returns a failure mask: bit 0 = toggle, bit 1 = freeze.
+    UINT Reregister(const GeneralSettings& settings);
 
-    // ── WM_HOTKEY isleyicisi (App tarafindan cagirilir) ──
+    // Last Reregister result. Logging alone is not enough: the user presses a
+    // key, nothing happens, and has no way to know why.
+    UINT LastFailedMask() const { return m_lastFailedMask; }
+
+    void SetToggleZoomCallback(HotkeyCallback cb) { m_onToggleZoom = std::move(cb); }
+    void SetFreezeCallback(HotkeyCallback cb)     { m_onFreeze = std::move(cb); }
+
     void HandleHotkey(int hotkeyId);
 
-    // Hotkey ID'leri
-    // NOT: Win+<harf> kullanmiyoruz — Windows 11 cogunu rezerve etmis
-    // (Win+Z = Snap Layouts). Ctrl+Alt+<harf> guvenli alan.
-    static constexpr int kHotkeyToggleZoom = 1;   // Ctrl+Alt+Z
-    static constexpr int kHotkeyFreeze     = 2;   // Ctrl+Alt+X
+    static constexpr int kHotkeyToggleZoom = 1;
+    static constexpr int kHotkeyFreeze     = 2;
 
 private:
-    // ── Mouse Hook ──
-    static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
-    void StartMouseHook();
-    void StopMouseHook();
+    HWND m_hwnd           = nullptr;
+    bool m_initialized    = false;
+    UINT m_lastFailedMask = 0;
 
-    HWND    m_hwnd      = nullptr;
-    HHOOK   m_mouseHook = nullptr;
-    bool    m_initialized = false;
-
-    // Callbacks
-    HotkeyCallback  m_onToggleZoom;
-    HotkeyCallback  m_onFreeze;
-    ScrollCallback  m_onScroll;
-
-    // Hook icin static instance (Win32 callback'ler static olmak zorunda)
-    static HotkeyManager* s_instance;
+    HotkeyCallback m_onToggleZoom;
+    HotkeyCallback m_onFreeze;
 };
 
 } // namespace BetterMagnifier

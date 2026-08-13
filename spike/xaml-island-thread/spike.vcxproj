@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{a1b2c3d4-0000-4000-8000-000000000001}</ProjectGuid>
+    <RootNamespace>spike</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+
+    <!-- C++ projesinde PackageReference kullanirken Microsoft.NuGet.targets
+         icindeki eski ResolveNuGetPackageAssets task'i devreye giriyor ve
+         "Sira hicbir oge icermiyor" ile patliyor (project.assets.json'da
+         managed bir TargetFramework arıyor, native projede yok).
+         PackageReference'in urettigi .props/.targets zaten ayri import
+         ediliyor, bu task'a ihtiyac yok. -->
+    <ResolveNuGetPackages>false</ResolveNuGetPackages>
+
+    <!-- Paketlenmemis (unpackaged) uygulama. Bu ozellik Windows App SDK'nin
+         auto-initializer'ini devreye sokuyor: bootstrapper'i modul yuklenirken
+         DOGRU sirayla cagiriyor ve WinUI runtime dagitimini kuruyor.
+         Elle MddBootstrapInitialize cagirmak framework paketini cozuyor ama
+         2.x'in bekledigi tam ilklendirmeyi yapmiyor gorunuyor. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <AppxPackage>false</AppxPackage>
+
+    <!-- WinUI hedeflerini devreye sok. Bunlar resources.pri'yi uretir:
+         XamlControlsResources'in tema fircalari (AcrylicBackgroundFill...)
+         o PRI dosyasindan okunuyor. Yoksa "Cannot find a resource with the
+         given key" ile duz E_FAIL aliyoruz.
+         Python analojisi: paketin data dosyalarini MANIFEST.in'e eklemeyi
+         unutmak — kod var, kaynak yok. -->
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset Condition="'$(PlatformToolset)'==''">$(DefaultPlatformToolset)</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <!-- Bootstrap lib'in yolu. Windows App SDK (hem 1.8 hem 2.x) alt paketlere
+       bolunmus: lib "foundation" paketinde ve o paketin .props'u include
+       yolunu ekliyor ama LIB yolunu eklemiyor — elle vermek zorundayiz.
+       DIKKAT: foundation'in surumu ana paketten FARKLI, transitive seciliyor.
+       Ana paket surumunu degistirirsen bunu da guncelle:
+         windowsappsdk 1.8.250916003 -> foundation 1.8.250906002
+       (glob denendi: ItemDefinitionGroup icinde item listesi yasak, MSB4164) -->
+  <PropertyGroup>
+    <WasdkFoundationVersion>1.8.250906002</WasdkFoundationVersion>
+    <WasdkWinUIVersion>1.8.250906003</WasdkWinUIVersion>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <PreprocessorDefinitions>_DEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <WarningLevel>Level3</WarningLevel>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <!-- windowsapp.lib: C++/WinRT calisma zamani
+           Microsoft.WindowsAppRuntime.Bootstrap.lib: MddBootstrapInitialize -->
+      <AdditionalDependencies>windowsapp.lib;Microsoft.WindowsAppRuntime.Bootstrap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(NuGetPackageRoot)microsoft.windowsappsdk.foundation\$(WasdkFoundationVersion)\lib\native\$(Platform);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="spike.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 2.3.1 ile Application::Start 0xC0000005 veriyordu (FINDINGS.md).
+         1.8 hattina dusuyoruz: Islands bu hatta uzun sure olgunlasti ve
+         makinede kurulu runtime tam bu hat — Microsoft.WindowsAppRuntime.1.8
+         8000.921.1539.0 + MicrosoftCorporationII.WinAppRuntime.Main.1.8.
+         Paket surumunu kurulu runtime ile eslesecek sekilde seciyoruz;
+         daha yeni bir paket, auto-initializer'in istedigi minimum surumu
+         yukseltir ve runtime bulunamaz. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.250916003" />
+    <PackageReference Include="Microsoft.Windows.CppWinRT" Version="3.0.260715.1" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+  <!-- NOT: WinUI tema PRI'sini (Microsoft.UI.Xaml.Controls.pri) exe'nin yanina
+       kopyalamak DENENDI ve GEREKSIZ cikti. Tema kaynaklari framework
+       paketinden zaten cozuluyor; "Cannot find a resource with the given key"
+       hatasinin sebebi eksik PRI degil, XamlControlsResources'i elle atamakti
+       (bkz. spike.cpp'deki aciklama). -->
+</Project>
