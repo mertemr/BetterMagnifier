@@ -19,8 +19,8 @@ namespace {
 //                     1 = hand maps 1:1 on the magnified screen (slowest)
 //                     0 = native, pointer flies at zoom times speed
 //   BM_POINTER_LOCK   0 to let the pointer leave the magnified monitor
-//   BM_POINTER_BREAKOUT_MS  how long a shove at a spent edge has to be held
-//                     before the lock opens (default 300)
+//   BM_POINTER_BREAKOUT_PX  how much hand travel a shove at a spent edge has to
+//                     spend before the lock opens (default 150)
 float ReadEnvFloat(const wchar_t* name, float fallback)
 {
     wchar_t buf[32]{};
@@ -34,26 +34,34 @@ float ReadEnvFloat(const wchar_t* name, float fallback)
 
 } // namespace
 
-bool EdgeBreakout::Update(int edge, bool saturated, unsigned long timeMs)
+bool EdgeBreakout::Update(int edge, double overshootPx, bool saturated,
+                          unsigned long timeMs)
 {
-    // Off the edge, or the view can still pan: nothing to break out of, and the
-    // pressure that had built up is spent.
-    if (edge < 0 || !saturated)
-    {
+    // The hand stopped pushing: let the pressure go. This is the only thing
+    // that ends a shove, deliberately. An event that simply did not press on
+    // this edge — motion along the other axis, a jitter that rounded to
+    // nothing — must not, because while the clamp holds the pointer still those
+    // events are indistinguishable from the push itself.
+    if (m_edge >= 0 && (timeMs - m_last) > kIdleMs)
         Reset();
-        return false;
-    }
 
-    // A different edge is a different intention, so the hold starts over. Not
-    // an early return: a hold of zero has to open on this very event.
+    // Not pressing past an edge, or the view can still pan there: the shove is
+    // being spent on edge-push, which is the more useful thing to do with it.
+    if (edge < 0 || !saturated)
+        return m_open;
+
+    // A different edge is a different intention, so the travel starts over.
     if (edge != m_edge)
     {
-        m_edge  = edge;
-        m_since = timeMs;
-        m_open  = false;
+        m_edge   = edge;
+        m_travel = 0.0;
+        m_open   = false;
     }
 
-    if (!m_open && (timeMs - m_since) >= m_holdMs)
+    m_travel += overshootPx;
+    m_last    = timeMs;
+
+    if (m_travel >= m_thresholdPx)
         m_open = true;
 
     return m_open;
@@ -80,24 +88,24 @@ void PointerInput::Attach(ViewportController* controller, ViewportSnapshot* snap
             SetLockToMonitor(buf[0] != L'0');
     }
 
-    unsigned long holdMs = EdgeBreakout::kDefaultHoldMs;
+    double breakoutPx = EdgeBreakout::kDefaultThresholdPx;
     {
         wchar_t buf[16]{};
-        if (GetEnvironmentVariableW(L"BM_POINTER_BREAKOUT_MS", buf, 16) > 0)
+        if (GetEnvironmentVariableW(L"BM_POINTER_BREAKOUT_PX", buf, 16) > 0)
         {
-            const long v = _wtol(buf);
-            if (v >= 0)
-                holdMs = static_cast<unsigned long>(v);
+            const double v = _wtof(buf);
+            if (v >= 0.0)
+                breakoutPx = v;
         }
     }
-    m_breakout.SetHoldMs(holdMs);
+    m_breakout.SetThresholdPx(breakoutPx);
 
     LOG_INFO("Pointer tuning: speed={:.2f} compensation={:.2f} lockToMonitor={} "
-             "breakoutMs={}",
+             "breakoutPx={:.0f}",
              m_speed.load(std::memory_order_relaxed),
              m_compensation.load(std::memory_order_relaxed),
              m_lockToMonitor.load(std::memory_order_relaxed) ? "on" : "off",
-             holdMs);
+             breakoutPx);
 
     Resync();
 }
@@ -143,6 +151,11 @@ void PointerInput::SetEnabled(bool enabled)
                  m_echoLive.exchange(0, std::memory_order_relaxed),
                  m_echoStale.exchange(0, std::memory_order_relaxed),
                  m_foreignInjected.exchange(0, std::memory_order_relaxed));
+
+        LOG_INFO("Monitor lock this session: clamped={} atSpentEdge={} released={}",
+                 m_clampHits.exchange(0, std::memory_order_relaxed),
+                 m_clampSaturated.exchange(0, std::memory_order_relaxed),
+                 m_breakouts.exchange(0, std::memory_order_relaxed));
     }
 }
 
@@ -308,13 +321,30 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
         const double minY = static_cast<double>(v.originY);
         const double maxY = static_cast<double>(v.originY + v.height) - 1.0;
 
-        int edge = -1;
-        if      (m_x > maxX) edge = static_cast<int>(Edge::Right);
-        else if (m_x < minX) edge = static_cast<int>(Edge::Left);
-        else if (m_y > maxY) edge = static_cast<int>(Edge::Bottom);
-        else if (m_y < minY) edge = static_cast<int>(Edge::Top);
+        int    edge      = -1;
+        double overshoot = 0.0;
+        if      (m_x > maxX) { edge = static_cast<int>(Edge::Right);  overshoot = m_x - maxX; }
+        else if (m_x < minX) { edge = static_cast<int>(Edge::Left);   overshoot = minX - m_x; }
+        else if (m_y > maxY) { edge = static_cast<int>(Edge::Bottom); overshoot = m_y - maxY; }
+        else if (m_y < minY) { edge = static_cast<int>(Edge::Top);    overshoot = minY - m_y; }
 
-        if (!m_breakout.Update(edge, EdgeIsSaturated(mi, edge), data.time))
+        const bool saturated = EdgeIsSaturated(mi, edge);
+
+        if (edge >= 0)
+        {
+            m_clampHits.fetch_add(1, std::memory_order_relaxed);
+            if (saturated)
+                m_clampSaturated.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        const bool wasOpen = m_breakout.Open();
+
+        if (m_breakout.Update(edge, overshoot, saturated, data.time))
+        {
+            if (!wasOpen)
+                m_breakouts.fetch_add(1, std::memory_order_relaxed);
+        }
+        else
         {
             m_x = std::clamp(m_x, minX, maxX);
             m_y = std::clamp(m_y, minY, maxY);
@@ -383,78 +413,90 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
     return true;   // swallow: the OS must not also move the cursor
 }
 
+
 #ifdef _DEBUG
 void PointerInputSelfCheck()
 {
     constexpr int kRight = static_cast<int>(Edge::Right);
     constexpr int kLeft  = static_cast<int>(Edge::Left);
 
-    // Not pushing past any edge: nothing ever opens, however long it goes on.
+    // Never pressing an edge: nothing ever opens, however many events go by.
     {
         EdgeBreakout b;
-        b.SetHoldMs(300);
+        b.SetThresholdPx(150.0);
         for (unsigned long t = 0; t < 5000; t += 100)
-            BM_SELFCHECK(b.Update(-1, true, t) == false);
+            BM_SELFCHECK(b.Update(-1, 0.0, true, t) == false);
     }
 
-    // Pushing, but the view can still pan there. Edge-push gets the motion;
-    // the lock must not open while there is still content to reveal.
+    // Pressing, but the view can still pan there. Edge-push gets the motion,
+    // and the lock must not open while there is still content to reveal.
     {
         EdgeBreakout b;
-        b.SetHoldMs(300);
+        b.SetThresholdPx(150.0);
         for (unsigned long t = 0; t < 5000; t += 100)
-            BM_SELFCHECK(b.Update(kRight, false, t) == false);
+            BM_SELFCHECK(b.Update(kRight, 20.0, false, t) == false);
     }
 
-    // The hold has to elapse, and then it stays open while the shove continues.
+    // Travel accumulates across events and opens on reaching the threshold.
     {
         EdgeBreakout b;
-        b.SetHoldMs(300);
-        BM_SELFCHECK(b.Update(kRight, true, 1000) == false);   // first contact
-        BM_SELFCHECK(b.Update(kRight, true, 1299) == false);   // one ms short
-        BM_SELFCHECK(b.Update(kRight, true, 1300) == true);    // opens
-        BM_SELFCHECK(b.Update(kRight, true, 1301) == true);    // and stays open
+        b.SetThresholdPx(150.0);
+        BM_SELFCHECK(b.Update(kRight, 50.0, true, 1000) == false);   //  50
+        BM_SELFCHECK(b.Update(kRight, 50.0, true, 1010) == false);   // 100
+        BM_SELFCHECK(b.Update(kRight, 49.0, true, 1020) == false);   // 149
+        BM_SELFCHECK(b.Update(kRight,  1.0, true, 1030) == true);    // 150
+        BM_SELFCHECK(b.Update(kRight,  1.0, true, 1040) == true);    // stays open
+    }
+
+    // The regression that made a timer the wrong tool. While the clamp holds
+    // the pointer still, events that press nothing — motion along the other
+    // axis, jitter that rounded away — arrive constantly between the ones that
+    // do. They must not undo the shove: the timer version reset on every one of
+    // them, so the hold never accumulated and the lock never opened at all.
+    {
+        EdgeBreakout b;
+        b.SetThresholdPx(150.0);
+        BM_SELFCHECK(b.Update(kRight, 80.0, true, 1000) == false);
+        BM_SELFCHECK(b.Update(-1,      0.0, true, 1010) == false);   // pure-Y event
+        BM_SELFCHECK(b.Update(-1,      0.0, true, 1020) == false);
+        BM_SELFCHECK(b.Update(kRight, 80.0, true, 1030) == true);    // 160 total
+    }
+
+    // Letting go bleeds the pressure off, so the next crossing is earned again.
+    {
+        EdgeBreakout b;
+        b.SetThresholdPx(150.0);
+        BM_SELFCHECK(b.Update(kRight, 100.0, true, 1000) == false);
+        BM_SELFCHECK(b.Update(kRight, 100.0, true, 3000) == false);  // idle, then 100
+        BM_SELFCHECK(b.Update(kRight,  49.0, true, 3010) == false);  // 149
+        BM_SELFCHECK(b.Update(kRight,   1.0, true, 3020) == true);   // 150
     }
 
     // Turning into a different edge is a different intention: start over.
     {
         EdgeBreakout b;
-        b.SetHoldMs(300);
-        BM_SELFCHECK(b.Update(kRight, true, 1000) == false);
-        BM_SELFCHECK(b.Update(kLeft,  true, 1400) == false);   // not 400ms of THIS edge
-        BM_SELFCHECK(b.Update(kLeft,  true, 1700) == true);
+        b.SetThresholdPx(150.0);
+        BM_SELFCHECK(b.Update(kRight, 140.0, true, 1000) == false);
+        BM_SELFCHECK(b.Update(kLeft,   40.0, true, 1010) == false);  // not 180
+        BM_SELFCHECK(b.Update(kLeft,  110.0, true, 1020) == true);   // 150 of THIS edge
     }
 
-    // Coming off the edge closes it again, so the next crossing has to be
-    // earned as well. Without this one shove would open the lock for good.
+    // The idle bleed-off reads GetTickCount, which wraps every 49 days. The
+    // wrap must not read as a 49-day pause and drop a shove in progress.
+    // 0xFFFFFF00 is 256 ticks short of the wrap, so tick 44 is 300 ms later.
     {
         EdgeBreakout b;
-        b.SetHoldMs(300);
-        BM_SELFCHECK(b.Update(kRight, true, 1000) == false);
-        BM_SELFCHECK(b.Update(kRight, true, 1400) == true);
-        BM_SELFCHECK(b.Update(-1,     true, 1500) == false);   // back inside
-        BM_SELFCHECK(b.Update(kRight, true, 1600) == false);   // hold restarts
-        BM_SELFCHECK(b.Update(kRight, true, 1900) == true);
+        b.SetThresholdPx(150.0);
+        BM_SELFCHECK(b.Update(kRight, 100.0, true, 0xFFFFFF00ul) == false);
+        BM_SELFCHECK(b.Update(kRight,  50.0, true, 44ul)         == true);
     }
 
-    // The event timestamps come from GetTickCount, which wraps every 49 days.
-    // Unsigned subtraction has to carry the shove across that boundary rather
-    // than making the lock unopenable for 49 days.
-    // 0xFFFFFF00 is 256 ticks short of the wrap, so 300 ms later reads as 44.
+    // A threshold of zero opens on first contact, which is what a user who set
+    // BM_POINTER_BREAKOUT_PX=0 asked for: the lock off in all but name.
     {
         EdgeBreakout b;
-        b.SetHoldMs(300);
-        BM_SELFCHECK(b.Update(kRight, true, 0xFFFFFF00ul) == false);
-        BM_SELFCHECK(b.Update(kRight, true, 43ul)  == false);   // 299 ms elapsed
-        BM_SELFCHECK(b.Update(kRight, true, 44ul)  == true);    // 300 ms elapsed
-    }
-
-    // A hold of zero opens on the first event, which is what a user who set
-    // BM_POINTER_BREAKOUT_MS=0 asked for: lock off in all but name.
-    {
-        EdgeBreakout b;
-        b.SetHoldMs(0);
-        BM_SELFCHECK(b.Update(kRight, true, 12345) == true);
+        b.SetThresholdPx(0.0);
+        BM_SELFCHECK(b.Update(kRight, 0.0, true, 12345) == true);
     }
 
     LOG_INFO("PointerInputSelfCheck passed");

@@ -163,6 +163,29 @@ could not see the app's windows even for a non-elevated build, while
 `EnumWindows` could. `BM_OPEN_PANEL` exists to get around all of it - the app
 opens the panel itself and reports through its own log.
 
+### Measured, 2026-08-13
+
+**`SetCursorPos` produces no `WH_MOUSE_LL` event on this machine.** Counters in
+`PointerInput`, logged when pointer scaling turns off, read
+`echo=0 staleEcho=0 foreign=0` across several magnified sessions. So the
+injected branch in `OnMouseMove` never runs here: applications get their
+`WM_MOUSEMOVE` from the cursor move itself, and the hook is not starving them.
+
+The branch is kept because it is correct where injection does happen (RDP,
+VMware, games that recentre the pointer), but **it is not the explanation for
+the intermittent misclick**, and that fault is still open. The remaining
+candidate is render latency — the sprite is drawn from a snapshot the render
+thread reads at frame rate, so clicking while the mouse is still moving aims at
+where the pointer was drawn, not where it is. Untested.
+
+**A time-based lock break-out does not work, and the reason generalises.**
+While the clamp holds the pointer still, events that press nothing — motion
+along the other axis, jitter that rounds away — arrive constantly between the
+ones that do, and a hand that pushes and holds stops generating events at all.
+Anything measuring a *duration* of pressure therefore resets constantly or
+starves. Hand travel is the measurable quantity: it counts exactly the motion
+the clamp threw away. Covered by `PointerInputSelfCheck`.
+
 ### Known broken or unresolved
 
 **1. Popups cannot be magnified correctly.** Two flawed options, switchable:
@@ -358,7 +381,7 @@ Kept deliberately, for testing across machines.
 | `BM_DUMP_FRAME=<path>` | Dump one back buffer to BMP; the overlay is excluded from capture, so this is the only outside view of the render |
 | `BM_DUMP_AFTER=<n>` | Which frame to dump (default 60) |
 | `BM_PANEL=1` | Enable the control panel: adds the tray entry and opens it at startup |
-| `BM_POINTER_BREAKOUT_MS=<n>` | How long a shove at a spent edge must be held before the monitor lock opens (default 300; 0 makes the lock nominal) |
+| `BM_POINTER_BREAKOUT_PX=<n>` | Hand travel a shove at a spent edge must spend before the monitor lock opens (default 150; 0 makes the lock nominal) |
 
 **These have to be set persistently now.** Elevation broke the obvious way of
 using them: a process elevated through UAC gets a fresh environment built from

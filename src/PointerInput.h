@@ -40,31 +40,44 @@ namespace BetterMagnifier {
 // clamp yields to a deliberate shove — keep pushing into the same edge, once
 // the view has nothing left to pan into, and the pointer is let through.
 //
-// Pure logic, no Windows calls, so the self-check can drive it. Time arrives as
-// the hook event's own timestamp; unsigned arithmetic makes the GetTickCount
+// Measured in hand travel, not in time, and that is the whole design. While the
+// lock holds the pointer still, so a wall-clock version has nothing to run on:
+// events with no motion on the pressed axis look identical to letting go, and a
+// hand that pushes and holds stops generating events at all. Distance has
+// neither problem — it counts exactly the motion the clamp threw away.
+//
+// Pure logic, no Windows calls, so the self-check can drive it. Time is used
+// only for the idle bleed-off, and unsigned arithmetic makes the GetTickCount
 // wrap at 49 days a non-event.
 class EdgeBreakout
 {
 public:
-    // Long enough that brushing the edge on the way to something else never
-    // releases, short enough that a deliberate shove does not feel stuck.
-    static constexpr unsigned long kDefaultHoldMs = 300;
+    // Hand travel spent shoving at a spent edge before the lock opens. More
+    // than any accidental brush, less than one deliberate flick.
+    static constexpr double kDefaultThresholdPx = 150.0;
 
-    // edge      : an Edge cast to int, or -1 when the motion stays on the monitor
-    // saturated : the view has nothing left to reveal on that edge, so holding
-    //             out any longer would not show the user anything new
+    // Pressure bleeds off when the hand stops, so a shove is not remembered
+    // across an unrelated pause and cannot open the lock by surprise later.
+    static constexpr unsigned long kIdleMs = 500;
+
+    // edge        : an Edge cast to int, or -1 when the motion stayed on the monitor
+    // overshootPx : how far past that edge this event tried to go, 0 when edge < 0
+    // saturated   : the view has nothing left to reveal there, so the shove is
+    //               not doing anything more useful than asking to leave
     //
     // True when the clamp must be lifted for this event.
-    bool Update(int edge, bool saturated, unsigned long timeMs);
+    bool Update(int edge, double overshootPx, bool saturated, unsigned long timeMs);
 
-    void Reset() { m_edge = -1; m_open = false; }
-    void SetHoldMs(unsigned long ms) { m_holdMs = ms; }
+    void Reset() { m_edge = -1; m_travel = 0.0; m_open = false; }
+    void SetThresholdPx(double px) { m_thresholdPx = px; }
+    bool Open() const { return m_open; }
 
 private:
-    unsigned long m_holdMs = kDefaultHoldMs;
-    unsigned long m_since  = 0;
-    int           m_edge   = -1;
-    bool          m_open   = false;
+    double        m_thresholdPx = kDefaultThresholdPx;
+    double        m_travel      = 0.0;
+    unsigned long m_last        = 0;
+    int           m_edge        = -1;
+    bool          m_open        = false;
 };
 
 class PointerInput
@@ -145,9 +158,16 @@ private:
 
     // Diagnostics only, written in the hook and read on disable. Atomic for the
     // cross-thread read, relaxed because nothing is ordered against them.
+    //
+    // clampSaturated against clampHits is the one that matters when the lock
+    // will not open: it separates "the shove never reached a spent edge" from
+    // "it did and the threshold was not met".
     std::atomic<std::uint64_t> m_echoLive{0};
     std::atomic<std::uint64_t> m_echoStale{0};
     std::atomic<std::uint64_t> m_foreignInjected{0};
+    std::atomic<std::uint64_t> m_clampHits{0};
+    std::atomic<std::uint64_t> m_clampSaturated{0};
+    std::atomic<std::uint64_t> m_breakouts{0};
 };
 
 #ifdef _DEBUG
