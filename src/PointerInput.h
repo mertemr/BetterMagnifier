@@ -31,6 +31,40 @@
 
 namespace BetterMagnifier {
 
+// Sustained-pressure release for the monitor lock.
+//
+// A lock with no way out is a trap: the only route to the next display becomes
+// turning zoom off, which is worse than the drift the lock prevents. So the
+// clamp yields to a deliberate shove — keep pushing into the same edge, once
+// the view has nothing left to pan into, and the pointer is let through.
+//
+// Pure logic, no Windows calls, so the self-check can drive it. Time arrives as
+// the hook event's own timestamp; unsigned arithmetic makes the GetTickCount
+// wrap at 49 days a non-event.
+class EdgeBreakout
+{
+public:
+    // Long enough that brushing the edge on the way to something else never
+    // releases, short enough that a deliberate shove does not feel stuck.
+    static constexpr unsigned long kDefaultHoldMs = 300;
+
+    // edge      : an Edge cast to int, or -1 when the motion stays on the monitor
+    // saturated : the view has nothing left to reveal on that edge, so holding
+    //             out any longer would not show the user anything new
+    //
+    // True when the clamp must be lifted for this event.
+    bool Update(int edge, bool saturated, unsigned long timeMs);
+
+    void Reset() { m_edge = -1; m_open = false; }
+    void SetHoldMs(unsigned long ms) { m_holdMs = ms; }
+
+private:
+    unsigned long m_holdMs = kDefaultHoldMs;
+    unsigned long m_since  = 0;
+    int           m_edge   = -1;
+    bool          m_open   = false;
+};
+
 class PointerInput
 {
 public:
@@ -62,6 +96,8 @@ public:
     // walk onto the next one. Wanted deliberately: with a zoomed edge the
     // pointer used to slip onto the neighbouring display exactly when the user
     // was trying to reach the edge of the magnified content.
+    //
+    // Not absolute — see EdgeBreakout for the way out.
     void SetLockToMonitor(bool lock);
 
     // True when the event was consumed: the caller must return 1 from the hook
@@ -72,6 +108,10 @@ public:
     void Resync();
 
 private:
+    // True when srcOrigin has run out on that edge, so edge-push cannot reveal
+    // anything more and the only thing left beyond it is the next monitor.
+    bool EdgeIsSaturated(std::size_t index, int edge) const;
+
     ViewportController* m_viewport = nullptr;
     ViewportSnapshot*   m_snapshot = nullptr;
 
@@ -81,10 +121,17 @@ private:
     std::atomic<bool>  m_lockToMonitor{true};
 
     // Touched only from the hook, which runs on one thread. Not atomic.
-    double m_x = 0.0;
-    double m_y = 0.0;
-    POINT  m_lastSet{0, 0};
+    double       m_x = 0.0;
+    double       m_y = 0.0;
+    POINT        m_lastSet{0, 0};
+    EdgeBreakout m_breakout;
 };
+
+#ifdef _DEBUG
+// Assert-based self-check, run from main. Covers EdgeBreakout, which is the
+// only part of this file that is pure logic.
+void PointerInputSelfCheck();
+#endif
 
 } // namespace BetterMagnifier
 

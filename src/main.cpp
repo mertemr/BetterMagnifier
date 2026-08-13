@@ -6,6 +6,7 @@
 #include "App.h"
 #include "SettingsStore.h"
 #include "ViewportController.h"
+#include "PointerInput.h"
 #include "SystemCursor.h"
 #include "CursorRenderer.h"
 #include "Logger.h"
@@ -134,6 +135,7 @@ int WINAPI wWinMain(
 
     BetterMagnifier::SettingsStoreSelfCheck();
     BetterMagnifier::ViewportControllerSelfCheck();
+    BetterMagnifier::PointerInputSelfCheck();
 
     // --self-check runs the pure-logic assertions and exits, so the suite is
     // scriptable. Without it the process would go on to open windows and never

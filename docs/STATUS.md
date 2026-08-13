@@ -358,6 +358,7 @@ Kept deliberately, for testing across machines.
 | `BM_DUMP_FRAME=<path>` | Dump one back buffer to BMP; the overlay is excluded from capture, so this is the only outside view of the render |
 | `BM_DUMP_AFTER=<n>` | Which frame to dump (default 60) |
 | `BM_PANEL=1` | Enable the control panel: adds the tray entry and opens it at startup |
+| `BM_POINTER_BREAKOUT_MS=<n>` | How long a shove at a spent edge must be held before the monitor lock opens (default 300; 0 makes the lock nominal) |
 
 **These have to be set persistently now.** Elevation broke the obvious way of
 using them: a process elevated through UAC gets a fresh environment built from

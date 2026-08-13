@@ -19,6 +19,8 @@ namespace {
 //                     1 = hand maps 1:1 on the magnified screen (slowest)
 //                     0 = native, pointer flies at zoom times speed
 //   BM_POINTER_LOCK   0 to let the pointer leave the magnified monitor
+//   BM_POINTER_BREAKOUT_MS  how long a shove at a spent edge has to be held
+//                     before the lock opens (default 300)
 float ReadEnvFloat(const wchar_t* name, float fallback)
 {
     wchar_t buf[32]{};
@@ -31,6 +33,31 @@ float ReadEnvFloat(const wchar_t* name, float fallback)
 }
 
 } // namespace
+
+bool EdgeBreakout::Update(int edge, bool saturated, unsigned long timeMs)
+{
+    // Off the edge, or the view can still pan: nothing to break out of, and the
+    // pressure that had built up is spent.
+    if (edge < 0 || !saturated)
+    {
+        Reset();
+        return false;
+    }
+
+    // A different edge is a different intention, so the hold starts over. Not
+    // an early return: a hold of zero has to open on this very event.
+    if (edge != m_edge)
+    {
+        m_edge  = edge;
+        m_since = timeMs;
+        m_open  = false;
+    }
+
+    if (!m_open && (timeMs - m_since) >= m_holdMs)
+        m_open = true;
+
+    return m_open;
+}
 
 void PointerInput::Attach(ViewportController* controller, ViewportSnapshot* snapshot)
 {
@@ -53,10 +80,24 @@ void PointerInput::Attach(ViewportController* controller, ViewportSnapshot* snap
             SetLockToMonitor(buf[0] != L'0');
     }
 
-    LOG_INFO("Pointer tuning: speed={:.2f} compensation={:.2f} lockToMonitor={}",
+    unsigned long holdMs = EdgeBreakout::kDefaultHoldMs;
+    {
+        wchar_t buf[16]{};
+        if (GetEnvironmentVariableW(L"BM_POINTER_BREAKOUT_MS", buf, 16) > 0)
+        {
+            const long v = _wtol(buf);
+            if (v >= 0)
+                holdMs = static_cast<unsigned long>(v);
+        }
+    }
+    m_breakout.SetHoldMs(holdMs);
+
+    LOG_INFO("Pointer tuning: speed={:.2f} compensation={:.2f} lockToMonitor={} "
+             "breakoutMs={}",
              m_speed.load(std::memory_order_relaxed),
              m_compensation.load(std::memory_order_relaxed),
-             m_lockToMonitor.load(std::memory_order_relaxed) ? "on" : "off");
+             m_lockToMonitor.load(std::memory_order_relaxed) ? "on" : "off",
+             holdMs);
 
     Resync();
 }
@@ -106,6 +147,34 @@ void PointerInput::Resync()
         m_snapshot->pointerX.store(m_x, std::memory_order_relaxed);
         m_snapshot->pointerY.store(m_y, std::memory_order_relaxed);
     }
+}
+
+bool PointerInput::EdgeIsSaturated(std::size_t index, int edge) const
+{
+    if (edge < 0 || !m_viewport)
+        return false;
+
+    // With edge-push off the view never moves, so there is nothing to wait for
+    // and pressure alone decides.
+    if (!m_viewport->Config().enabled)
+        return true;
+
+    // Half a source pixel: below that the view cannot move again anyway, and an
+    // exact comparison would never fire against a double that edge-push has
+    // been nudging in fractions.
+    constexpr double kEps = 0.5;
+
+    const MonitorViewport& v = m_viewport->Viewport(index);
+
+    switch (static_cast<Edge>(edge))
+    {
+    case Edge::Left:   return v.srcOriginX <= kEps;
+    case Edge::Right:  return v.srcOriginX >= m_viewport->MaxSrcOriginX(index) - kEps;
+    case Edge::Top:    return v.srcOriginY <= kEps;
+    case Edge::Bottom: return v.srcOriginY >= m_viewport->MaxSrcOriginY(index) - kEps;
+    }
+
+    return false;
 }
 
 bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
@@ -172,13 +241,37 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
     // Confine the pointer to the magnified display when asked. The source edge
     // is already reachable through edge-push, so there is nothing left on this
     // monitor that walking off it would get you.
+    //
+    // The clamp is not absolute, and that is the fix for what it used to be:
+    // a hard lock made the next display unreachable without turning zoom off.
+    // Keep shoving into the same edge once edge-push has run out of source and
+    // EdgeBreakout opens the clamp, so a deliberate crossing still works while
+    // an accidental brush past the edge does not.
     if (m_lockToMonitor.load(std::memory_order_relaxed))
     {
-        const MonitorViewport& v = m_viewport->Viewport(static_cast<std::size_t>(monitor));
-        m_x = std::clamp(m_x, static_cast<double>(v.originX),
-                              static_cast<double>(v.originX + v.width)  - 1.0);
-        m_y = std::clamp(m_y, static_cast<double>(v.originY),
-                              static_cast<double>(v.originY + v.height) - 1.0);
+        const std::size_t mi = static_cast<std::size_t>(monitor);
+        const MonitorViewport& v = m_viewport->Viewport(mi);
+
+        const double minX = static_cast<double>(v.originX);
+        const double maxX = static_cast<double>(v.originX + v.width)  - 1.0;
+        const double minY = static_cast<double>(v.originY);
+        const double maxY = static_cast<double>(v.originY + v.height) - 1.0;
+
+        int edge = -1;
+        if      (m_x > maxX) edge = static_cast<int>(Edge::Right);
+        else if (m_x < minX) edge = static_cast<int>(Edge::Left);
+        else if (m_y > maxY) edge = static_cast<int>(Edge::Bottom);
+        else if (m_y < minY) edge = static_cast<int>(Edge::Top);
+
+        if (!m_breakout.Update(edge, EdgeIsSaturated(mi, edge), data.time))
+        {
+            m_x = std::clamp(m_x, minX, maxX);
+            m_y = std::clamp(m_y, minY, maxY);
+        }
+    }
+    else
+    {
+        m_breakout.Reset();
     }
 
     m_viewport->ClampPointerToDesktop(m_x, m_y);
@@ -212,7 +305,20 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
 
     const POINT target{ static_cast<LONG>(std::lround(m_x)),
                         static_cast<LONG>(std::lround(m_y)) };
-    SetCursorPos(target.x, target.y);
+
+    if (!SetCursorPos(target.x, target.y))
+    {
+        // The OS cursor is now somewhere we did not put it, and every later
+        // delta is measured from m_lastSet. Recording the target we failed to
+        // reach would leave the two drifting apart for good: the sprite would
+        // be drawn at V while clicks landed at a fixed offset from it, which is
+        // exactly the intermittent misclick this guard exists to end.
+        LOG_WARN("SetCursorPos({}, {}) failed: {} — resyncing to the OS cursor",
+                 target.x, target.y, GetLastError());
+        Resync();
+        return true;
+    }
+
     m_lastSet = target;
 
     m_snapshot->pointerX.store(m_x, std::memory_order_relaxed);
@@ -220,5 +326,83 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
 
     return true;   // swallow: the OS must not also move the cursor
 }
+
+#ifdef _DEBUG
+void PointerInputSelfCheck()
+{
+    constexpr int kRight = static_cast<int>(Edge::Right);
+    constexpr int kLeft  = static_cast<int>(Edge::Left);
+
+    // Not pushing past any edge: nothing ever opens, however long it goes on.
+    {
+        EdgeBreakout b;
+        b.SetHoldMs(300);
+        for (unsigned long t = 0; t < 5000; t += 100)
+            BM_SELFCHECK(b.Update(-1, true, t) == false);
+    }
+
+    // Pushing, but the view can still pan there. Edge-push gets the motion;
+    // the lock must not open while there is still content to reveal.
+    {
+        EdgeBreakout b;
+        b.SetHoldMs(300);
+        for (unsigned long t = 0; t < 5000; t += 100)
+            BM_SELFCHECK(b.Update(kRight, false, t) == false);
+    }
+
+    // The hold has to elapse, and then it stays open while the shove continues.
+    {
+        EdgeBreakout b;
+        b.SetHoldMs(300);
+        BM_SELFCHECK(b.Update(kRight, true, 1000) == false);   // first contact
+        BM_SELFCHECK(b.Update(kRight, true, 1299) == false);   // one ms short
+        BM_SELFCHECK(b.Update(kRight, true, 1300) == true);    // opens
+        BM_SELFCHECK(b.Update(kRight, true, 1301) == true);    // and stays open
+    }
+
+    // Turning into a different edge is a different intention: start over.
+    {
+        EdgeBreakout b;
+        b.SetHoldMs(300);
+        BM_SELFCHECK(b.Update(kRight, true, 1000) == false);
+        BM_SELFCHECK(b.Update(kLeft,  true, 1400) == false);   // not 400ms of THIS edge
+        BM_SELFCHECK(b.Update(kLeft,  true, 1700) == true);
+    }
+
+    // Coming off the edge closes it again, so the next crossing has to be
+    // earned as well. Without this one shove would open the lock for good.
+    {
+        EdgeBreakout b;
+        b.SetHoldMs(300);
+        BM_SELFCHECK(b.Update(kRight, true, 1000) == false);
+        BM_SELFCHECK(b.Update(kRight, true, 1400) == true);
+        BM_SELFCHECK(b.Update(-1,     true, 1500) == false);   // back inside
+        BM_SELFCHECK(b.Update(kRight, true, 1600) == false);   // hold restarts
+        BM_SELFCHECK(b.Update(kRight, true, 1900) == true);
+    }
+
+    // The event timestamps come from GetTickCount, which wraps every 49 days.
+    // Unsigned subtraction has to carry the shove across that boundary rather
+    // than making the lock unopenable for 49 days.
+    // 0xFFFFFF00 is 256 ticks short of the wrap, so 300 ms later reads as 44.
+    {
+        EdgeBreakout b;
+        b.SetHoldMs(300);
+        BM_SELFCHECK(b.Update(kRight, true, 0xFFFFFF00ul) == false);
+        BM_SELFCHECK(b.Update(kRight, true, 43ul)  == false);   // 299 ms elapsed
+        BM_SELFCHECK(b.Update(kRight, true, 44ul)  == true);    // 300 ms elapsed
+    }
+
+    // A hold of zero opens on the first event, which is what a user who set
+    // BM_POINTER_BREAKOUT_MS=0 asked for: lock off in all but name.
+    {
+        EdgeBreakout b;
+        b.SetHoldMs(0);
+        BM_SELFCHECK(b.Update(kRight, true, 12345) == true);
+    }
+
+    LOG_INFO("PointerInputSelfCheck passed");
+}
+#endif
 
 } // namespace BetterMagnifier
