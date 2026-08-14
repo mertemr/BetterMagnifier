@@ -236,19 +236,24 @@ void ViewportController::PlaceOnEntry(std::size_t index, Edge entry,
         return static_cast<double>(origin) + srcOrigin + screen / v.zoom;
     };
 
+    // The far edge is width - 1, not width. A monitor spans [origin, origin +
+    // width), so screen position width is the first pixel of the NEXT display:
+    // entering from the right used to land the pointer back on the monitor it
+    // had just left, which bounced it between the two and made a leftward
+    // crossing impossible while a rightward one worked.
     switch (entry)
     {
     case Edge::Left:
         pointerX = sourceAt(0.0, v.originX, v.srcOriginX);
         break;
     case Edge::Right:
-        pointerX = sourceAt(static_cast<double>(v.width), v.originX, v.srcOriginX);
+        pointerX = sourceAt(static_cast<double>(v.width) - 1.0, v.originX, v.srcOriginX);
         break;
     case Edge::Top:
         pointerY = sourceAt(0.0, v.originY, v.srcOriginY);
         break;
     case Edge::Bottom:
-        pointerY = sourceAt(static_cast<double>(v.height), v.originY, v.srcOriginY);
+        pointerY = sourceAt(static_cast<double>(v.height) - 1.0, v.originY, v.srcOriginY);
         break;
     }
 }
@@ -480,7 +485,10 @@ void ViewportControllerSelfCheck()
         BM_SELFCHECK(std::abs(vc.ScreenX(1, px) - 0.0) < 1e-6);   // enters at x=0
     }
 
-    // Entry from the right lands on the far edge.
+    // Entry from the right lands on the far edge — and INSIDE the monitor.
+    // Landing on width rather than width - 1 put the pointer on the first pixel
+    // of the next display, which handed it straight back to the monitor it had
+    // just left. Both assertions matter; the second is the one that was wrong.
     {
         ViewportController vc;
         vc.SetMonitorCount(2);
@@ -489,7 +497,34 @@ void ViewportControllerSelfCheck()
         vc.SetZoom(0, 4.0, 960.0, 540.0);
         double px = 1919.0, py = 540.0;
         vc.PlaceOnEntry(0, Edge::Right, px, py);
-        BM_SELFCHECK(std::abs(vc.ScreenX(0, px) - 1920.0) < 1e-6);
+        BM_SELFCHECK(std::abs(vc.ScreenX(0, px) - 1919.0) < 1e-6);
+        BM_SELFCHECK(vc.MonitorIndexAt(px, py) == 0);
+    }
+
+    // The same for an unmagnified target, which is the case that actually broke:
+    // crossing leftward onto a 1x display has to land on it, not one pixel past.
+    {
+        ViewportController vc;
+        vc.SetMonitorCount(2);
+        vc.SetMonitorRect(0, 0, 0, 1920, 1080);
+        vc.SetMonitorRect(1, 1920, 0, 1920, 1080);
+        vc.SetZoom(1, 4.0, 1920.0 + 960.0, 540.0);   // right display magnified
+
+        double px = 1919.0, py = 540.0;              // just stepped off it
+        vc.PlaceOnEntry(0, Edge::Right, px, py);
+        BM_SELFCHECK(vc.MonitorIndexAt(px, py) == 0);
+    }
+
+    // Bottom is the same off-by-one on the other axis.
+    {
+        ViewportController vc;
+        vc.SetMonitorCount(2);
+        vc.SetMonitorRect(0, 0, 0, 1920, 1080);
+        vc.SetMonitorRect(1, 0, 1080, 1920, 1080);
+        vc.SetZoom(0, 2.0, 960.0, 540.0);
+        double px = 960.0, py = 1079.0;
+        vc.PlaceOnEntry(0, Edge::Bottom, px, py);
+        BM_SELFCHECK(vc.MonitorIndexAt(px, py) == 0);
     }
 
     LOG_INFO("ViewportControllerSelfCheck passed");
