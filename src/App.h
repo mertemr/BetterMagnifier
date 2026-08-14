@@ -119,7 +119,9 @@ private:
 
     // Turn pointer compositing on exactly while a monitor is magnified, and
     // only when the pointer can be hidden safely.
-    void UpdatePointerCompositing(bool anyMonitorZoomed);
+    // anyMonitorZoomed drives the one-shot Windows Magnifier clash check;
+    // pointerOnMagnified is what the pointer feature itself follows.
+    void UpdatePointerCompositing(bool anyMonitorZoomed, bool pointerOnMagnified);
 
     CursorCache m_cursorCache;
     bool        m_pointerCompositing = false;

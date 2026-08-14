@@ -482,8 +482,12 @@ void App::PublishViewportRequests(bool bumpLayout)
 // UpdatePointerCompositing — gercek imleci gizle / geri getir
 // =============================================================================
 //
-// The exposure window is exactly "actively magnifying": the pointer is hidden
-// when a monitor is zoomed and comes back the instant it is not.
+// The exposure window is exactly "the pointer is on a magnified monitor", and
+// it has to be that narrow rather than "some monitor is magnified". Hiding the
+// system pointer is global while the sprite is drawn only over magnified
+// content, so the wider condition left the user with no pointer at all the
+// moment it moved onto an unmagnified display. That was invisible for as long
+// as the monitor lock had no way out; the break-out made it reachable.
 //
 // Gated on MagPathAvailable, and that gate is load-bearing rather than
 // defensive. Hiding the pointer without MagShowSystemCursor means
@@ -492,9 +496,9 @@ void App::PublishViewportRequests(bool bumpLayout)
 // is worse than one in the wrong place. So when the safe hide is unavailable
 // the whole feature stays off and the pointer behaves natively.
 // =============================================================================
-void App::UpdatePointerCompositing(bool anyMonitorZoomed)
+void App::UpdatePointerCompositing(bool anyMonitorZoomed, bool pointerOnMagnified)
 {
-    const bool want = anyMonitorZoomed
+    const bool want = pointerOnMagnified
                    && m_settings.General().pointerScaling
                    && SystemCursor::MagPathAvailable()
                    && !m_pointerCompositingBroken;
@@ -550,6 +554,7 @@ void App::Update()
     GetCursorPos(&cursor);
 
     bool anyActive = false;
+    bool pointerOnMagnified = false;
     const size_t count = m_overlays.size();
 
     for (size_t i = 0; i < count; ++i)
@@ -592,6 +597,9 @@ void App::Update()
 
         anyActive = true;
 
+        if (PtInRect(&mon->bounds, cursor))
+            pointerOnMagnified = true;
+
         if (!m_overlays[i].IsVisible())
             m_overlays[i].Show();
 
@@ -614,7 +622,7 @@ void App::Update()
         RenderMonitor(i);
     }
 
-    UpdatePointerCompositing(anyActive);
+    UpdatePointerCompositing(anyActive, pointerOnMagnified);
 
     // A periodic backstop only. The real mechanism is event-driven
     // (WM_APP_ASSERT_TOPMOST); this catches whatever slips past it, and is
@@ -1546,7 +1554,7 @@ void App::Shutdown()
     // Before anything else can fail: give the pointer back. Every other
     // teardown step is recoverable by restarting the app; a hidden pointer is
     // not, because the user cannot click anything to fix it.
-    UpdatePointerCompositing(false);
+    UpdatePointerCompositing(false, false);
     m_cursorCache.Clear();
 
     // GUI thread first: the panel holds pointers to m_settings and m_status and
