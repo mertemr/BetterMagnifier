@@ -1,8 +1,8 @@
 # BetterMagnifier
 
-[![Build](https://github.com/mertemr/Win11-BetterMagnifier/actions/workflows/build.yml/badge.svg)](https://github.com/mertemr/Win11-BetterMagnifier/actions/workflows/build.yml)
+[![Build](https://github.com/mertemr/BetterMagnifier/actions/workflows/build.yml/badge.svg)](https://github.com/mertemr/BetterMagnifier/actions/workflows/build.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Latest release](https://img.shields.io/github/v/release/mertemr/Win11-BetterMagnifier?include_prereleases)](../../releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/mertemr/BetterMagnifier?include_prereleases)](../../releases/latest)
 
 A live screen magnifier for Windows 11/10 with the one thing the built-in
 Windows Magnifier cannot do: **an independent zoom level per monitor.**
@@ -76,8 +76,8 @@ Windows App SDK via NuGet, so an internet connection is needed for the first
 build.
 
 ```powershell
-git clone https://github.com/mertemr/Win11-BetterMagnifier.git
-cd Win11-BetterMagnifier
+git clone https://github.com/mertemr/BetterMagnifier.git
+cd BetterMagnifier
 .\bm.ps1 run     # builds Debug x64 and launches it
 ```
 
