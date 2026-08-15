@@ -71,6 +71,10 @@ private:
 
     void OnShowPanel();
 
+    // A binding came back from the input thread's keyboard hook.
+    // packed = (which << 16) | virtual key; see WM_APP_HOTKEY_CAPTURED.
+    void OnHotkeyCaptured(UINT modifiers, UINT packed);
+
     // Turns zoom ON when it is off and direction is positive; turns it OFF
     // when stepping down reaches minZoom.
     void OnZoomStep(int direction);

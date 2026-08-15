@@ -56,6 +56,36 @@ inline constexpr UINT WM_APP_ASSERT_TOPMOST   = WM_APP + 8;
 // reach it without clicking a tray icon.
 inline constexpr UINT WM_APP_SHOW_PANEL       = WM_APP + 9;
 
+// ── Hotkey capture ──
+//
+// The panel cannot ask the user to TYPE a hotkey: a XAML TextBox on the
+// island's STA thread takes the whole process down with a stowed exception, and
+// NumberBox goes the same way because it embeds one (docs/PANEL-BLANK.md). So
+// the binding is captured from a real key press instead — through the
+// WH_KEYBOARD_LL hook this application already installs for other reasons.
+//
+// Better than a text field anyway: nothing to mistype, no parser to disagree
+// with, and left/right modifier and extended-key questions never come up
+// because the answer arrives as the (modifiers, vk) pair RegisterHotKey wants.
+//
+// panel -> engine. wParam = kHotkeyToggle or kHotkeyFreeze.
+inline constexpr UINT WM_APP_CAPTURE_HOTKEY   = WM_APP + 10;
+
+// input thread -> engine.
+//   wParam = MOD_* flags
+//   lParam = (which << 16) | virtual key
+//
+// "which" travels back rather than being remembered on the engine side, so a
+// capture that was cancelled and restarted for the other binding cannot deliver
+// its answer to the first one.
+//
+// vk == 0 means cancelled — Escape, or the capture timing out — and the
+// existing binding stands.
+inline constexpr UINT WM_APP_HOTKEY_CAPTURED  = WM_APP + 11;
+
+inline constexpr WPARAM kHotkeyToggle = 0;
+inline constexpr WPARAM kHotkeyFreeze = 1;
+
 // wParam sentinel: not a specific monitor, whichever one holds the cursor.
 inline constexpr WPARAM kFocusedMonitor = static_cast<WPARAM>(-1);
 

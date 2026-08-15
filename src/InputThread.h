@@ -60,6 +60,18 @@ public:
 
     void SetViewportConfig(const ViewportConfig& cfg);
 
+    // Arm the keyboard hook to report the next key combination instead of
+    // acting on it, then disarm itself. The captured event is swallowed, so the
+    // key the user pressed does not also reach whatever has focus.
+    //
+    // Escape cancels, and so does anything that arrives after kCaptureTimeoutMs
+    // — an armed hook that ate every key would be an application that had
+    // silently taken over the keyboard, and there is no UI to get out of it if
+    // the panel is the thing that stopped responding.
+    void ArmHotkeyCapture(WPARAM which);
+    void CancelHotkeyCapture();
+    bool CapturingHotkey() const { return m_captureWhich.load(std::memory_order_relaxed) >= 0; }
+
     PointerInput& Pointer() { return m_pointer; }
 
 private:
@@ -96,6 +108,13 @@ private:
     // not something to find out inside a low-level hook.
     std::atomic<PanMode> m_cfgMode{PanMode::EdgePush};
     std::atomic<float>   m_cfgBandFraction{0.12f};
+
+    // Which binding is being captured, or -1 for "not capturing". Read inside
+    // the hook, so it is one relaxed load on the common path.
+    std::atomic<int>           m_captureWhich{-1};
+    std::atomic<unsigned long> m_captureArmedAt{0};
+
+    static constexpr unsigned long kCaptureTimeoutMs = 10000;
 
     // Input thread only; no synchronisation needed.
     std::uint64_t m_seenLayoutEpoch = 0;

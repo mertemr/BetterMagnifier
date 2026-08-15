@@ -418,6 +418,56 @@ void InputThread::Stop()
     s_instance = nullptr;
 }
 
+void InputThread::ArmHotkeyCapture(WPARAM which)
+{
+    m_captureWhich.store(static_cast<int>(which), std::memory_order_relaxed);
+    m_captureArmedAt.store(GetTickCount(), std::memory_order_relaxed);
+    LOG_INFO("Hotkey capture armed for binding {}", static_cast<int>(which));
+}
+
+void InputThread::CancelHotkeyCapture()
+{
+    if (m_captureWhich.exchange(-1, std::memory_order_relaxed) >= 0)
+        LOG_INFO("Hotkey capture cancelled");
+}
+
+namespace {
+
+// True for keys that only ever qualify another key. Capturing one of these as
+// THE key would produce a binding RegisterHotKey cannot express, and the user
+// would be left pressing Ctrl and wondering why nothing happened.
+bool IsModifierKey(DWORD vk)
+{
+    switch (vk)
+    {
+    case VK_SHIFT:  case VK_LSHIFT:   case VK_RSHIFT:
+    case VK_CONTROL:case VK_LCONTROL: case VK_RCONTROL:
+    case VK_MENU:   case VK_LMENU:    case VK_RMENU:
+    case VK_LWIN:   case VK_RWIN:
+    case VK_CAPITAL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// The MOD_* set RegisterHotKey wants, read from the live keyboard state.
+//
+// GetAsyncKeyState rather than the hook's own flags: KBDLLHOOKSTRUCT describes
+// one key, and the modifiers held alongside it are not in there.
+UINT CurrentHotkeyModifiers()
+{
+    UINT mods = 0;
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= MOD_CONTROL;
+    if (GetAsyncKeyState(VK_MENU)    & 0x8000) mods |= MOD_ALT;
+    if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) mods |= MOD_SHIFT;
+    if ((GetAsyncKeyState(VK_LWIN) & 0x8000) ||
+        (GetAsyncKeyState(VK_RWIN) & 0x8000)) mods |= MOD_WIN;
+    return mods;
+}
+
+} // anonymous namespace
+
 void InputThread::SetFollowMode(FollowMode mode)
 {
     m_followMode.store(mode, std::memory_order_relaxed);
@@ -586,6 +636,60 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
 // =============================================================================
 LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
+    // ── Hotkey capture ──
+    //
+    // Checked before the takeover block below and independently of it: the user
+    // may well be binding a key while shortcut takeover is switched off, and
+    // capture must not depend on an unrelated setting.
+    //
+    // Placed ahead of everything so a capture in progress swallows the key
+    // rather than also acting on it — pressing Ctrl+Alt+Z to rebind it should
+    // not toggle zoom on the way past.
+    if (nCode == HC_ACTION && s_instance && s_instance->m_target &&
+        (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) &&
+        s_instance->m_captureWhich.load(std::memory_order_relaxed) >= 0)
+    {
+        auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
+
+        // Synthetic input must not be able to set a binding either.
+        if (kb && !((kb->flags & LLKHF_INJECTED) && IgnoreInjectedInput()))
+        {
+            InputThread* self = s_instance;
+
+            // An armed hook eats keys. If the panel goes away, or the user
+            // simply forgets, that state must not be permanent — there would be
+            // no way to type anything anywhere, including into whatever they
+            // would use to kill the process.
+            const unsigned long armed = self->m_captureArmedAt.load(std::memory_order_relaxed);
+            if (GetTickCount() - armed > kCaptureTimeoutMs)
+            {
+                self->m_captureWhich.store(-1, std::memory_order_relaxed);
+                PostMessageW(self->m_target, WM_APP_HOTKEY_CAPTURED, 0, 0);
+                return CallNextHookEx(nullptr, nCode, wParam, lParam);
+            }
+
+            // Modifiers alone are not a binding; keep waiting and let them
+            // through so the OS still sees them held.
+            if (IsModifierKey(kb->vkCode))
+                return CallNextHookEx(nullptr, nCode, wParam, lParam);
+
+            const int which = self->m_captureWhich.exchange(-1, std::memory_order_relaxed);
+
+            // Escape cancels. vk 0 tells the engine to keep what it had.
+            const bool cancelled = (kb->vkCode == VK_ESCAPE);
+            const UINT mods = cancelled ? 0u : CurrentHotkeyModifiers();
+            const UINT vk   = cancelled ? 0u : kb->vkCode;
+
+            PostMessageW(self->m_target, WM_APP_HOTKEY_CAPTURED,
+                         static_cast<WPARAM>(mods),
+                         static_cast<LPARAM>((static_cast<unsigned>(which) << 16) | vk));
+
+            // Swallowed either way: the key was an answer to our question, not
+            // input for whatever happens to have focus.
+            return 1;
+        }
+    }
+
     if (nCode == HC_ACTION && s_instance && s_instance->m_target &&
         s_instance->m_hijackMagnifierKeys.load(std::memory_order_relaxed) &&
         (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))

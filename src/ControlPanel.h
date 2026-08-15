@@ -56,6 +56,12 @@ public:
     // Monitor list changed; rebuild the cards if the panel is up. Thread-safe.
     void NotifyDisplayChange();
 
+    // A hotkey capture finished — bound, cancelled or refused. The panel shows
+    // the bindings as static text and puts its buttons into a "press a key"
+    // state, so it has to be told; nothing it polls would reveal either.
+    // Thread-safe.
+    void NotifyHotkeysChanged();
+
     // Shut the GUI thread down and join it. Idempotent.
     void Stop();
 

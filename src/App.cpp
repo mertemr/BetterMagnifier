@@ -1509,6 +1509,65 @@ void App::ApplySettings()
 }
 
 // =============================================================================
+// OnHotkeyCaptured — a key combination came back from the input thread
+// =============================================================================
+//
+// Saved and applied immediately rather than staged for an OK button. The panel
+// has no OK button — every other setting there applies live — and a binding
+// that only takes effect later is a binding the user cannot try.
+// =============================================================================
+void App::OnHotkeyCaptured(UINT modifiers, UINT packed)
+{
+    const unsigned which = (packed >> 16) & 0xFFFFu;
+    const UINT     vk    = packed & 0xFFFFu;
+
+    if (vk == 0)
+    {
+        LOG_INFO("Hotkey capture ended without a binding");
+        m_controlPanel.NotifyHotkeysChanged();
+        return;
+    }
+
+    auto& g = m_settings.MutableGeneral();
+
+    // A modifier-less binding is accepted but is a bad idea: RegisterHotKey
+    // takes it system-wide, so a bare "Z" would swallow that key everywhere.
+    // Refused rather than warned about, because the user cannot undo it from a
+    // panel they can no longer type into.
+    if (modifiers == 0)
+    {
+        LOG_WARN("Refusing a hotkey with no modifier (vk={}): it would be claimed "
+                 "system-wide and make that key unusable everywhere", vk);
+        m_controlPanel.NotifyHotkeysChanged();
+        return;
+    }
+
+    if (which == kHotkeyFreeze)
+    {
+        g.freezeModifiers = modifiers;
+        g.freezeVk        = vk;
+    }
+    else
+    {
+        g.toggleModifiers = modifiers;
+        g.toggleVk        = vk;
+    }
+
+    m_settings.Save();
+
+    const UINT failedMask = m_hotkeyManager.Reregister(g);
+    m_status.hotkeyFailedMask.store(failedMask, std::memory_order_release);
+
+    LOG_INFO("Hotkey {} bound to {}",
+             which == kHotkeyFreeze ? "freeze" : "toggle",
+             ToUtf8(FormatHotkey(modifiers, vk)));
+
+    // The panel shows the bindings as text, so it has to be told; the live
+    // timer only refreshes the monitor cards.
+    m_controlPanel.NotifyHotkeysChanged();
+}
+
+// =============================================================================
 // OnShowPanel — open the control panel
 // =============================================================================
 // The panel lives on its own STA thread; the first call creates it. Without the
@@ -1670,6 +1729,17 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_APP_SHOW_PANEL:
         if (s_instance)
             s_instance->OnShowPanel();
+        return 0;
+
+    case WM_APP_CAPTURE_HOTKEY:
+        if (s_instance)
+            s_instance->m_inputThread.ArmHotkeyCapture(wParam);
+        return 0;
+
+    case WM_APP_HOTKEY_CAPTURED:
+        if (s_instance)
+            s_instance->OnHotkeyCaptured(static_cast<UINT>(wParam),
+                                         static_cast<UINT>(lParam));
         return 0;
 
     case WM_WTSSESSION_CHANGE:

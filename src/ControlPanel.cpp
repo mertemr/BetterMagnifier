@@ -162,6 +162,11 @@ struct ControlPanel::Impl
     // Settings tab
     WUXC::TextBlock   hotkeyWarning{ nullptr };
 
+    // Hotkeys, captured rather than typed — a TextBox here kills the process.
+    WUXC::TextBlock   hotkeyBindings{ nullptr };
+    WUXC::Button      captureToggleButton{ nullptr };
+    WUXC::Button      captureFreezeButton{ nullptr };
+
     // Windows Magnifier clash. Both hidden until it is actually running.
     WUXC::TextBlock   magnifierWarning{ nullptr };
     WUXC::Button      closeMagnifierButton{ nullptr };
@@ -777,28 +782,67 @@ void ControlPanel::BuildSettingsTab()
     // ── Hotkeys ──
     panel.Children().Append(MakeHeader(L"Hotkeys"));
 
-    // Read-only on purpose. A XAML TextBox kills this process: put one in the
-    // island and the first layout pass ends in a stowed exception (0xC000027B),
-    // bisected down to exactly this control while every other control here is
-    // fine. Text input services do not come up for an island on a secondary STA
-    // thread in an unpackaged, elevated process.
+    // Shown as text, changed by pressing keys. There is deliberately no text
+    // field: a XAML TextBox kills this process, and the first layout pass ends
+    // in a stowed exception (0xC000027B) — bisected down to exactly that
+    // control while every other control here is fine. Text input services do
+    // not come up for an island on a secondary STA thread in an unpackaged
+    // process.
     //
-    // Hotkeys are edited in settings.ini and picked up with Reload below. Key
-    // capture through the low-level hook we already own would be nicer, and is
-    // the upgrade path if typing a hotkey in the file gets tiring.
+    // Capture through the WH_KEYBOARD_LL hook the application already installs
+    // turns out to be the better UI anyway: nothing to mistype, no format to
+    // explain, and the extended-key and left/right-modifier questions never
+    // arise because the answer arrives as the pair RegisterHotKey wants.
+    m_impl->hotkeyBindings = WUXC::TextBlock{};
+    m_impl->hotkeyBindings.FontFamily(WUX::Media::FontFamily{ L"Consolas" });
+    m_impl->hotkeyBindings.IsTextSelectionEnabled(true);
+    m_impl->hotkeyBindings.Text(winrt::hstring{
+        L"Toggle zoom:  " + FormatHotkey(g.toggleModifiers, g.toggleVk) +
+        L"\nFreeze:       " + FormatHotkey(g.freezeModifiers, g.freezeVk) });
+    panel.Children().Append(m_impl->hotkeyBindings);
+
     {
-        WUXC::TextBlock bindings{};
-        bindings.Text(winrt::hstring{
-            L"Toggle zoom:  " + FormatHotkey(g.toggleModifiers, g.toggleVk) +
-            L"\nFreeze:       " + FormatHotkey(g.freezeModifiers, g.freezeVk) });
-        bindings.FontFamily(WUX::Media::FontFamily{ L"Consolas" });
-        bindings.IsTextSelectionEnabled(true);
-        panel.Children().Append(bindings);
+        WUXC::StackPanel row{};
+        row.Orientation(WUXC::Orientation::Horizontal);
+        row.Spacing(8);
+        row.Margin(WUX::ThicknessHelper::FromLengths(0, 6, 0, 0));
+
+        const HWND engine = m_engineHwnd;
+
+        auto makeCapture = [this, engine](std::wstring_view label, WPARAM which)
+        {
+            WUXC::Button b{};
+            b.Content(winrt::box_value(winrt::hstring{ label }));
+            b.Click([this, engine, which](winrt::Windows::Foundation::IInspectable const& sender,
+                                          WUX::RoutedEventArgs const&)
+            {
+                if (!engine)
+                    return;
+
+                // Say so on the button itself. The capture is silent otherwise:
+                // the key press goes to a hook rather than to any control, so
+                // without this the window looks like it stopped responding.
+                if (auto btn = sender.try_as<WUXC::Button>())
+                    btn.Content(winrt::box_value(L"Press a key..."));
+
+                PostMessageW(engine, WM_APP_CAPTURE_HOTKEY, which, 0);
+            });
+            return b;
+        };
+
+        m_impl->captureToggleButton = makeCapture(L"Set toggle key", kHotkeyToggle);
+        m_impl->captureFreezeButton = makeCapture(L"Set freeze key", kHotkeyFreeze);
+
+        row.Children().Append(m_impl->captureToggleButton);
+        row.Children().Append(m_impl->captureFreezeButton);
+        panel.Children().Append(row);
     }
 
     panel.Children().Append(MakeHint(
-        L"Edit these in settings.ini and press Reload below. "
-        L"Format: Ctrl+Alt+Z. Modifiers: Ctrl, Alt, Shift, Win. Keys: A-Z, 0-9, F1-F24."));
+        L"Press the button, then the combination you want. Escape cancels, and so does "
+        L"waiting ten seconds. At least one of Ctrl, Alt, Shift or Win is required: "
+        L"without one the key would be claimed system-wide and stop working everywhere "
+        L"else. The bindings also live in settings.ini and can be edited there."));
 
     m_impl->hotkeyWarning = WUXC::TextBlock{};
     m_impl->hotkeyWarning.FontSize(12.0);
@@ -1210,6 +1254,44 @@ void ControlPanel::NotifyDisplayChange()
     auto queue = m_impl->queue;
     if (queue)
         queue.TryEnqueue([this]() { RebuildMonitorCards(); });
+}
+
+// =============================================================================
+// NotifyHotkeysChanged
+// =============================================================================
+// Only the two things a capture can have moved: the displayed bindings and the
+// buttons' captions. Deliberately not a BuildSettingsTab call — rebuilding the
+// whole tab would throw away a slider the user happens to be dragging, and
+// would fire every control's change event on the way back in.
+// =============================================================================
+void ControlPanel::NotifyHotkeysChanged()
+{
+    if (!m_running.load(std::memory_order_acquire))
+        return;
+
+    auto queue = m_impl->queue;
+    if (!queue)
+        return;
+
+    queue.TryEnqueue([this]()
+    {
+        if (!m_settings || m_stopping.load(std::memory_order_acquire))
+            return;
+
+        const auto& g = m_settings->General();
+
+        if (m_impl->hotkeyBindings)
+        {
+            m_impl->hotkeyBindings.Text(winrt::hstring{
+                L"Toggle zoom:  " + FormatHotkey(g.toggleModifiers, g.toggleVk) +
+                L"\nFreeze:       " + FormatHotkey(g.freezeModifiers, g.freezeVk) });
+        }
+
+        if (m_impl->captureToggleButton)
+            m_impl->captureToggleButton.Content(winrt::box_value(L"Set toggle key"));
+        if (m_impl->captureFreezeButton)
+            m_impl->captureFreezeButton.Content(winrt::box_value(L"Set freeze key"));
+    });
 }
 
 // =============================================================================
