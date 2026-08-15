@@ -6,10 +6,10 @@ design decision in this codebase.
 
 ## Read this first
 
-@docs/STATUS.md is the maintained source of truth: architecture, the three-thread
-model and why it exists, the magnification transform, and current state. Read it
-before changing anything under `src/`. @docs/PANEL-BLANK.md holds the control-panel
-diagnosis notes (Turkish).
+@docs/ARCHITECTURE.md is the maintained source of truth: the three-thread
+model and why it exists, the magnification transform, the control panel's
+load-bearing gotchas, and known limitations. Read it before changing anything
+under `src/`.
 
 ## Build
 
@@ -63,7 +63,6 @@ the Windows App SDK through `PackageReference`.
 - Comments are in English; commits follow Conventional Commits
   (`feat(input):`, `fix(render):`, `refactor:`).
 - `spike/` holds throwaway experiments — not shipped code, don't refactor it.
-- `docs/superpowers/` holds plans and specs written by earlier sessions.
 - `res/*.ico` is **generated** by `tools/make-icons.ps1`, not hand-drawn. Change
   the glyph or palette there and rerun; editing the binaries loses the source.
 
