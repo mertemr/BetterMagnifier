@@ -6,6 +6,7 @@
 #include "pch.h"
 #include "ControlPanel.h"
 #include "AppMessages.h"
+#include "resource.h"
 #include "SettingsStore.h"
 #include "StatusSnapshot.h"
 #include "Logger.h"
@@ -349,7 +350,8 @@ void ControlPanel::BuildUi()
     wc.cbSize        = sizeof(wc);
     wc.lpfnWndProc   = HostWndProc;
     wc.hInstance     = GetModuleHandleW(nullptr);
-    wc.hIcon         = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon         = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm       = wc.hIcon;
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kHostClassName;
     RegisterClassExW(&wc);

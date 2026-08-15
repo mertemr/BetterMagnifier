@@ -22,6 +22,7 @@
 #include "pch.h"
 #include "App.h"
 #include "SystemCursor.h"
+#include "resource.h"
 #include "Logger.h"
 
 #include <wtsapi32.h>   // WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK
@@ -188,9 +189,14 @@ bool App::CreateMessageWindow()
     wc.hInstance     = m_hInstance;
     wc.lpszClassName = kMsgWindowClass;
 
+    // This window is never shown, but it is the process' owner window, and that
+    // is what Alt+Tab, the UAC prompt and Task Manager pick the icon up from.
+    wc.hIcon   = LoadIconW(m_hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = wc.hIcon;
+
     if (!RegisterClassExW(&wc))
     {
-        LOG_ERROR("Mesaj penceresi class kaydi basarisiz: {}", GetLastError());
+        LOG_ERROR("Message window class registration failed: {}", GetLastError());
         return false;
     }
 
@@ -542,12 +548,14 @@ void App::Update()
 
     PublishViewportRequests(false);
 
-    // ── Mouse pozisyonunu takip et (magnifier fareyi izler) ──
+    // ── Follow the pointer ──
     POINT cursor{};
     GetCursorPos(&cursor);
 
-    bool anyActive = false;
-    bool pointerOnMagnified = false;
+    bool   anyActive = false;
+    bool   pointerOnMagnified = false;
+    size_t activeCount = 0;
+    float  singleZoom  = 1.0f;   // only meaningful when activeCount == 1
     const size_t count = m_overlays.size();
 
     for (size_t i = 0; i < count; ++i)
@@ -589,6 +597,8 @@ void App::Update()
         }
 
         anyActive = true;
+        ++activeCount;
+        singleZoom = mon->zoom.zoomLevel;
 
         if (PtInRect(&mon->bounds, cursor))
             pointerOnMagnified = true;
@@ -605,6 +615,11 @@ void App::Update()
     }
 
     UpdatePointerCompositing(anyActive, pointerOnMagnified);
+
+    // Published every frame rather than at each of the eight places zoom is
+    // changed. SetState compares first and only calls the shell when the state
+    // it would show has actually moved.
+    m_trayIcon.SetState(activeCount, singleZoom);
 
     // A periodic backstop only. The real mechanism is event-driven
     // (WM_APP_ASSERT_TOPMOST); this catches whatever slips past it, and is
@@ -1021,7 +1036,6 @@ void App::ToggleZoomOnMonitor(size_t i)
             startZoom = std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
 
         m_monitorManager.SetZoom(i, startZoom);
-        m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: on");
     }
     else
     {
@@ -1035,9 +1049,12 @@ void App::ToggleZoomOnMonitor(size_t i)
             updated.lastZoom = std::clamp(levelInUse, ms.minZoom, ms.maxZoom);
             m_settings.SetMonitor(mon->deviceName, updated);
         }
-
-        m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: off");
     }
+
+    // The tray is not told here. Zoom is mutated from eight places and the
+    // notification was already missing from most of them; Update publishes the
+    // settled state every frame instead, for the same reason
+    // PublishViewportRequests does.
 }
 
 void App::OnFreeze()
@@ -1111,24 +1128,23 @@ void App::OnZoomStep(int direction)
                 : std::clamp(ms.minZoom + ms.zoomStep, ms.minZoom, ms.maxZoom);
 
             m_monitorManager.SetZoom(i, startZoom);
-            m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: on");
 
-            LOG_INFO("Monitor {} zoom acildi ({:.2f}x) — Win+arti / Ctrl+Alt+tekerlek", i, startZoom);
+            LOG_INFO("Monitor {} zoom on ({:.2f}x) — Win+Plus / Ctrl+Alt+wheel", i, startZoom);
             return;
         }
 
-        // ── Acikken adim ──
+        // ── Already on: step ──
         const float step = (direction > 0) ? ms.zoomStep : -ms.zoomStep;
         m_monitorManager.AdjustZoom(i, step);
 
-        // ── minZoom'a inildiyse kapat ──
-        // Windows Magnifier'in Win+eksi davranisi. Not: minZoom ayarda 1.0'dan
-        // buyukse (orn. 1.5) o seviyede kapanir — tuhaf gorunebilir ama tutarli.
+        // ── Reaching minZoom turns it off ──
+        // Windows Magnifier's Win+Minus behaviour. Note that a configured
+        // minZoom above 1.0 (say 1.5) closes at that level, which can look odd
         const MonitorInfo* after = m_monitorManager.GetMonitor(i);
         if (after && direction < 0 && after->zoom.zoomLevel <= ms.minZoom)
         {
-            // Kapatmadan ONCE kullanilan seviyeyi sakla: ToggleZoom
-            // zoomLevel'i minZoom'a sifirliyor.
+            // Store the level in use BEFORE closing: ToggleZoom resets
+            // zoomLevel to minZoom.
             if (m_settings.General().rememberZoomLevel)
             {
                 auto updated = ms;
@@ -1138,8 +1154,7 @@ void App::OnZoomStep(int direction)
             }
 
             m_monitorManager.ToggleZoom(i);
-            m_trayIcon.UpdateTooltip(L"BetterMagnifier - Zoom: off");
-            LOG_INFO("Monitor {} zoom kapandi (minZoom'a inildi)", i);
+            LOG_INFO("Monitor {} zoom off (stepped down to minZoom)", i);
         }
 
         return;

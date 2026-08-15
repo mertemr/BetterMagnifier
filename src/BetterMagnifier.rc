@@ -1,0 +1,55 @@
+// Resource script. The .ico files are generated, not hand-drawn: see
+// tools\make-icons.ps1 for the glyph and the palette.
+
+#include "resource.h"
+#include <winver.h>
+
+/////////////////////////////////////////////////////////////////////////////
+// Icons
+//
+// Paths are relative to this file, which is what rc.exe resolves them against.
+
+IDI_APP_ICON   ICON   "..\\res\\BetterMagnifier.ico"
+IDI_TRAY_ON    ICON   "..\\res\\tray-on.ico"
+IDI_TRAY_OFF   ICON   "..\\res\\tray-off.ico"
+
+/////////////////////////////////////////////////////////////////////////////
+// Version
+//
+// Not decoration: without a version block the exe shows blank publisher and
+// description fields everywhere Windows displays them — the UAC prompt included,
+// which for an application that asks for administrator rights is exactly the
+// wrong first impression.
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION      0,1,0,0
+ PRODUCTVERSION   0,1,0,0
+ FILEFLAGSMASK    VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS        VS_FF_DEBUG
+#else
+ FILEFLAGS        0x0L
+#endif
+ FILEOS           VOS_NT_WINDOWS32
+ FILETYPE         VFT_APP
+ FILESUBTYPE      VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"   // US English, Unicode
+        BEGIN
+            VALUE "FileDescription", "BetterMagnifier"
+            VALUE "FileVersion",     "0.1.0.0"
+            VALUE "InternalName",    "BetterMagnifier"
+            VALUE "LegalCopyright",  "MIT licensed"
+            VALUE "OriginalFilename","BetterMagnifier.exe"
+            VALUE "ProductName",     "BetterMagnifier"
+            VALUE "ProductVersion",  "0.1.0.0"
+            VALUE "Comments",        "Screen magnifier with independent zoom per monitor"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

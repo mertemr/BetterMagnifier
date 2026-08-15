@@ -25,7 +25,15 @@ public:
     bool Create(HWND hwnd, HINSTANCE hInstance);
     void Destroy();
 
-    void UpdateTooltip(const wchar_t* text);
+    // The tray is the only place the application is visible while it is idle,
+    // and until this existed it showed the generic Windows icon and a tooltip
+    // that never changed. Called every frame from App::Update with the settled
+    // state; it compares and returns when nothing moved, so the cost of that is
+    // two integer compares and no shell call.
+    //
+    //   activeCount  how many monitors are magnified right now
+    //   zoom         that monitor's level, meaningful only when activeCount==1
+    void SetState(size_t activeCount, float zoom);
 
     // Handles kTrayCallbackMsg
     void HandleMessage(WPARAM wParam, LPARAM lParam);
@@ -45,8 +53,20 @@ private:
     void ShowContextMenu();
 
     HWND            m_hwnd = nullptr;
+    HINSTANCE       m_hInstance = nullptr;
     NOTIFYICONDATAW m_nid{};
     bool            m_created = false;
+
+    // Loaded once. LoadIcon returns a shared handle from the module's resources
+    // and must not be destroyed, which is why there is no cleanup for these.
+    HICON m_iconOn  = nullptr;
+    HICON m_iconOff = nullptr;
+
+    // Last published state, so SetState can be called at frame rate. A
+    // Shell_NotifyIcon per frame is a round trip to explorer.exe and shows up
+    // as tray flicker.
+    size_t m_lastActiveCount = static_cast<size_t>(-1);
+    float  m_lastZoom        = -1.0f;
 
     std::function<void()> m_onToggle;
     std::function<void()> m_onSettings;
