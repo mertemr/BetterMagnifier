@@ -183,7 +183,7 @@ bool D3DRenderer::CreateDevice()
 
 #ifdef _DEBUG
     // The DirectX debug layer, on Debug builds
-    // VS2022 Output penceresinde DirectX hatalarini gosterir
+    // Surfaces DirectX errors in the Visual Studio Output window
     createFlags |= D3D11_CREATE_DEVICE_DEBUG;
     LOG_DEBUG("D3D11 debug layer enabled");
 #endif

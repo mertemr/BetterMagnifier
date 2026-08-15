@@ -2,7 +2,7 @@
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
 
   <!-- ===================================================================== -->
-  <!-- BetterMagnifier uygulama manifesti                                    -->
+  <!-- BetterMagnifier application manifest                                  -->
   <!-- ===================================================================== -->
 
   <assemblyIdentity type="win32"
@@ -11,41 +11,43 @@
                     processorArchitecture="*" />
 
   <!--
-    ── Yonetici yetkisi NEREDE TANIMLI ──
+    ── WHERE administrator privilege is actually declared ──
 
-    Burada DEGIL. requestedExecutionLevel'i bu dosyaya yazmak
-    "manifest authoring error c1010001: Values of attribute level not equal in
-    different manifest snippets" ile derlemeyi dusuruyor: MSBuild kendi
-    manifest parcasini asInvoker ile uretiyor ve mt.exe iki farkli degeri
-    birlestiremiyor.
+    Not here. Writing requestedExecutionLevel into this file breaks the build
+    with "manifest authoring error c1010001: Values of attribute level not
+    equal in different manifest snippets": MSBuild generates its own manifest
+    fragment with asInvoker, and mt.exe cannot merge two different level
+    values.
 
-    Dogru yer vcxproj: <Link><UACExecutionLevel>RequireAdministrator.
-    Boylece uretilen manifest bastan dogru doguyor, birlestirme catismasi yok.
+    The right place is the vcxproj: <Link><UACExecutionLevel>RequireAdministrator.
+    That way the generated manifest is correct from the start and there is no
+    merge conflict.
 
-    NE KAZANIYORUZ:
-      Yukseltilmis process daha yuksek integrity seviyesinde calisiyor.
-      Low-level hook'lar (WH_KEYBOARD_LL / WH_MOUSE_LL) kendisinden DUSUK
-      integrity'li pencerelerin girdisini gorebiliyor ve yutabiliyor. Normal
-      seviyede Windows Magnifier'in Win+arti kisayolunu yutamiyorduk;
-      yukseltilmis halde sansimiz daha yuksek.
+    WHAT ELEVATION BUYS US:
+      The elevated process runs at a higher integrity level. Low-level hooks
+      (WH_KEYBOARD_LL / WH_MOUSE_LL) can see and swallow input from windows at
+      a LOWER integrity level than themselves. At normal integrity we could
+      not swallow the Windows Magnifier's Win+Plus shortcut; elevated, the
+      odds are better.
 
-    NE KAZANMIYORUZ — ONEMLI:
-      Yukseltme UIAccess DEGIL. MagSetFullscreenTransform gibi UIAccess
-      isteyen API'ler yine calismaz; onun icin imzali exe + guvenilir konumda
-      kurulum + uiAccess="true" gerekiyor.
+    WHAT IT DOES NOT BUY US — IMPORTANT:
+      Elevation is not UIAccess. APIs that require UIAccess, such as
+      MagSetFullscreenTransform, still will not work; that needs a signed exe,
+      installation in a trusted location, and uiAccess="true".
 
-    BEDELI:
-      - Her acilista UAC penceresi
-      - Yukseltilmemis uygulamalardan surukle-birak calismaz (UIPI)
-      - Windows ile otomatik baslatma (HKCU Run) yukseltilmis process icin
-        sessizce calismaz; Task Scheduler ile "en yuksek ayricaliklarla"
-        gorev olusturmak gerekir
+    THE COST:
+      - A UAC prompt on every launch
+      - Drag and drop from non-elevated applications does not work (UIPI)
+      - Auto-start with Windows (an HKCU Run entry) silently fails for an
+        elevated process; a Task Scheduler task running "with highest
+        privileges" is needed instead
   -->
 
-  <!-- ── Desteklenen Windows surumleri ── -->
+  <!-- ── Supported Windows versions ── -->
   <!--
-    Bu blok olmadan Windows uygulamayi "uyumluluk modunda" calistirip bazi
-    API'lerin davranisini eskitiyor. Windows 10/11 GUID'i sart.
+    Without this block Windows runs the application in "compatibility mode"
+    and downgrades the behaviour of some APIs. The Windows 10/11 GUID is
+    required.
   -->
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
@@ -54,10 +56,10 @@
   </compatibility>
 
   <!--
-    DPI bilincini manifest'te TANIMLAMIYORUZ.
-    main.cpp SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) ile kod
-    tarafinda ayarliyor. Ikisini birden belirtmek catisma yaratir; manifest
-    kazanir ve koddaki cagri sessizce basarisiz olur.
+    DPI awareness is deliberately NOT declared in the manifest.
+    main.cpp sets it in code via
+    SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2). Declaring it in both
+    places conflicts; the manifest wins and the code-side call fails silently.
   -->
 
 </assembly>

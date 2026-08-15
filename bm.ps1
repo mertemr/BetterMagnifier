@@ -1,21 +1,23 @@
 # =============================================================================
-# bm.ps1 — BetterMagnifier derle / calistir / log oku
+# bm.ps1 — build / run / read logs for BetterMagnifier
 # =============================================================================
-# Kullanim:
-#   .\bm.ps1              # Debug derle
-#   .\bm.ps1 run          # Debug derle + calistir
-#   .\bm.ps1 release      # Release derle
-#   .\bm.ps1 check        # Debug derle + tanilama modlarini calistir
-#   .\bm.ps1 log          # en son log dosyasini goster
-#   .\bm.ps1 errors       # en son log'daki WARN/ERROR satirlari
-#   .\bm.ps1 kill         # calisan ornekleri kapat
-#   .\bm.ps1 clean        # bin + obj sil
+# Usage:
+#   .\bm.ps1              # build Debug
+#   .\bm.ps1 run          # build Debug, then launch
+#   .\bm.ps1 release      # build Release
+#   .\bm.ps1 check        # build Debug + run the diagnostic modes
+#   .\bm.ps1 log          # show the newest log file
+#   .\bm.ps1 errors       # WARN/ERROR lines from the newest log
+#   .\bm.ps1 kill         # kill running instances
+#   .\bm.ps1 clean        # delete bin + obj
 #
-# Neden script: msbuild yolu uzun ve Developer PowerShell acmak gerekmiyor.
+# Why a script: the MSBuild path is long, and this avoids having to open a
+# Developer PowerShell.
 #
-# 'check' neden ayri: manifest RequireAdministrator istedigi icin exe'yi normal
-# bir kabuktan calistirmak mumkun degil ("requires elevation"). Bu komut
-# -Verb RunAs ile bir kez UAC sorar, sonucu log'dan okur.
+# Why 'check' is separate: the manifest requires administrator rights, so the
+# exe cannot be launched from an ordinary shell ("requires elevation"). This
+# command asks for UAC once, via -Verb RunAs, and reads the outcome back out
+# of the log.
 # =============================================================================
 
 param(
@@ -29,7 +31,7 @@ Set-Location $PSScriptRoot
 $MSBuild = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
 
 if (-not (Test-Path $MSBuild)) {
-    # VS baska yere kuruluysa vswhere ile bul
+    # Visual Studio installed somewhere else: find it via vswhere.
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (Test-Path $vswhere) {
         $vsPath = & $vswhere -latest -requires Microsoft.Component.MSBuild -property installationPath
@@ -38,12 +40,12 @@ if (-not (Test-Path $MSBuild)) {
 }
 
 function Invoke-Build([string]$Config) {
-    Write-Host "==> $Config x64 derleniyor..." -ForegroundColor Cyan
+    Write-Host "==> Building $Config x64..." -ForegroundColor Cyan
     # /restore: the control panel pulls the Windows App SDK in via
     # PackageReference, and without a restore the WinRT projection is not there.
     & $MSBuild .\BetterMagnifier.sln /restore /p:Configuration=$Config /p:Platform=x64 /v:minimal /nologo
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "==> DERLEME BASARISIZ (exit $LASTEXITCODE)" -ForegroundColor Red
+        Write-Host "==> BUILD FAILED (exit $LASTEXITCODE)" -ForegroundColor Red
         exit $LASTEXITCODE
     }
     Write-Host "==> OK: bin\$Config-x64\BetterMagnifier.exe" -ForegroundColor Green
@@ -64,8 +66,8 @@ switch ($Action) {
     'run' {
         Invoke-Build 'Debug'
         Get-Process BetterMagnifier -ErrorAction SilentlyContinue | Stop-Process -Force
-        Write-Host "==> Calistiriliyor. Kapatmak icin: tepsi ikonu > Exit" -ForegroundColor Cyan
-        Write-Host "    Ctrl+Alt+Z = zoom ac/kapa   Ctrl+Alt+X = freeze   tekerlek = zoom" -ForegroundColor DarkGray
+        Write-Host "==> Launching. To quit: tray icon > Exit" -ForegroundColor Cyan
+        Write-Host "    Ctrl+Alt+Z = toggle zoom   Ctrl+Alt+X = freeze   wheel = zoom" -ForegroundColor DarkGray
         Start-Process ".\bin\Debug-x64\BetterMagnifier.exe"
     }
 
@@ -93,34 +95,34 @@ switch ($Action) {
                 ForEach-Object { "    " + $_.Line.Trim() }
         }
 
-        if ($ok) { Write-Host "==> Tanilama temiz" -ForegroundColor Green }
-        else     { Write-Host "==> Tanilamada hata var" -ForegroundColor Red; exit 1 }
+        if ($ok) { Write-Host "==> Diagnostics clean" -ForegroundColor Green }
+        else     { Write-Host "==> Diagnostics reported a failure" -ForegroundColor Red; exit 1 }
     }
 
     'log' {
         $log = Get-LatestLog
         if ($log) { Write-Host "==> $($log.FullName)" -ForegroundColor Cyan; Get-Content $log.FullName }
-        else { Write-Host "log yok - once calistir" -ForegroundColor Yellow }
+        else { Write-Host "No log yet - build and run first" -ForegroundColor Yellow }
     }
 
     'errors' {
         $log = Get-LatestLog
-        if (-not $log) { Write-Host "log yok - once calistir" -ForegroundColor Yellow; break }
+        if (-not $log) { Write-Host "No log yet - build and run first" -ForegroundColor Yellow; break }
         Write-Host "==> $($log.Name)" -ForegroundColor Cyan
         $hits = Select-String -Path $log.FullName -Pattern '\[WARN |\[ERROR'
         if ($hits) { $hits | ForEach-Object { $_.Line } }
-        else { Write-Host "WARN/ERROR yok - temiz" -ForegroundColor Green }
+        else { Write-Host "No WARN/ERROR - clean" -ForegroundColor Green }
     }
 
     'kill' {
         $p = Get-Process BetterMagnifier -ErrorAction SilentlyContinue
-        if ($p) { $p | Stop-Process -Force; Write-Host "$($p.Count) ornek kapatildi" -ForegroundColor Green }
-        else { Write-Host "calisan ornek yok" }
+        if ($p) { $p | Stop-Process -Force; Write-Host "Stopped $($p.Count) instance(s)" -ForegroundColor Green }
+        else { Write-Host "No running instance" }
     }
 
     'clean' {
         foreach ($d in @('.\bin', '.\obj')) {
-            if (Test-Path $d) { Remove-Item $d -Recurse -Force; Write-Host "silindi: $d" -ForegroundColor Green }
+            if (Test-Path $d) { Remove-Item $d -Recurse -Force; Write-Host "Deleted: $d" -ForegroundColor Green }
         }
     }
 }

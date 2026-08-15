@@ -250,7 +250,7 @@ void OverlayWindow::Reposition(const RECT& bounds)
 }
 
 // =============================================================================
-// WndProc — Overlay penceresi mesaj isleyicisi
+// WndProc — the overlay window's message handler
 // =============================================================================
 //
 // HTTRANSPARENT: Mouse olaylarini bu pencereye DEG1L, altindaki pencereye ilet.
