@@ -877,7 +877,10 @@ void ControlPanel::BuildSettingsTab()
     panel.Children().Append(MakeHint(
         L"Edge push holds the view still while the pointer moves inside it and scrolls "
         L"only near an edge. Centred on the pointer moves the view on every mouse "
-        L"movement. Keyboard focus following currently has no visible effect."));
+        L"movement, so nothing is ever more than half a screen away, at the cost of a "
+        L"view that never settles. Adding keyboard focus also jumps the view to whatever "
+        L"control gains focus; the pointer stays where it was, so it can end up off "
+        L"screen until you move the mouse."));
 
     // ── Zoom limits ──
     panel.Children().Append(MakeHeader(L"Zoom limits"));
@@ -967,7 +970,8 @@ void ControlPanel::BuildSettingsTab()
     panel.Children().Append(MakeHint(
         L"Draws an enlarged pointer and slows mouse movement to match the zoom. Off "
         L"gives the normal Windows pointer, which at high zoom crosses the screen very "
-        L"fast."));
+        L"fast; the view still follows it either way. Needs a supported way to hide the "
+        L"system pointer, and turns itself off if that is missing."));
 
     makeLimitRow(L"Speed", g.pointerSpeed, 0.1, 5.0, 0.05,
                  m_impl->pointerSpeedSlider, m_impl->pointerSpeedLabel);
@@ -1119,7 +1123,22 @@ void ControlPanel::PushSettings()
         double step = m_impl->zoomStepSlider.Value();
 
         if (hi <= lo)
+        {
             hi = lo + 1.0;
+
+            // Put the correction back on screen. Without this the slider goes
+            // on showing the value the user chose while a different one is
+            // saved and applied, and the disagreement only surfaces after a
+            // restart — by which point it looks like the setting was lost.
+            //
+            // The suppress flag is saved and restored rather than cleared:
+            // PushSettings can be reached from a handler that already set it.
+            const bool prev = m_impl->suppressSettingsEvents;
+            m_impl->suppressSettingsEvents = true;
+            m_impl->maxZoomSlider.Value(hi);
+            m_impl->maxZoomLabel.Text(winrt::hstring{ std::format(L"{:.2f}", hi) });
+            m_impl->suppressSettingsEvents = prev;
+        }
 
         const size_t count = m_status
             ? m_status->monitorCount.load(std::memory_order_acquire) : 0;

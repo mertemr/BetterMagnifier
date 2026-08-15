@@ -92,6 +92,26 @@ public:
     // must not draw a sprite — the real pointer is visible and doing the job.
     std::atomic<bool> pointerScaled{false};
 
+    // ── Keyboard focus following: render -> input ──
+    //
+    // One request rather than one per monitor, because focus is singular; the
+    // monitor it landed on travels with it.
+    //
+    // Epoch-gated rather than a bare position, and that is the whole mechanism.
+    // A position alone cannot be distinguished from the same position arriving
+    // again, so the input thread would re-centre on every sync tick and pin the
+    // view to the last focused control for good — the pointer could never move
+    // it again. A counter makes "there is a NEW request" a fact rather than an
+    // inference, and the input thread consumes each one exactly once.
+    //
+    // Write order matters: coordinates first, then the epoch with release, so
+    // an input thread that sees the new epoch also sees the position that goes
+    // with it.
+    std::atomic<std::uint64_t> focusEpoch{0};
+    std::atomic<std::size_t>   focusMonitor{0};
+    std::atomic<double>        focusX{0.0};
+    std::atomic<double>        focusY{0.0};
+
 private:
     std::array<MonitorViewportAtomic, kMaxMonitors> m_monitors{};
 };

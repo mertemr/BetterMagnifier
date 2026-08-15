@@ -195,9 +195,16 @@ bool PointerInput::EdgeIsSaturated(std::size_t index, int edge) const
     if (edge < 0 || !m_viewport)
         return false;
 
-    // With edge-push off the view never moves, so there is nothing to wait for
-    // and pressure alone decides.
-    if (!m_viewport->Config().enabled)
+    // Only edge push has anything left in reserve. Fixed never moves, and
+    // Anchored has already moved as far as this pointer position allows — it is
+    // a closed-form function of the pointer, so a pointer pinned at the edge is
+    // showing everything that edge can show. Either way there is nothing to
+    // wait for and pressure alone decides.
+    //
+    // Stated as a mode test rather than reused geometry on purpose: under
+    // Anchored the arithmetic below misses by (1 - 1/zoom) of a source pixel,
+    // which at high zoom is enough to keep the lock shut for good.
+    if (m_viewport->Config().mode != PanMode::EdgePush)
         return true;
 
     // Half a source pixel: below that the view cannot move again anyway, and an
@@ -216,6 +223,25 @@ bool PointerInput::EdgeIsSaturated(std::size_t index, int edge) const
     }
 
     return false;
+}
+
+// Advance the view for a pointer we are not steering. Everything the scaled
+// path does to the pointer itself is deliberately absent.
+void PointerInput::DriveViewport()
+{
+    const int monitor = m_viewport->MonitorIndexAt(m_x, m_y);
+    if (monitor < 0)
+        return;
+
+    const std::size_t mi = static_cast<std::size_t>(monitor);
+
+    if (m_viewport->Zoom(mi) <= 1.0)
+        return;
+
+    if (m_snapshot->Monitor(mi).frozen.load(std::memory_order_relaxed))
+        return;
+
+    m_viewport->OnPointerMoved(mi, m_x, m_y);
 }
 
 bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
@@ -272,6 +298,18 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
     if (!m_enabled.load(std::memory_order_relaxed))
     {
         trackRaw();
+
+        // The view still has to follow, and this is not a nicety. Panning used
+        // to live entirely inside the scaled path below, so turning "Magnified
+        // pointer" off froze the magnified view outright — and so did landing
+        // on a machine where MagShowSystemCursor is unavailable, because that
+        // takes the same branch. The only thing that could move the view was a
+        // zoom change. It read as the magnifier being broken, not as a setting.
+        //
+        // Nothing else from the scaled path applies here: no clamping, no
+        // SetCursorPos, no swallowing. The OS moves the cursor at its native
+        // speed and we only follow where it went.
+        DriveViewport();
         return false;
     }
 

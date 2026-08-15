@@ -22,9 +22,13 @@ struct ZoomState
 {
     float zoomLevel  = 1.0f;      // 1.0 = no magnification
     bool  isActive   = false;
-    POINT focalPoint = {0, 0};    // anchor, in screen coordinates
     float targetZoom = 1.0f;      // for future smooth interpolation
     bool  isFrozen   = false;     // anchor pinned, view stops following
+
+    // There is deliberately no focal point here any more. The anchor moved to
+    // ViewportController on the input thread, and a copy kept in this struct
+    // was written every frame and read by nobody — which is how it went stale
+    // without anyone noticing.
 
     static constexpr float kMinZoom  = 1.0f;
     static constexpr float kMaxZoom  = 10.0f;

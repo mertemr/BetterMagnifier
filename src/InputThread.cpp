@@ -257,14 +257,14 @@ void InputThread::Attach(ViewportController* controller, ViewportSnapshot* snaps
     m_pointer.Attach(controller, snapshot);
 }
 
-void InputThread::SetEdgePushConfig(const EdgePushConfig& cfg)
+void InputThread::SetViewportConfig(const ViewportConfig& cfg)
 {
-    m_cfgEnabled.store(cfg.enabled, std::memory_order_relaxed);
+    m_cfgMode.store(cfg.mode, std::memory_order_relaxed);
     m_cfgBandFraction.store(cfg.bandFraction, std::memory_order_relaxed);
 }
 
 // =============================================================================
-// SyncFromRequests — render thread'in isteklerini controller'a uygula
+// SyncFromRequests — apply the render thread's requests to the controller
 // =============================================================================
 //
 // Called from the mouse hook and from the sync timer. Idempotent, and cheap
@@ -275,8 +275,8 @@ void InputThread::SyncFromRequests()
     if (!m_viewport || !m_snapshot)
         return;
 
-    EdgePushConfig cfg;
-    cfg.enabled      = m_cfgEnabled.load(std::memory_order_relaxed);
+    ViewportConfig cfg;
+    cfg.mode         = m_cfgMode.load(std::memory_order_relaxed);
     cfg.bandFraction = m_cfgBandFraction.load(std::memory_order_relaxed);
     m_viewport->SetConfig(cfg);
 
@@ -311,10 +311,31 @@ void InputThread::SyncFromRequests()
         if (want != m_viewport->Zoom(i))
             m_viewport->SetZoom(i, want, px, py);
     }
+
+    // Keyboard focus, applied last so it wins over a zoom that was requested in
+    // the same tick — the user just moved focus, and that is the more recent
+    // statement of where they are looking.
+    //
+    // Acquire against App's release: seeing the new epoch guarantees seeing the
+    // coordinates written before it.
+    const std::uint64_t focus = m_snapshot->focusEpoch.load(std::memory_order_acquire);
+    if (focus != m_seenFocusEpoch)
+    {
+        m_seenFocusEpoch = focus;
+
+        const std::size_t mi = m_snapshot->focusMonitor.load(std::memory_order_relaxed);
+        if (mi < m_viewport->MonitorCount()
+            && !m_snapshot->Monitor(mi).frozen.load(std::memory_order_relaxed))
+        {
+            m_viewport->CenterOn(mi,
+                m_snapshot->focusX.load(std::memory_order_relaxed),
+                m_snapshot->focusY.load(std::memory_order_relaxed));
+        }
+    }
 }
 
 // =============================================================================
-// CheckHookLiveness — sessizce kaldirilan hook'u yakala
+// CheckHookLiveness — catch a hook that was silently uninstalled
 // =============================================================================
 //
 // Windows removes a low-level hook without notice when the callback overruns

@@ -85,7 +85,11 @@ class PointerInput
 public:
     void Attach(ViewportController* controller, ViewportSnapshot* snapshot);
 
-    // Off means native behaviour: no swallowing, no SetCursorPos, no sprite.
+    // Off means native pointer behaviour: no swallowing, no SetCursorPos, no
+    // sprite. It does NOT mean the view stops following — panning happens
+    // either way, which it did not always, and see DriveViewport for what that
+    // cost.
+    //
     // Gated by the caller on SystemCursor::MagPathAvailable, because a sprite
     // without hiding the real pointer shows two pointers in different places.
     void SetEnabled(bool enabled);
@@ -126,6 +130,11 @@ private:
     // True when srcOrigin has run out on that edge, so edge-push cannot reveal
     // anything more and the only thing left beyond it is the next monitor.
     bool EdgeIsSaturated(std::size_t index, int edge) const;
+
+    // Pan the view for a pointer we are NOT steering — scaling off, or no safe
+    // way to hide the real cursor. Without this the view only ever moved on the
+    // scaled path, so switching the sprite off froze it in place.
+    void DriveViewport();
 
     // The last few SetCursorPos targets. An injected move at one of them that
     // is not the newest is our own echo arriving late, and has to be dropped

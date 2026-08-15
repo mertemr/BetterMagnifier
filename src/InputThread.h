@@ -58,7 +58,7 @@ public:
     // rate, and that is this thread's event stream.
     void Attach(ViewportController* controller, ViewportSnapshot* snapshot);
 
-    void SetEdgePushConfig(const EdgePushConfig& cfg);
+    void SetViewportConfig(const ViewportConfig& cfg);
 
     PointerInput& Pointer() { return m_pointer; }
 
@@ -91,14 +91,15 @@ private:
     ViewportSnapshot*   m_snapshot = nullptr;
     PointerInput        m_pointer;
 
-    // Split into scalars rather than std::atomic<EdgePushConfig>: the struct is
+    // Split into scalars rather than std::atomic<ViewportConfig>: the struct is
     // 16 bytes and an atomic that wide is not guaranteed lock-free, which is
     // not something to find out inside a low-level hook.
-    std::atomic<bool>  m_cfgEnabled{true};
-    std::atomic<float> m_cfgBandFraction{0.12f};
+    std::atomic<PanMode> m_cfgMode{PanMode::EdgePush};
+    std::atomic<float>   m_cfgBandFraction{0.12f};
 
     // Input thread only; no synchronisation needed.
     std::uint64_t m_seenLayoutEpoch = 0;
+    std::uint64_t m_seenFocusEpoch  = 0;
 
     // Hook liveness. Windows uninstalls a low-level hook without telling anyone
     // when it overruns LowLevelHooksTimeout, and there is no API to ask whether

@@ -161,23 +161,19 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
     }
     else
     {
-        LOG_WARN("EnumDisplaySettings basarisiz: {}", 
+        LOG_WARN("EnumDisplaySettings failed: {}",
             ToUtf8(info.deviceName));
         info.refreshRate = 60;  // Fallback
     }
-
-    // ── 4. Focal Point baslangici — monitorun merkezi ──
-    info.zoom.focalPoint.x = info.bounds.left + info.Width() / 2;
-    info.zoom.focalPoint.y = info.bounds.top + info.Height() / 2;
 }
 
 // =============================================================================
-// MatchDXGIOutputs — DXGI adapter/output'lari fiziksel monitorlerle esle
+// MatchDXGIOutputs — pair DXGI outputs with physical monitors
 // =============================================================================
-// Neden gerekli?
-// Desktop Duplication API "IDXGIOutput" bazinda calisir.
-// Hangi IDXGIOutput'un hangi fiziksel monitore denk geldigini bilmemiz lazim.
-// Eslestirme: DXGI_OUTPUT_DESC.Monitor == MonitorInfo.hMonitor
+// Desktop Duplication works per IDXGIOutput, so we have to know which output
+// corresponds to which physical monitor. The pairing key is
+// DXGI_OUTPUT_DESC.Monitor == MonitorInfo.hMonitor.
+
 //
 // Lifetime: the factory, adapters and outputs created here are held in ComPtr
 // and released when the scope ends. The exception is the output pointer stored

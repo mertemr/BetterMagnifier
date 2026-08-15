@@ -126,6 +126,12 @@ private:
     CursorCache m_cursorCache;
     bool        m_pointerCompositing = false;
 
+    // Sprite size relative to the content scale. Cached rather than read from
+    // SettingsStore in the draw call: the panel thread writes that struct and
+    // only then posts WM_APP_SETTINGS_CHANGED, so a per-frame read would be
+    // racing it. ApplyPointerSettings is the far side of that message.
+    float m_cursorScale = 1.0f;
+
     // Latched once the sprite has proved it cannot be drawn. Without the latch
     // UpdatePointerCompositing would turn the feature straight back on next
     // frame and hide the pointer again, so the failure would loop instead of
@@ -138,10 +144,6 @@ private:
     // Edge-triggers the Windows Magnifier clash check on the transition into
     // magnifying, rather than paying for a FindWindow every frame.
     bool m_wasZoomed = false;
-
-    // Did the cursor actually move? Without this the per-frame mouse tracking
-    // overwrites whatever focus tracking just set.
-    POINT m_lastCursorPos{ -1, -1 };
 
     std::array<std::chrono::steady_clock::time_point, StatusSnapshot::kMaxMonitors> m_lastFrameTime{};
 

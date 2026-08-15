@@ -22,10 +22,13 @@
 
 namespace BetterMagnifier {
 
+// Maps onto ViewportController's PanMode, which is where the behaviour lives.
+// The split exists because this enum also decides whether keyboard focus is
+// followed, and the controller has no concept of focus.
 enum class FollowMode
 {
-    Mouse,           // the view is centred on the pointer (legacy behaviour)
-    MouseAndFocus,   // also follows EVENT_OBJECT_FOCUS
+    Mouse,           // PanMode::Anchored — the view tracks the pointer
+    MouseAndFocus,   // PanMode::Anchored, and EVENT_OBJECT_FOCUS re-centres it
     EdgePush,        // the view holds still until the pointer reaches a band
 };
 
@@ -50,9 +53,6 @@ struct GeneralSettings
     // where they appeared. Our own cursor sprite removed that constraint, so
     // the view can hold still without costing alignment, and a view that stops
     // sliding on every twitch is far less tiring to read.
-    //
-    // MouseAndFocus is currently inert: focalPoint no longer feeds the source
-    // rect. See App::OnFocusChanged.
     FollowMode followMode        = FollowMode::EdgePush;
 
     bool       startWithWindows  = false;

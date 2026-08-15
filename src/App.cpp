@@ -256,13 +256,6 @@ bool App::InitializeComponents()
     // not an error, it is a first run.
     m_settings.Load();
 
-    // Warn rather than silently override: the file may predate the change.
-    if (m_settings.General().followMode == FollowMode::MouseAndFocus)
-    {
-        LOG_WARN("FollowMode=MouseAndFocus currently has no visible effect — the "
-                 "source rect no longer follows focalPoint. See OnFocusChanged.");
-    }
-
     if (!m_monitorManager.Initialize())
     {
         LOG_ERROR("MonitorManager initialisation failed");
@@ -603,17 +596,6 @@ void App::Update()
         if (!m_overlays[i].IsVisible())
             m_overlays[i].Show();
 
-        // Only when the cursor has genuinely moved. Updating unconditionally
-        // overwrites whatever OnFocusChanged wrote on every frame, which makes
-        // focus following look like it does nothing at all.
-        const bool cursorMoved = (cursor.x != m_lastCursorPos.x)
-                              || (cursor.y != m_lastCursorPos.y);
-
-        if (cursorMoved && !mon->zoom.isFrozen && PtInRect(&mon->bounds, cursor))
-        {
-            mon->zoom.focalPoint = cursor;
-        }
-
         // Duplication is lost on things like a fullscreen game taking the
         // output. Retrying is free; failure just means trying again next frame.
         if (m_captures[i].NeedsReinit())
@@ -638,8 +620,6 @@ void App::Update()
     // to not be a spin.
     if (!m_presentedThisTick)
         Sleep(anyActive ? 4 : 8);
-
-    m_lastCursorPos = cursor;
 }
 
 // =============================================================================
@@ -847,7 +827,16 @@ void App::RenderMonitor(size_t monitorIndex)
         // reason clicks land on what the pointer appears to point at.
         if (cursorState == CursorCache::State::Ok)
         {
-            const float scale = static_cast<float>(zoom);
+            // Content scale times the user's preference. Above 1 draws a
+            // pointer larger than the content it sits on, which is what low
+            // vision generally wants and is the entire reason the setting
+            // exists — it was offered in the panel and quietly ignored here for
+            // long enough to be worth naming.
+            //
+            // Only the sprite's extent scales. spritePos is where the hotspot
+            // must land, and that is fixed by the OS cursor position, so a
+            // bigger sprite grows around the point rather than moving it.
+            const float scale = static_cast<float>(zoom) * m_cursorScale;
 
             // The hotspot is what the user points with, so it — not the
             // sprite's corner — is what lands on the computed position.
@@ -1178,19 +1167,45 @@ void App::OnFocusChanged(HWND focused)
     if (!GetWindowRect(focused, &rc))
         return;
 
-    // Sifir boyutlu pencereleri yoksay
+    // Ignore zero-sized windows
     if (rc.right <= rc.left || rc.bottom <= rc.top)
         return;
 
     const POINT center{ (rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2 };
 
-    MonitorInfo* target = m_monitorManager.FindByPoint(center);
-    if (!target)
+    // The index, not just the MonitorInfo: the request travels to the input
+    // thread, which knows monitors by index and nothing else.
+    size_t index = 0;
+    bool   found = false;
+    const auto& monitors = m_monitorManager.GetMonitors();
+    for (size_t i = 0; i < monitors.size(); ++i)
+    {
+        if (PtInRect(&monitors[i].bounds, center))
+        {
+            index = i;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found)
         return;
 
     // Only when that monitor is actually magnified and not frozen.
-    if (!target->zoom.isActive || target->zoom.isFrozen)
+    if (!monitors[index].zoom.isActive || monitors[index].zoom.isFrozen)
         return;
+
+    // Publish, do not apply. The source rect belongs to ViewportController,
+    // which lives on the input thread; writing it from here would be the shared
+    // mutable state this design exists to avoid.
+    //
+    // Coordinates before the epoch, and the epoch with release ordering, so an
+    // input thread that sees the new request also sees the position it refers
+    // to. Reversed, it would centre on the PREVIOUS focus.
+    m_viewportSnapshot.focusMonitor.store(index, std::memory_order_relaxed);
+    m_viewportSnapshot.focusX.store(static_cast<double>(center.x), std::memory_order_relaxed);
+    m_viewportSnapshot.focusY.store(static_cast<double>(center.y), std::memory_order_relaxed);
+    m_viewportSnapshot.focusEpoch.fetch_add(1, std::memory_order_release);
 
     // SetCursorPos was tried here and reverted.
     //
@@ -1212,20 +1227,19 @@ void App::OnFocusChanged(HWND focused)
     // of UI that reacts to pointer position. A magnifier has no business doing
     // it.
     //
-    // INERT SINCE THE VIEWPORT MOVED TO ViewportController. focalPoint no
-    // longer feeds the source rect, so FollowMode::MouseAndFocus currently does
-    // nothing visible. Deliberately left rather than deleted: the state is
-    // still correct and the panel still exposes the mode. Reconnecting it means
-    // asking the controller to centre a monitor on a point, which is a small
-    // addition but belongs with the pointer work rather than ahead of it.
-    target->zoom.focalPoint = center;
+    // So the view moves and the pointer does not, and the consequence is worth
+    // stating plainly: while focus is driving, the real cursor can end up
+    // outside the source window, and the sprite is then simply not on screen.
+    // That is honest rather than broken — the pointer really is elsewhere in
+    // the magnified content — and one mouse movement re-anchors the view and
+    // brings it back. The panel's hint says so.
 }
 
 // =============================================================================
-// ResolveMonitorIndex — wParam'i monitor indeksine cevir
+// ResolveMonitorIndex — turn a wParam into a monitor index
 // =============================================================================
-// kFocusedMonitor sentinel'i = "farenin uzerinde oldugu monitor".
-// Diger degerler dogrudan indeks. Sinir disi indeks false doner.
+// The kFocusedMonitor sentinel means "whichever monitor holds the cursor".
+// Anything else is an index; out of range returns false.
 // =============================================================================
 bool App::ResolveMonitorIndex(WPARAM wparam, size_t& outIndex) const
 {
@@ -1280,21 +1294,41 @@ void App::ApplyPointerSettings()
 {
     const auto& g = m_settings.General();
 
-    EdgePushConfig cfg;
-    cfg.enabled      = (g.followMode == FollowMode::EdgePush);
+    // Both mouse modes map onto Anchored. The difference between them is only
+    // whether keyboard focus ALSO moves the view; how the pointer moves it is
+    // the same in both.
+    ViewportConfig cfg;
+    cfg.mode = (g.followMode == FollowMode::EdgePush) ? PanMode::EdgePush
+                                                      : PanMode::Anchored;
     cfg.bandFraction = g.edgeBandFraction;
-    m_inputThread.SetEdgePushConfig(cfg);
+    m_inputThread.SetViewportConfig(cfg);
 
     m_inputThread.Pointer().SetSpeed(g.pointerSpeed);
     m_inputThread.Pointer().SetCompensation(g.pointerCompensation);
     m_inputThread.Pointer().SetLockToMonitor(g.lockPointerToMonitor);
 
+    // Read by the render thread in RenderMonitor. Clamped to the same range the
+    // loader uses, so a hand-edited INI cannot produce a sprite that covers the
+    // screen or one too small to find.
+    const float wantScale = std::clamp(g.cursorScale, 0.5f, 4.0f);
+
+    if (wantScale != m_cursorScale)
+    {
+        m_cursorScale = wantScale;
+
+        // Force the next frame. The nothing-changed test compares the sprite's
+        // position and shape, and resizing changes neither — so dragging the
+        // size slider on a still screen would do nothing visible until the
+        // mouse happened to move.
+        m_lastSpriteShape.fill(nullptr);
+    }
+
     LOG_INFO("Pointer settings applied: speed={:.2f} comp={:.2f} lock={} "
-             "scaling={} edgePush={} band={:.2f}",
+             "scaling={} pan={} band={:.2f}",
              g.pointerSpeed, g.pointerCompensation,
              g.lockPointerToMonitor ? "on" : "off",
              g.pointerScaling ? "on" : "off",
-             cfg.enabled ? "on" : "off",
+             cfg.mode == PanMode::EdgePush ? "edge-push" : "anchored",
              g.edgeBandFraction);
 
     // Turning pointer scaling off has to give the real pointer back straight

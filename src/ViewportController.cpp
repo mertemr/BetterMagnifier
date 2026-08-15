@@ -199,14 +199,50 @@ double PushAmount(double screen, double length, double band, double zoom,
 
 } // namespace
 
+// =============================================================================
+// AnchorTo — PanMode::Anchored
+// =============================================================================
+//
+// srcOrigin = local * (1 - 1/zoom), the identity the project started with and
+// then gave up to make room for edge push. It is worth stating why it works,
+// because it reads like an arbitrary formula: the pointer's screen position
+// comes out as (local - srcOrigin) * zoom = local, so screen position C shows
+// source pixel C and the sprite drawn at that position lands exactly on the
+// real OS cursor. Click alignment is free, with no coordinate remapping.
+//
+// ScreenX/ScreenY are deliberately NOT used here. They are computed from the
+// current srcOrigin, so feeding the result back into srcOrigin would be a loop
+// that drifts. Monitor-local coordinates are the honest input.
+//
+// The clamp is belt and braces: local lives in [0, width) and the maximum is
+// width * (1 - 1/zoom), so the product is already in range by construction.
+// =============================================================================
+void ViewportController::AnchorTo(std::size_t index, double pointerX, double pointerY)
+{
+    MonitorViewport& v = At(index);
+
+    const double k = 1.0 - 1.0 / v.zoom;
+
+    v.srcOriginX = std::clamp((pointerX - static_cast<double>(v.originX)) * k,
+                              0.0, MaxSrcOriginX(index));
+    v.srcOriginY = std::clamp((pointerY - static_cast<double>(v.originY)) * k,
+                              0.0, MaxSrcOriginY(index));
+}
+
 void ViewportController::OnPointerMoved(std::size_t index, double pointerX, double pointerY)
 {
-    if (!m_cfg.enabled)
+    if (m_cfg.mode == PanMode::Fixed)
         return;
 
     MonitorViewport& v = At(index);
     if (v.zoom <= kNoZoom)
         return;
+
+    if (m_cfg.mode == PanMode::Anchored)
+    {
+        AnchorTo(index, pointerX, pointerY);
+        return;
+    }
 
     const double dx = PushAmount(ScreenX(index, pointerX),
                                  static_cast<double>(v.width),
@@ -222,6 +258,23 @@ void ViewportController::OnPointerMoved(std::size_t index, double pointerX, doub
 
     v.srcOriginX = std::clamp(v.srcOriginX + dx, 0.0, MaxSrcOriginX(index));
     v.srcOriginY = std::clamp(v.srcOriginY + dy, 0.0, MaxSrcOriginY(index));
+}
+
+void ViewportController::CenterOn(std::size_t index, double x, double y)
+{
+    MonitorViewport& v = At(index);
+    if (v.zoom <= kNoZoom)
+        return;
+
+    // Half the source extent, not half the monitor: the source window is
+    // width/zoom wide, and centring on the monitor's half-width would put the
+    // target a long way off centre at anything above 1x.
+    v.srcOriginX = std::clamp(
+        (x - static_cast<double>(v.originX)) - static_cast<double>(v.width)  / v.zoom * 0.5,
+        0.0, MaxSrcOriginX(index));
+    v.srcOriginY = std::clamp(
+        (y - static_cast<double>(v.originY)) - static_cast<double>(v.height) / v.zoom * 0.5,
+        0.0, MaxSrcOriginY(index));
 }
 
 void ViewportController::PlaceOnEntry(std::size_t index, Edge entry,
@@ -339,7 +392,7 @@ void ViewportControllerSelfCheck()
     // Band width is clamped at both ends.
     {
         ViewportController vc;
-        EdgePushConfig cfg;
+        ViewportConfig cfg;
         cfg.bandFraction = 0.12f;
         cfg.bandMinPx    = 80.0f;
         cfg.bandMaxPx    = 300.0f;
@@ -426,10 +479,10 @@ void ViewportControllerSelfCheck()
         BM_SELFCHECK(vc.Viewport(0).srcOriginY > yBefore);
     }
 
-    // Disabled config means the view never moves.
+    // PanMode::Fixed means the view never moves.
     {
         ViewportController vc;
-        EdgePushConfig cfg; cfg.enabled = false;
+        ViewportConfig cfg; cfg.mode = PanMode::Fixed;
         vc.SetConfig(cfg);
         vc.SetMonitorCount(1);
         vc.SetMonitorRect(0, 0, 0, 1920, 1080);
@@ -439,11 +492,116 @@ void ViewportControllerSelfCheck()
         BM_SELFCHECK(vc.Viewport(0).srcOriginX == before);
     }
 
+    // ── PanMode::Anchored ──
+    //
+    // The defining property, and the reason the mode exists: the pointer's
+    // screen position equals its monitor-local position, so the sprite lands on
+    // the real cursor and a click goes where it looks like it goes.
+    {
+        ViewportController vc;
+        ViewportConfig cfg; cfg.mode = PanMode::Anchored;
+        vc.SetConfig(cfg);
+        vc.SetMonitorCount(1);
+        vc.SetMonitorRect(0, 0, 0, 1920, 1080);
+        vc.SetZoom(0, 4.0, 960.0, 540.0);
+
+        for (double p = 0.0; p <= 1919.0; p += 137.0)
+        {
+            vc.OnPointerMoved(0, p, 540.0);
+            BM_SELFCHECK(std::abs(vc.ScreenX(0, p) - p) < 1e-6);
+            BM_SELFCHECK(vc.Viewport(0).srcOriginX >= 0.0);
+            BM_SELFCHECK(vc.Viewport(0).srcOriginX <= vc.MaxSrcOriginX(0) + 1e-9);
+        }
+    }
+
+    // Anchored on a monitor with a negative origin. srcOrigin is monitor-local
+    // while the pointer is not, and mixing the two is the classic way to get a
+    // view that works on the primary display and nowhere else.
+    {
+        ViewportController vc;
+        ViewportConfig cfg; cfg.mode = PanMode::Anchored;
+        vc.SetConfig(cfg);
+        vc.SetMonitorCount(1);
+        vc.SetMonitorRect(0, -1920, -200, 1920, 1080);
+        vc.SetZoom(0, 3.0, -960.0, 340.0);
+
+        vc.OnPointerMoved(0, -100.0, 340.0);         // near the right edge
+        BM_SELFCHECK(vc.Viewport(0).srcOriginX >= 0.0);
+        BM_SELFCHECK(vc.Viewport(0).srcOriginX <= vc.MaxSrcOriginX(0) + 1e-9);
+        BM_SELFCHECK(std::abs(vc.ScreenX(0, -100.0) - 1820.0) < 1e-6);
+    }
+
+    // A zoom change preserves the anchored identity without any re-anchoring,
+    // because SetZoom pins the pointer's screen position and that position IS
+    // the local one. Left implicit would make the next zoom step a mystery.
+    {
+        ViewportController vc;
+        ViewportConfig cfg; cfg.mode = PanMode::Anchored;
+        vc.SetConfig(cfg);
+        vc.SetMonitorCount(1);
+        vc.SetMonitorRect(0, 0, 0, 1920, 1080);
+        vc.SetZoom(0, 2.0, 1400.0, 900.0);
+        vc.OnPointerMoved(0, 1400.0, 900.0);
+
+        vc.SetZoom(0, 6.0, 1400.0, 900.0);
+        BM_SELFCHECK(std::abs(vc.ScreenX(0, 1400.0) - 1400.0) < 1e-6);
+        BM_SELFCHECK(std::abs(vc.ScreenY(0, 900.0)  -  900.0) < 1e-6);
+    }
+
+    // CenterOn puts the target in the middle of the SOURCE window, which is
+    // width/zoom wide. Using half the monitor width instead is the obvious
+    // mistake and lands the target well off centre at any real zoom.
+    {
+        ViewportController vc;
+        vc.SetMonitorCount(1);
+        vc.SetMonitorRect(0, 0, 0, 1920, 1080);
+        vc.SetZoom(0, 4.0, 960.0, 540.0);
+        vc.CenterOn(0, 800.0, 600.0);
+        BM_SELFCHECK(std::abs(vc.ScreenX(0, 800.0) - 960.0) < 1e-6);
+        BM_SELFCHECK(std::abs(vc.ScreenY(0, 600.0) - 540.0) < 1e-6);
+    }
+
+    // A target near a corner cannot be centred — the source would have to leave
+    // the monitor. It clamps, and the target ends up visible but off centre,
+    // which is the correct outcome and not a failure.
+    {
+        ViewportController vc;
+        vc.SetMonitorCount(1);
+        vc.SetMonitorRect(0, 0, 0, 1920, 1080);
+        vc.SetZoom(0, 4.0, 960.0, 540.0);
+        vc.CenterOn(0, 10.0, 10.0);
+        BM_SELFCHECK(vc.Viewport(0).srcOriginX == 0.0);
+        BM_SELFCHECK(vc.Viewport(0).srcOriginY == 0.0);
+        BM_SELFCHECK(vc.ScreenX(0, 10.0) >= 0.0 && vc.ScreenX(0, 10.0) <= 1920.0);
+    }
+
+    // Same on a monitor with a negative origin.
+    {
+        ViewportController vc;
+        vc.SetMonitorCount(1);
+        vc.SetMonitorRect(0, -1920, -200, 1920, 1080);
+        vc.SetZoom(0, 2.0, -960.0, 340.0);
+        vc.CenterOn(0, -1400.0, 500.0);
+        BM_SELFCHECK(std::abs(vc.ScreenX(0, -1400.0) - 960.0) < 1e-6);
+        BM_SELFCHECK(std::abs(vc.ScreenY(0,   500.0) - 540.0) < 1e-6);
+    }
+
+    // zoom 1: nothing to centre, and srcOrigin must stay pinned at the origin.
+    {
+        ViewportController vc;
+        vc.SetMonitorCount(1);
+        vc.SetMonitorRect(0, 0, 0, 1920, 1080);
+        vc.SetZoom(0, 1.0, 960.0, 540.0);
+        vc.CenterOn(0, 100.0, 100.0);
+        BM_SELFCHECK(vc.Viewport(0).srcOriginX == 0.0);
+        BM_SELFCHECK(vc.Viewport(0).srcOriginY == 0.0);
+    }
+
     // Degenerate: a band wider than half the viewport must not fight itself.
     // Both edges firing at once would oscillate forever.
     {
         ViewportController vc;
-        EdgePushConfig cfg;
+        ViewportConfig cfg;
         cfg.bandFraction = 0.9f;
         cfg.bandMinPx    = 1.0f;
         cfg.bandMaxPx    = 100000.0f;

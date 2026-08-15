@@ -25,12 +25,34 @@ namespace BetterMagnifier {
 
 enum class Edge { Left, Right, Top, Bottom };
 
-struct EdgePushConfig
+// How srcOrigin follows the pointer. One per monitor is not offered on purpose:
+// two displays panning by different rules is a UI nobody asked for.
+enum class PanMode
 {
-    bool  enabled      = true;
-    float bandFraction = 0.12f;    // of the axis length
-    float bandMinPx    = 80.0f;
-    float bandMaxPx    = 300.0f;
+    // The view never moves. Only a zoom change repositions it, and that is
+    // still the case in every mode, because SetZoom pins the content under the
+    // pointer.
+    Fixed,
+
+    // The identity this project started with: srcOrigin = local * (1 - 1/zoom),
+    // which makes screen position C show source pixel C. The view therefore
+    // tracks the pointer on every move — restless to read, but nothing is ever
+    // more than half a screen away.
+    Anchored,
+
+    // The view holds still while the pointer moves inside it and scrolls only
+    // once the pointer reaches a band at the edge.
+    EdgePush,
+};
+
+// Named for the controller rather than for edge push: the band settings are
+// specific to one mode, but the mode itself governs all of them.
+struct ViewportConfig
+{
+    PanMode mode         = PanMode::EdgePush;
+    float   bandFraction = 0.12f;    // of the axis length
+    float   bandMinPx    = 80.0f;
+    float   bandMaxPx    = 300.0f;
 };
 
 struct MonitorViewport
@@ -56,20 +78,26 @@ public:
     void SetMonitorRect(std::size_t index, long originX, long originY,
                         long width, long height);
 
-    void SetConfig(const EdgePushConfig& cfg) { m_cfg = cfg; }
-    const EdgePushConfig& Config() const { return m_cfg; }
+    void SetConfig(const ViewportConfig& cfg) { m_cfg = cfg; }
+    const ViewportConfig& Config() const { return m_cfg; }
 
     // Keeps both the content under the pointer and the pointer's screen
     // position fixed across the change.
     void   SetZoom(std::size_t index, double zoom, double pointerX, double pointerY);
     double Zoom(std::size_t index) const;
 
-    // The pointer has already been advanced by the caller. Pushes srcOrigin
-    // when the pointer's screen position falls inside an edge band. Does not
-    // modify the pointer: when the source runs out, the leftover motion is
-    // exactly what carries the pointer to the physical edge and onto the next
-    // monitor.
+    // The pointer has already been advanced by the caller. What this does with
+    // it depends on the mode; under EdgePush it pushes srcOrigin only when the
+    // pointer's screen position falls inside an edge band. Does not modify the
+    // pointer: when the source runs out, the leftover motion is exactly what
+    // carries the pointer to the physical edge and onto the next monitor.
     void OnPointerMoved(std::size_t index, double pointerX, double pointerY);
+
+    // Puts a virtual-desktop point in the middle of the view. Used by keyboard
+    // focus following, which is the one thing that moves the view without the
+    // pointer moving. Does NOT move the pointer — moving it races every piece
+    // of UI that reacts to pointer position, and that was tried and reverted.
+    void CenterOn(std::size_t index, double x, double y);
 
     // Positions the pointer for a monitor it just entered, preserving that
     // monitor's srcOrigin so the view stays where the user left it.
@@ -101,9 +129,13 @@ private:
     MonitorViewport&       At(std::size_t index);
     const MonitorViewport& At(std::size_t index) const;
 
+    // PanMode::Anchored. Separate because it shares nothing with the edge-push
+    // arithmetic: it is a closed-form function of the pointer, not an increment.
+    void AnchorTo(std::size_t index, double pointerX, double pointerY);
+
     std::array<MonitorViewport, kMaxMonitors> m_v{};
     std::size_t    m_count = 0;
-    EdgePushConfig m_cfg{};
+    ViewportConfig m_cfg{};
 };
 
 #ifdef _DEBUG
