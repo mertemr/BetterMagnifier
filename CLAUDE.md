@@ -21,6 +21,7 @@ the Windows App SDK through `PackageReference`.
 .\bm.ps1            # Debug
 .\bm.ps1 run        # Debug + launch
 .\bm.ps1 release    # Release
+.\bm.ps1 check      # Debug + run the diagnostic modes (elevates, see below)
 .\bm.ps1 errors     # WARN/ERROR lines from the newest log
 .\bm.ps1 kill       # kill stray instances
 ```
@@ -29,11 +30,13 @@ the Windows App SDK through `PackageReference`.
 
 ## Constraints that bite
 
-- **Restore `RequireAdministrator` before shipping.** The manifest level was
-  temporarily switched to `AsInvoker` (2026-08-07) so panel testing doesn't hit a
-  UAC prompt every launch. It must be restored in **all four** `ItemDefinitionGroup`
-  blocks in the vcxproj — a comment marks each site. Shipping `AsInvoker` silently
-  breaks magnification over elevated windows.
+- **`RequireAdministrator` lives in the vcxproj, in four places.** All four
+  `ItemDefinitionGroup` blocks carry `UACExecutionLevel`, and they have to agree;
+  `AsInvoker` silently breaks magnification over elevated windows. Not in
+  `app.manifest`, because `mt.exe` cannot merge two different level values
+  (c1010001). If you flip it to `AsInvoker` for a testing session, flip all four
+  back — and note that every launch then costs a UAC prompt, so scripted checks
+  want `--self-check` or `BM_PANEL=1` rather than driving the window.
 - **Low-level hooks must stay on the input thread.** `WH_MOUSE_LL` and
   `WH_KEYBOARD_LL` run on the message queue of the thread that installed them. The
   render thread blocks in `Present`, so a hook there puts every mouse and key event
@@ -43,8 +46,15 @@ the Windows App SDK through `PackageReference`.
 - **No shared mutable state on the hot path.** Render/input/GUI threads communicate
   by `PostMessage` (`WM_APP_*`) and lock-free atomic writes to `StatusSnapshot`.
   Adding a lock to the render path is a correctness regression, not an optimisation.
-- The control panel is **off by default**; `BM_PANEL=1` enables it. The tray
-  "Settings…" item only appears when that switch is on.
+- The control panel is on, reachable from the tray's "Settings…". `BM_PANEL=1`
+  now only makes it **open at startup**, which is a test affordance: UIPI stops a
+  normal-integrity script from clicking the tray or posting the window a message,
+  so having the app open it is the only way in from outside.
+- **No XAML control that embeds a `TextBox` may go in the panel.** `TextBox` and
+  `NumberBox` both take the process down with a stowed exception on first layout.
+  Sliders, checkboxes, radio buttons, toggles and buttons are proven safe.
+  Hotkeys are captured through the existing `WH_KEYBOARD_LL` hook rather than
+  typed.
 - The GUI thread runs its own `GetMessage` loop rather than `Application::Start`,
   so `PostThreadMessage(WM_QUIT)` can end it. Don't "simplify" it back.
 
@@ -54,3 +64,28 @@ the Windows App SDK through `PackageReference`.
   (`feat(input):`, `fix(render):`, `refactor:`).
 - `spike/` holds throwaway experiments — not shipped code, don't refactor it.
 - `docs/superpowers/` holds plans and specs written by earlier sessions.
+- `res/*.ico` is **generated** by `tools/make-icons.ps1`, not hand-drawn. Change
+  the glyph or palette there and rerun; editing the binaries loses the source.
+
+## Verifying without hands
+
+Three diagnostic modes cover everything checkable without looking at a screen —
+`--self-check` (pure-logic assertions), `--dump-cursors` and `--dump-osd` (both
+write BMPs for eyeballing). All three are exempt from the single-instance mutex,
+so they run while the app is running.
+
+They are **not** exempt from elevation: `RequireAdministrator` is a property of
+the binary, so launching the exe from an ordinary shell fails outright with
+"requires elevation". Use the wrapper, which elevates once and reads the results
+back out of the log:
+
+```bash
+.\bm.ps1 check
+```
+
+`BM_DUMP_FRAME` plus `BM_ALLOW_INJECTED=1` gets an actual magnified frame out of
+a running instance — the overlay is excluded from capture, so it is the only
+outside view of the render. Note that driving the pointer with `SetCursorPos`
+from a script produces no `WH_MOUSE_LL` event on this machine, so the hook
+liveness check reads it as a dead hook and reinstalls; harmless, but it is why
+those log lines appear during automated runs and not in real use.
