@@ -137,7 +137,7 @@ bool ParseHotkey(std::wstring_view text, UINT& modifiers, UINT& vk)
             : text.substr(start, plus - start);
 
         if (piece.empty())
-            return false;   // "Ctrl+" veya "Ctrl++Z" gibi bozuk girdi
+            return false;   // malformed input such as "Ctrl+" or "Ctrl++Z"
 
         if (plus == std::wstring_view::npos)
         {
@@ -222,7 +222,7 @@ std::filesystem::path SettingsStore::FilePath()
         if (appData)
             CoTaskMemFree(appData);
 
-        LOG_ERROR("SHGetKnownFolderPath basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_ERROR("SHGetKnownFolderPath failed: 0x{:08X}", static_cast<unsigned long>(hr));
         return {};
     }
 
@@ -261,7 +261,7 @@ bool SettingsStore::Load()
         if (buf[0] != L'\0' &&
             !ParseHotkey(buf, m_general.toggleModifiers, m_general.toggleVk))
         {
-            LOG_WARN("ToggleHotkey bozuk, varsayilan kullanilacak");
+            LOG_WARN("ToggleHotkey is unparseable, keeping the default");
         }
 
         buf[0] = L'\0';
@@ -269,14 +269,14 @@ bool SettingsStore::Load()
         if (buf[0] != L'\0' &&
             !ParseHotkey(buf, m_general.freezeModifiers, m_general.freezeVk))
         {
-            LOG_WARN("FreezeHotkey bozuk, varsayilan kullanilacak");
+            LOG_WARN("FreezeHotkey is unparseable, keeping the default");
         }
     }
 
     // ── Bayraklar ──
-    // GetPrivateProfileIntW varsayilan degeri parametre olarak aliyor —
+    // GetPrivateProfileIntW takes the default as a parameter, so a missing key
     // eksik anahtar otomatik varsayilana duser.
-    // Varsayilan 1 (ACIK) — kullanici Windows'un magnifier'i yerine bunu istiyor.
+    // Defaults to on: someone running this wants it instead of the OS Magnifier.
     m_general.hijackMagnifierKeys =
         GetPrivateProfileIntW(L"General", L"HijackMagnifierKeys", 1, file.c_str()) != 0;
     m_general.startWithWindows =
@@ -299,7 +299,7 @@ bool SettingsStore::Load()
                                               FollowMode::EdgePush;
     }
 
-    // ── Edge-push ve imlec ──
+    // ── Edge push and pointer ──
     // Every one clamped on read. A hand-edited INI is a supported way to use
     // this file, and a nonsensical value must fall back on its own rather than
     // poison the rest of the section.
@@ -358,7 +358,7 @@ bool SettingsStore::Load()
         }
     }
 
-    LOG_INFO("Ayarlar yuklendi: {} monitor kaydi", m_monitors.size());
+    LOG_INFO("Settings loaded: {} monitor entries", m_monitors.size());
     return true;
 }
 
@@ -371,7 +371,7 @@ bool SettingsStore::Save() const
     if (path.empty())
         return false;
 
-    // WritePrivateProfileStringW klasor OLUSTURMUYOR — elle yapmak lazim.
+    // WritePrivateProfileStringW does NOT create the directory; we have to.
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec)
@@ -424,7 +424,7 @@ bool SettingsStore::Save() const
     }
 
     if (!ok)
-        LOG_ERROR("Ayarlar kaydedilirken en az bir yazma basarisiz oldu");
+        LOG_ERROR("At least one write failed while saving the settings");
 
     return ok;
 }
@@ -449,7 +449,7 @@ void SettingsStore::SetMonitor(const std::wstring& deviceName, const MonitorSett
 // =============================================================================
 void SettingsStoreSelfCheck()
 {
-    LOG_INFO("SettingsStore self-check basliyor...");
+    LOG_INFO("SettingsStore self-check starting");
 
     // ── 1. ParseHotkey: temel durum ──
     {
@@ -523,7 +523,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(vk == origVk);
     }
 
-    // ── 8. FilePath: %APPDATA% altinda, dogru dosya adi ──
+    // ── 8. FilePath: under %APPDATA%, with the right file name ──
     {
         const auto p = SettingsStore::FilePath();
         BM_SELFCHECK(!p.empty());
@@ -554,8 +554,8 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(fresh.Load());
         BM_SELFCHECK(fresh.General().toggleVk == 'Z');
         BM_SELFCHECK(fresh.General().toggleModifiers == (MOD_CONTROL | MOD_ALT));
-        BM_SELFCHECK(fresh.General().hijackMagnifierKeys == true);   // varsayilan ACIK
-        BM_SELFCHECK(fresh.General().followMode == FollowMode::EdgePush);  // yeni varsayilan
+        BM_SELFCHECK(fresh.General().hijackMagnifierKeys == true);   // defaults to on
+        BM_SELFCHECK(fresh.General().followMode == FollowMode::EdgePush);  // the current default
         BM_SELFCHECK(fresh.General().rememberZoomLevel == true);
 
         // Pointer ve edge-push varsayilanlari
@@ -565,7 +565,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(std::abs(fresh.General().pointerSpeed - 1.0f) < 1e-4f);
         BM_SELFCHECK(std::abs(fresh.General().edgeBandFraction - 0.12f) < 1e-4f);
 
-        // Bilinmeyen monitor -> varsayilan
+        // An unknown monitor yields the defaults
         const auto m = fresh.Monitor(L"\\\\.\\NOSUCHDISPLAY");
         BM_SELFCHECK(m.minZoom == 1.0f);
         BM_SELFCHECK(m.maxZoom == 10.0f);
@@ -631,9 +631,9 @@ void SettingsStoreSelfCheck()
         SettingsStore fixed;
         BM_SELFCHECK(fixed.Load());
         const auto fm = fixed.Monitor(L"\\\\.\\DISPLAY9");
-        BM_SELFCHECK(fm.minZoom  == 1.0f);    // negatif -> varsayilan
-        BM_SELFCHECK(fm.maxZoom  == 10.0f);   // min'den kucuk -> varsayilan
-        BM_SELFCHECK(fm.zoomStep == 0.25f);   // sifir -> varsayilan
+        BM_SELFCHECK(fm.minZoom  == 1.0f);    // negative -> default
+        BM_SELFCHECK(fm.maxZoom  == 10.0f);   // below the minimum -> default
+        BM_SELFCHECK(fm.zoomStep == 0.25f);   // zero -> default
         BM_SELFCHECK(fm.lastZoom >= fm.minZoom && fm.lastZoom <= fm.maxZoom);
 
         // Cleanup is a courtesy now, not a correctness requirement: an aborted
@@ -643,7 +643,7 @@ void SettingsStoreSelfCheck()
         SetSettingsPathOverride({});
     }
 
-    LOG_INFO("SettingsStore self-check GECTI");
+    LOG_INFO("SettingsStore self-check passed");
 }
 #endif // _DEBUG
 

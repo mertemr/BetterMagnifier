@@ -67,12 +67,12 @@ bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;           // Arka plan yok (seffaf)
+    wc.hbrBackground = nullptr;           // no background brush: transparent
     wc.lpszClassName = kClassName;
 
     if (!RegisterClassExW(&wc))
     {
-        LOG_ERROR("Overlay window class kaydi basarisiz: {}", GetLastError());
+        LOG_ERROR("Overlay window class registration failed: {}", GetLastError());
         return false;
     }
 
@@ -138,8 +138,8 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
         L"BetterMagnifier Overlay",
         style,
         x, y, w, h,
-        nullptr,        // Parent window yok
-        nullptr,        // Menu yok
+        nullptr,        // no parent
+        nullptr,        // no menu
         hInstance,
         this            // WndProc'a "this" gec (CREATESTRUCT.lpCreateParams)
     );
@@ -157,15 +157,15 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
     {
         if (!SetLayeredWindowAttributes(m_hwnd, 0, 255, LWA_ALPHA))
         {
-            LOG_ERROR("SetLayeredWindowAttributes basarisiz: {} — overlay gorunmeyebilir",
+            LOG_ERROR("SetLayeredWindowAttributes failed: {} — the overlay may not be visible",
                 GetLastError());
         }
     }
 
     // ── FEEDBACK LOOP ONLEME (kritik!) ──
-    // Desktop Duplication tum masaustunu yakaliyor — overlay de masaustunun
-    // parcasi. Onlem alinmazsa overlay kendi icerigini yakalar → sonsuz ayna
-    // (kamerayi kendi ekranina tutmak gibi).
+    // Desktop Duplication captures the whole desktop, and the overlay is part of
+    // the desktop. Left alone, the overlay captures its own content: an infinite
+    // mirror, the way pointing a camera at its own screen behaves.
     //
     // WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+): visible on screen, invisible
     // to capture APIs — exactly what is needed here. Without it Desktop
@@ -232,7 +232,7 @@ void OverlayWindow::EnsureTopmost()
 }
 
 // =============================================================================
-// Reposition — DPI veya resolution degistiginde
+// Reposition — after a DPI or resolution change
 // =============================================================================
 void OverlayWindow::Reposition(const RECT& bounds)
 {
@@ -254,9 +254,9 @@ void OverlayWindow::Reposition(const RECT& bounds)
 // =============================================================================
 //
 // HTTRANSPARENT: Mouse olaylarini bu pencereye DEG1L, altindaki pencereye ilet.
-// Bu olmadan overlay tum mouse tiklamalarini yutar!
+// Without this the overlay swallows every mouse click.
 //
-// WM_DPICHANGED: Monitor DPI'i degistiginde Windows bunu gonderir.
+// WM_DPICHANGED arrives when a monitor's DPI changes.
 // Overlay'in boyutunu ve pozisyonunu guncelleriz.
 //
 // =============================================================================
@@ -266,7 +266,7 @@ LRESULT CALLBACK OverlayWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     {
     case WM_NCHITTEST:
         // KRITIK: Mouse olaylari altindaki pencereye gider.
-        // Bu olmadan zoom aktifken masaustune tiklanamaz!
+        // Without this the desktop cannot be clicked while zoom is on.
         return HTTRANSPARENT;
 
     case WM_DPICHANGED:

@@ -30,12 +30,12 @@ bool HotkeyManager::Initialize(HWND hwnd, const GeneralSettings& settings)
     if (failed != 0)
         LOG_WARN("Bazi hotkey'ler kaydedilemedi (bayrak: 0b{:02b})", failed);
 
-    LOG_INFO("HotkeyManager basariyla baslatildi");
+    LOG_INFO("HotkeyManager initialised");
     return true;
 }
 
 // =============================================================================
-// Reregister — ayarlar degisince hotkey'leri yeniden kaydet
+// Reregister — re-claim the hotkeys after a settings change
 // =============================================================================
 //
 // Why the defaults are not Win+something: Windows 11 reserves Win+Z for Snap

@@ -47,7 +47,7 @@ struct VSOut
 VSOut VSMain(uint vid : SV_VertexID)
 {
     // vid 0,1,2 -> corner (0,0), (2,0), (0,2)
-    // Ekrani tasan buyuk bir ucgen; ekran disi kisimlar kirpiliyor.
+    // One oversized triangle covering the screen; the off-screen part is clipped.
     float2 corner = float2((vid << 1) & 2, vid & 2);
 
     VSOut o;
@@ -68,7 +68,7 @@ float4 PSMain(VSOut input) : SV_TARGET
 }
 
 // ── Cursor sprite ──
-// Ayri gecis: icerik bilinear ornekleniyor ama buyutulmus bir okun keskin
+// A pass of its own: the content is sampled bilinear, but a magnified arrow
 // kenarli olmasi bulanik olmasindan iyi okunuyor, o yuzden kendi sampler'i var.
 cbuffer SpriteParams : register(b0)
 {
@@ -95,7 +95,7 @@ float4 SpritePS(VSOut input) : SV_TARGET
 )HLSL";
 
 // Constant buffer duzeni. D3D11 sabit tampon boyutunu 16'nin kati istiyor —
-// tek float4 tam olarak 16 bayt.
+// one float4 is exactly 16 bytes.
 struct UvParams
 {
     float uvLeft;
@@ -116,7 +116,7 @@ D3DRenderer::~D3DRenderer()
 
     m_samplerLinear.Reset();
 
-    // Shader hatti
+    // Shader pipeline
     m_rasterNoCull.Reset();
     m_uvBuffer.Reset();
     m_pixelShader.Reset();
@@ -162,7 +162,7 @@ bool D3DRenderer::Initialize()
     if (!CreateShaders())
         return false;
 
-    LOG_INFO("D3DRenderer basariyla baslatildi (Feature Level: 0x{:X})",
+    LOG_INFO("D3DRenderer initialised (feature level: 0x{:X})",
         static_cast<unsigned int>(m_featureLevel));
 
     return true;
@@ -182,10 +182,10 @@ bool D3DRenderer::CreateDevice()
     UINT createFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;   // needed for Direct2D interop
 
 #ifdef _DEBUG
-    // Debug build'de DirectX debug layer aktif
+    // The DirectX debug layer, on Debug builds
     // VS2022 Output penceresinde DirectX hatalarini gosterir
     createFlags |= D3D11_CREATE_DEVICE_DEBUG;
-    LOG_DEBUG("D3D11 Debug Layer AKTIF");
+    LOG_DEBUG("D3D11 debug layer enabled");
 #endif
 
     // Highest first; D3D11CreateDevice picks the first the adapter supports.
@@ -198,7 +198,7 @@ bool D3DRenderer::CreateDevice()
     ComPtr<ID3D11DeviceContext> baseContext;
 
     HRESULT hr = D3D11CreateDevice(
-        nullptr,                    // Varsayilan adapter (primary GPU)
+        nullptr,                    // default adapter: the primary GPU
         D3D_DRIVER_TYPE_HARDWARE,   // Gercek GPU kullan (WARP = software fallback)
         nullptr,                    // Software rasterizer modulu (kulllanmiyoruz)
         createFlags,
@@ -212,12 +212,12 @@ bool D3DRenderer::CreateDevice()
 
     if (FAILED(hr))
     {
-        LOG_ERROR("D3D11CreateDevice basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_ERROR("D3D11CreateDevice failed: 0x{:08X}", static_cast<unsigned long>(hr));
 
         // Debug layer yuklu degilse, onsuz tekrar dene
         if (hr == DXGI_ERROR_SDK_COMPONENT_MISSING)
         {
-            LOG_WARN("Debug layer bulunamadi, debug'suz deneniyor...");
+            LOG_WARN("Debug layer not present, retrying without it");
             createFlags &= ~D3D11_CREATE_DEVICE_DEBUG;
             hr = D3D11CreateDevice(
                 nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
@@ -229,7 +229,7 @@ bool D3DRenderer::CreateDevice()
 
         if (FAILED(hr))
         {
-            LOG_ERROR("D3D11CreateDevice tamamen basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+            LOG_ERROR("D3D11CreateDevice failed outright: 0x{:08X}", static_cast<unsigned long>(hr));
             return false;
         }
     }
@@ -238,14 +238,14 @@ bool D3DRenderer::CreateDevice()
     hr = baseDevice.As(&m_device);
     if (FAILED(hr))
     {
-        LOG_ERROR("ID3D11Device1 QueryInterface basarisiz");
+        LOG_ERROR("ID3D11Device1 QueryInterface failed");
         return false;
     }
 
     hr = baseContext.As(&m_context);
     if (FAILED(hr))
     {
-        LOG_ERROR("ID3D11DeviceContext1 QueryInterface basarisiz");
+        LOG_ERROR("ID3D11DeviceContext1 QueryInterface failed");
         return false;
     }
 
@@ -276,24 +276,24 @@ bool D3DRenderer::CreateDevice()
     if (FAILED(hr))
         LOG_WARN("SetMaximumFrameLatency(1) failed: 0x{:08X}", static_cast<unsigned long>(hr));
     else
-        LOG_INFO("Frame latency = 1 (varsayilan 3)");
+        LOG_INFO("Frame latency = 1 (the default is 3)");
 
     ComPtr<IDXGIAdapter> adapter;
     hr = dxgiDevice->GetAdapter(&adapter);
     if (FAILED(hr))
     {
-        LOG_ERROR("GetAdapter basarisiz");
+        LOG_ERROR("GetAdapter failed");
         return false;
     }
 
     hr = adapter->GetParent(IID_PPV_ARGS(&m_dxgiFactory));
     if (FAILED(hr))
     {
-        LOG_ERROR("DXGI Factory al basarisiz");
+        LOG_ERROR("Could not obtain the DXGI factory");
         return false;
     }
 
-    // GPU bilgilerini logla
+    // Log which GPU we ended up on
     DXGI_ADAPTER_DESC adapterDesc{};
     adapter->GetDesc(&adapterDesc);
     LOG_INFO("GPU: {} (VRAM: {} MB)",
@@ -391,7 +391,7 @@ bool D3DRenderer::CreateShaders()
         vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &m_vertexShader);
     if (FAILED(hr))
     {
-        LOG_ERROR("CreateVertexShader basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_ERROR("CreateVertexShader failed: 0x{:08X}", static_cast<unsigned long>(hr));
         return false;
     }
 
@@ -399,11 +399,11 @@ bool D3DRenderer::CreateShaders()
         psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &m_pixelShader);
     if (FAILED(hr))
     {
-        LOG_ERROR("CreatePixelShader basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_ERROR("CreatePixelShader failed: 0x{:08X}", static_cast<unsigned long>(hr));
         return false;
     }
 
-    // ── Sprite gecisi (imlec) ──
+    // ── The sprite pass: cursor and readout ──
     ComPtr<ID3DBlob> spriteVsBlob;
     if (!compileStage("SpriteVS", "vs_5_0", spriteVsBlob))
         return false;
@@ -428,7 +428,7 @@ bool D3DRenderer::CreateShaders()
         return false;
     }
 
-    // Premultiplied alpha: kaynak carpani ONE. Duz alfa ile buyutulmus
+    // Premultiplied alpha, so the source factor is ONE. Straight alpha leaves a
     // kenarlarda hale olusuyor, ki buyutme onu tam da gorunur kildigi yer.
     D3D11_BLEND_DESC blendDesc{};
     blendDesc.RenderTarget[0].BlendEnable           = TRUE;
@@ -480,7 +480,7 @@ bool D3DRenderer::CreateShaders()
     }
 
     // ── UV constant buffer ──
-    // Her frame UpdateSubresource ile yaziyoruz, DEFAULT usage yeterli.
+    // Written every frame with UpdateSubresource, so DEFAULT usage is enough.
     D3D11_BUFFER_DESC cbDesc{};
     cbDesc.ByteWidth      = sizeof(UvParams);
     cbDesc.Usage          = D3D11_USAGE_DEFAULT;
@@ -496,7 +496,7 @@ bool D3DRenderer::CreateShaders()
 
     // ── Rasterizer: culling KAPALI ──
     // Fullscreen ucgenin sarim yonu dogru olsa da, culling'i kapatmak
-    // "ekran neden siyah" sinifindan bir hata ihtimalini komple eliyor.
+    // and rules out an entire class of "why is the screen black" faults.
     D3D11_RASTERIZER_DESC rasterDesc{};
     rasterDesc.FillMode        = D3D11_FILL_SOLID;
     rasterDesc.CullMode        = D3D11_CULL_NONE;
@@ -509,7 +509,7 @@ bool D3DRenderer::CreateShaders()
         return false;
     }
 
-    LOG_DEBUG("Shader hatti hazir (fullscreen ucgen + bilinear)");
+    LOG_DEBUG("Shader pipeline ready (fullscreen triangle + bilinear)");
     return true;
 }
 
@@ -590,14 +590,14 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
     hr = rt.swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
     if (FAILED(hr))
     {
-        LOG_ERROR("GetBuffer basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_ERROR("GetBuffer failed: 0x{:08X}", static_cast<unsigned long>(hr));
         return false;
     }
 
     hr = m_device->CreateRenderTargetView(backBuffer.Get(), nullptr, &rt.rtv);
     if (FAILED(hr))
     {
-        LOG_ERROR("CreateRenderTargetView basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_ERROR("CreateRenderTargetView failed: 0x{:08X}", static_cast<unsigned long>(hr));
         return false;
     }
 
@@ -647,7 +647,7 @@ bool D3DRenderer::RenderFrame(
         m_context->CopyResource(rt.sourceTex.Get(), srcTexture);
     }
 
-    // Hic frame gelmediyse cizecek bir sey yok (ilk karelerde olabilir).
+    // No frame has arrived yet, so there is nothing to draw. Normal at startup.
     if (!rt.sourceTex || !rt.sourceSrv)
         return false;
 
@@ -702,7 +702,7 @@ bool D3DRenderer::RenderFrame(
     m_context->PSSetShaderResources(0, 1, rt.sourceSrv.GetAddressOf());
     m_context->PSSetSamplers(0, 1, m_samplerLinear.GetAddressOf());
 
-    // Uc vertex = ekrani kaplayan tek ucgen.
+    // Three vertices: the single triangle that covers the screen.
     m_context->Draw(3, 0);
 
     return true;
@@ -1004,7 +1004,7 @@ bool D3DRenderer::DumpBackBuffer(size_t targetIndex, const wchar_t* path)
     hr = m_context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr))
     {
-        LOG_ERROR("Dump: Map basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_ERROR("Dump: Map failed: 0x{:08X}", static_cast<unsigned long>(hr));
         return false;
     }
 
@@ -1045,7 +1045,7 @@ bool D3DRenderer::DumpBackBuffer(size_t targetIndex, const wchar_t* path)
 
         CloseHandle(file);
         ok = true;
-        LOG_INFO("Dump: back buffer yazildi ({}x{}) -> {}",
+        LOG_INFO("Dump: back buffer written ({}x{}) -> {}",
             desc.Width, desc.Height, "BM_DUMP_FRAME");
     }
     else
