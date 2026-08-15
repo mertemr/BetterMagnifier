@@ -1,0 +1,57 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
+
+# A newer push to the same branch/PR cancels an in-flight run for it.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.configuration }} x64
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # /restore: the control panel pulls the Windows App SDK in via
+      # PackageReference; without a restore the WinRT projection isn't there.
+      # TreatWarningAsError is on in the vcxproj, so this also gates warnings.
+      - name: Build
+        shell: pwsh
+        run: >
+          msbuild .\BetterMagnifier.sln
+          /restore
+          /p:Configuration=${{ matrix.configuration }}
+          /p:Platform=x64
+          /v:minimal
+          /nologo
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: BetterMagnifier-${{ matrix.configuration }}-x64
+          path: bin/${{ matrix.configuration }}-x64/
+          if-no-files-found: error
+          retention-days: 14
