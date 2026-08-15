@@ -1,172 +1,136 @@
 # =============================================================================
-# make-icons.ps1 — generate the application and tray icons
+# make-icons.ps1 — pack the source artwork into the application and tray icons
 # =============================================================================
 #
-# The icons are drawn here rather than checked in as binaries somebody has to
-# open an editor to change. Three of them differ only by colour, and a generator
-# keeps that fact visible: change the palette below and rerun.
+# The source of truth is res\icon-source.png, a single 1024x1024 RGBA image
+# with the rounded-square shape and its soft edge already baked into the alpha
+# channel — that is what makes it usable as a Windows icon straight off, with
+# no further masking. Edit that file (in whatever image editor) and rerun this
+# script; do not hand-edit the .ico files, they are generated.
 #
 #   res\BetterMagnifier.ico   application and window class icon
 #   res\tray-on.ico           tray icon while at least one monitor is magnified
-#   res\tray-off.ico          tray icon while idle
+#   res\tray-off.ico          tray icon while idle — a desaturated copy of the
+#                             same source, not a separate piece of art
 #
-# ICO is written by hand — classic BITMAPINFOHEADER entries, one per size, 32bpp
-# BGRA with straight (not premultiplied) alpha, which is what LoadIcon expects.
-# PNG-compressed entries would be smaller but are only honoured from Vista on
-# for the 256 px size, and there is nothing here worth that asymmetry.
+# ICO is written by hand — classic BITMAPINFOHEADER entries, one per size,
+# 32bpp BGRA with straight (not premultiplied) alpha, which is what LoadIcon
+# expects. PNG-compressed entries would be smaller but are only honoured from
+# Vista on for the 256 px size, and there is nothing here worth that asymmetry.
 #
 #   .\tools\make-icons.ps1
 # =============================================================================
 
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
 
-$repo   = Split-Path -Parent $PSScriptRoot
-$outDir = Join-Path $repo 'res'
-if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
+$repo      = Split-Path -Parent $PSScriptRoot
+$outDir    = Join-Path $repo 'res'
+$sourceImg = Join-Path $outDir 'icon-source.png'
 
-# Every entry Windows may ask for. 256 is the one Explorer uses at large icon
-# sizes; 16 is the tray and the title bar, and it is the one that actually has
-# to stay legible, which is why the glyph below is deliberately chunky.
+if (-not (Test-Path $outDir))    { New-Item -ItemType Directory -Path $outDir | Out-Null }
+if (-not (Test-Path $sourceImg)) { throw "Source image not found: $sourceImg" }
+
+# Every entry Windows may ask for. 256 is what Explorer uses at large icon
+# sizes; 16 is the tray and the title bar, and it is the one that most needs
+# to stay legible at a glance.
 $sizes = @(16, 24, 32, 48, 64, 128, 256)
 
 # -----------------------------------------------------------------------------
-# The glyph: a magnifying glass, in fractions of the icon's extent.
+# Resize-Source — the source image, downscaled to one size, as bottom-up BGRA.
 #
-# Kept off centre toward the top left so the handle has room to run to the
-# bottom right corner without the whole thing shrinking to make space.
+# High-quality bicubic with a transparent canvas underneath: drawing straight
+# onto an ARGB bitmap without clearing it first can pick up whatever garbage
+# GDI+ left in that memory, which shows up as a faint fringe around the edges
+# at small sizes. CompositingMode SourceCopy is what keeps the alpha channel
+# itself resampled instead of blended against an assumed opaque background.
 # -----------------------------------------------------------------------------
-$lensCx     = 0.415
-$lensCy     = 0.395
-$lensOuter  = 0.310    # outer edge of the ring
-$lensRing   = 0.088    # ring thickness
-$handleEnd  = 0.855    # both axes: the handle runs at 45 degrees
-$handleHalf = 0.070    # half width
-
-# Supersampling factor per axis. 4 is enough that a 16 px icon reads as smooth;
-# beyond that the cost grows as the square and nothing looks different.
-$ss = 4
-
-function New-IconImage
+function Resize-Source
 {
-    param(
-        [int]$Size,
-        [byte[]]$Stroke,     # B, G, R for the ring and the handle
-        [byte[]]$Fill,       # B, G, R for the lens interior
-        [double]$FillAlpha
-    )
+    param([System.Drawing.Image]$Source, [int]$Size)
 
-    # Bottom-up BGRA, which is what the DIB in an ICO is.
-    $pixels = New-Object 'byte[]' ($Size * $Size * 4)
-
-    $cx = $lensCx * $Size
-    $cy = $lensCy * $Size
-    $rOuter = $lensOuter * $Size
-    $rInner = ($lensOuter - $lensRing) * $Size
-    $hx = $handleEnd * $Size
-    $hy = $handleEnd * $Size
-    $hw = $handleHalf * $Size
-
-    # The handle starts on the ring so the two read as one object, and is drawn
-    # as a capsule: distance to the segment, thresholded. Rounded ends fall out
-    # of that for free, which is what keeps it from looking cut off.
-    $t0 = ($lensOuter - $lensRing * 0.5)
-    $sx = $cx + $t0 * $Size * 0.7071
-    $sy = $cy + $t0 * $Size * 0.7071
-
-    $dxSeg = $hx - $sx
-    $dySeg = $hy - $sy
-    $segLenSq = $dxSeg * $dxSeg + $dySeg * $dySeg
-
-    for ($y = 0; $y -lt $Size; $y++)
+    $bmp = New-Object System.Drawing.Bitmap $Size, $Size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try
     {
-        for ($x = 0; $x -lt $Size; $x++)
+        $g.CompositingMode    = [System.Drawing.Drawing2D.CompositingMode]::SourceCopy
+        $g.InterpolationMode  = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.SmoothingMode      = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $g.PixelOffsetMode    = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $g.DrawImage($Source, 0, 0, $Size, $Size)
+    }
+    finally { $g.Dispose() }
+
+    return $bmp
+}
+
+# -----------------------------------------------------------------------------
+# Get-BgraBytes — bottom-up BGRA rows out of a Format32bppArgb bitmap, with an
+# optional desaturation pass for the tray-off state.
+#
+# Grayscale by luminance (Rec. 601 weights) rather than a flat neutral tint:
+# it is a transform of the actual artwork, so the monitor glyph and the accent
+# circle keep their relative contrast instead of flattening to one grey.
+# -----------------------------------------------------------------------------
+function Get-BgraBytes
+{
+    param([System.Drawing.Bitmap]$Bitmap, [switch]$Desaturate)
+
+    $w = $Bitmap.Width
+    $h = $Bitmap.Height
+    $rect = New-Object System.Drawing.Rectangle 0, 0, $w, $h
+    $data = $Bitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
+                             [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+
+    # GDI+'s Format32bppArgb is already top-down BGRA in memory — exactly the
+    # byte layout an ICO's XOR mask wants, except ICO rows go bottom-up. So the
+    # copy below both extracts the pixels and flips row order in one pass.
+    $stride = $data.Stride
+    $src = New-Object 'byte[]' ($stride * $h)
+    [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $src, 0, $src.Length)
+    $Bitmap.UnlockBits($data)
+
+    $out = New-Object 'byte[]' ($w * $h * 4)
+
+    for ($y = 0; $y -lt $h; $y++)
+    {
+        $srcRow = $y * $stride
+        $dstRow = ($h - 1 - $y) * $w * 4   # bottom-up
+
+        for ($x = 0; $x -lt $w; $x++)
         {
-            $covStroke = 0.0
-            $covFill   = 0.0
+            $si = $srcRow + $x * 4
+            $di = $dstRow + $x * 4
 
-            for ($sy2 = 0; $sy2 -lt $ss; $sy2++)
+            $b = $src[$si + 0]; $g = $src[$si + 1]; $r = $src[$si + 2]; $a = $src[$si + 3]
+
+            if ($Desaturate)
             {
-                for ($sx2 = 0; $sx2 -lt $ss; $sx2++)
-                {
-                    $px = $x + ($sx2 + 0.5) / $ss
-                    $py = $y + ($sy2 + 0.5) / $ss
-
-                    $dx = $px - $cx
-                    $dy = $py - $cy
-                    $d  = [Math]::Sqrt($dx * $dx + $dy * $dy)
-
-                    $inRing = ($d -le $rOuter -and $d -ge $rInner)
-                    $inLens = ($d -lt $rInner)
-
-                    # Distance from the sample to the handle segment.
-                    $inHandle = $false
-                    if ($segLenSq -gt 0)
-                    {
-                        $t = (($px - $sx) * $dxSeg + ($py - $sy) * $dySeg) / $segLenSq
-                        if ($t -lt 0) { $t = 0 } elseif ($t -gt 1) { $t = 1 }
-                        $qx = $sx + $t * $dxSeg
-                        $qy = $sy + $t * $dySeg
-                        $hd = [Math]::Sqrt(($px - $qx) * ($px - $qx) + ($py - $qy) * ($py - $qy))
-                        $inHandle = ($hd -le $hw)
-                    }
-
-                    if ($inRing -or $inHandle) { $covStroke += 1.0 }
-                    elseif ($inLens)           { $covFill   += 1.0 }
-                }
+                $lum = [byte][Math]::Round(0.114 * $b + 0.587 * $g + 0.299 * $r)
+                $b = $lum; $g = $lum; $r = $lum
             }
 
-            $total = [double]($ss * $ss)
-            $covStroke /= $total
-            $covFill   /= $total
-
-            if ($covStroke -le 0 -and $covFill -le 0) { continue }
-
-            # Stroke over fill, both against a transparent ground. Compositing
-            # in one step rather than blending two passes keeps the antialiased
-            # boundary between them from picking up a dark seam.
-            $aStroke = $covStroke
-            $aFill   = $covFill * $FillAlpha
-            $a = $aStroke + $aFill * (1.0 - $aStroke)
-
-            if ($a -le 0.0005) { continue }
-
-            $b = ($Stroke[0] * $aStroke + $Fill[0] * $aFill * (1.0 - $aStroke)) / $a
-            $g = ($Stroke[1] * $aStroke + $Fill[1] * $aFill * (1.0 - $aStroke)) / $a
-            $r = ($Stroke[2] * $aStroke + $Fill[2] * $aFill * (1.0 - $aStroke)) / $a
-
-            # Bottom-up: row 0 of the DIB is the bottom row of the image.
-            $row = $Size - 1 - $y
-            $o = ($row * $Size + $x) * 4
-
-            $pixels[$o + 0] = [byte][Math]::Round([Math]::Min(255.0, $b))
-            $pixels[$o + 1] = [byte][Math]::Round([Math]::Min(255.0, $g))
-            $pixels[$o + 2] = [byte][Math]::Round([Math]::Min(255.0, $r))
-            $pixels[$o + 3] = [byte][Math]::Round([Math]::Min(255.0, $a * 255.0))
+            $out[$di + 0] = $b
+            $out[$di + 1] = $g
+            $out[$di + 2] = $r
+            $out[$di + 3] = $a
         }
     }
 
-    return $pixels
+    return $out
 }
 
 function Write-Ico
 {
-    param(
-        [string]$Path,
-        [byte[]]$Stroke,
-        [byte[]]$Fill,
-        [double]$FillAlpha
-    )
+    param([string]$Path, [System.Drawing.Image]$Source, [switch]$Desaturate)
 
-    # A typed list, and the copies below are deliberate. PowerShell's + on two
-    # byte[] produces an Object[], which still has a Length and still indexes,
-    # so the directory came out arithmetically consistent and the file was 125
-    # bytes of pure header. Silent, and only visible as an icon that will not
-    # load.
     $images = New-Object 'System.Collections.Generic.List[byte[]]'
 
     foreach ($s in $sizes)
     {
-        $xor = New-IconImage -Size $s -Stroke $Stroke -Fill $Fill -FillAlpha $FillAlpha
+        $resized = Resize-Source -Source $Source -Size $s
+        $xor = Get-BgraBytes -Bitmap $resized -Desaturate:$Desaturate
+        $resized.Dispose()
 
         # The AND mask is required by the format even at 32bpp, where the alpha
         # channel is what actually decides transparency. All zeros means "every
@@ -175,11 +139,11 @@ function Write-Ico
         $mask = New-Object 'byte[]' ($maskStride * $s)
 
         $header = New-Object 'byte[]' 40
-        [BitConverter]::GetBytes([int]40).CopyTo($header, 0)      # biSize
-        [BitConverter]::GetBytes([int]$s).CopyTo($header, 4)      # biWidth
+        [BitConverter]::GetBytes([int]40).CopyTo($header, 0)       # biSize
+        [BitConverter]::GetBytes([int]$s).CopyTo($header, 4)       # biWidth
         [BitConverter]::GetBytes([int]($s * 2)).CopyTo($header, 8) # biHeight: XOR + AND
-        [BitConverter]::GetBytes([int16]1).CopyTo($header, 12)    # biPlanes
-        [BitConverter]::GetBytes([int16]32).CopyTo($header, 14)   # biBitCount
+        [BitConverter]::GetBytes([int16]1).CopyTo($header, 12)     # biPlanes
+        [BitConverter]::GetBytes([int16]32).CopyTo($header, 14)    # biBitCount
         # biCompression BI_RGB, and every size field left zero, which is legal
         # for BI_RGB and is what the shell writes itself.
 
@@ -226,13 +190,13 @@ function Write-Ico
     Write-Host ("  {0}  ({1:N0} bytes, {2} sizes)" -f (Split-Path -Leaf $Path), (Get-Item $Path).Length, $count)
 }
 
-# BGR, because that is the order they go into the file in.
-$accent = [byte[]](255, 194, 76)     # #4CC2FF — the "on" blue
-$idle   = [byte[]](152, 143, 138)    # #8A8F98 — a neutral that survives both
-                                     #           a light and a dark taskbar
-
 Write-Host '==> Writing icons'
-Write-Ico -Path (Join-Path $outDir 'BetterMagnifier.ico') -Stroke $accent -Fill $accent -FillAlpha 0.20
-Write-Ico -Path (Join-Path $outDir 'tray-on.ico')         -Stroke $accent -Fill $accent -FillAlpha 0.20
-Write-Ico -Path (Join-Path $outDir 'tray-off.ico')        -Stroke $idle   -Fill $idle   -FillAlpha 0.14
+$source = [System.Drawing.Image]::FromFile($sourceImg)
+try
+{
+    Write-Ico -Path (Join-Path $outDir 'BetterMagnifier.ico') -Source $source
+    Write-Ico -Path (Join-Path $outDir 'tray-on.ico')         -Source $source
+    Write-Ico -Path (Join-Path $outDir 'tray-off.ico')        -Source $source -Desaturate
+}
+finally { $source.Dispose() }
 Write-Host '==> Done'

@@ -1,8 +1,14 @@
+<div align="center">
+
+<img src="docs/images/logo.png" alt="BetterMagnifier icon" width="120">
+
 # BetterMagnifier
 
 [![Build](https://github.com/mertemr/BetterMagnifier/actions/workflows/build.yml/badge.svg)](https://github.com/mertemr/BetterMagnifier/actions/workflows/build.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/mertemr/BetterMagnifier?include_prereleases)](../../releases/latest)
+
+</div>
 
 A live screen magnifier for Windows 11/10 with the one thing the built-in
 Windows Magnifier cannot do: **an independent zoom level per monitor.**
@@ -47,6 +53,13 @@ readout — all driven by hotkeys or a control panel.
   for hand-editing `settings.ini`.
 - **Survives locking the workstation.** Capture and input hooks both recover
   automatically after unlock.
+
+## Screenshots
+
+<img src="docs/images/control-panel.png" alt="BetterMagnifier control panel showing per-monitor zoom cards, hotkey capture, follow mode and zoom limits" width="640">
+
+The control panel: one live card per monitor, hotkeys captured by pressing
+them, follow mode, and zoom limits.
 
 ## Requirements
 

@@ -63,8 +63,10 @@ the Windows App SDK through `PackageReference`.
 - Comments are in English; commits follow Conventional Commits
   (`feat(input):`, `fix(render):`, `refactor:`).
 - `spike/` holds throwaway experiments — not shipped code, don't refactor it.
-- `res/*.ico` is **generated** by `tools/make-icons.ps1`, not hand-drawn. Change
-  the glyph or palette there and rerun; editing the binaries loses the source.
+- `res/*.ico` is **generated** by `tools/make-icons.ps1` from `res/icon-source.png`.
+  Edit the source PNG and rerun; editing the `.ico` files directly loses the
+  source. `tray-off.ico` is a desaturated copy of the same artwork, not a
+  separate asset — the script derives it.
 
 ## Verifying without hands
 
