@@ -19,12 +19,14 @@
 #include "ViewportController.h"
 #include "ViewportSnapshot.h"
 #include "CursorRenderer.h"
+#include "OsdRenderer.h"
 #include "ControlPanel.h"
 
 #include <windows.h>
 #include <vector>
 #include <array>
 #include <chrono>
+#include <string>
 
 namespace BetterMagnifier {
 
@@ -126,6 +128,32 @@ private:
     CursorCache m_cursorCache;
     bool        m_pointerCompositing = false;
 
+    // ── On-screen readout ──
+    //
+    // One per monitor, because zoom is per monitor and a single shared readout
+    // would have to lie about which display it was describing.
+    struct OsdState
+    {
+        std::wstring text;
+        std::chrono::steady_clock::time_point until{};
+
+        // Last observed engine state, so a change can be detected. Tracked even
+        // while the monitor is idle: without that, turning zoom on would look
+        // like "no change" whenever the level happened to match the last one.
+        float lastZoom   = -1.0f;
+        bool  lastFrozen = false;
+        bool  lastActive = false;
+        bool  seen       = false;   // suppresses a readout on the first frame
+    };
+
+    std::array<OsdState, StatusSnapshot::kMaxMonitors> m_osd{};
+    OsdCache m_osdCache;
+
+    // Note the state a monitor is in and raise a readout when it moved.
+    void UpdateOsd(size_t monitorIndex, const MonitorInfo& mon);
+
+    static constexpr std::chrono::milliseconds kOsdDuration{1400};
+
     // Sprite size relative to the content scale. Cached rather than read from
     // SettingsStore in the draw call: the panel thread writes that struct and
     // only then posts WM_APP_SETTINGS_CHANGED, so a per-frame read would be
@@ -157,6 +185,12 @@ private:
     // the entire feature — froze the magnified pointer mid-move.
     std::array<POINT, StatusSnapshot::kMaxMonitors>       m_lastSpritePos{};
     std::array<const void*, StatusSnapshot::kMaxMonitors> m_lastSpriteShape{};
+
+    // Same reasoning for the readout. Its position is fixed, so identity alone
+    // is enough — and it has to be here, or the readout would appear on a still
+    // screen and then never be cleared, because its expiry changes nothing else
+    // the skip test can see.
+    std::array<const void*, StatusSnapshot::kMaxMonitors> m_lastOsdShape{};
 
     // Nothing presented this tick means vSync did not pace the loop, so it
     // needs an explicit sleep.

@@ -274,6 +274,7 @@
     <ClCompile Include="src\SystemCursor.cpp" />
     <ClCompile Include="src\CursorRenderer.cpp" />
     <ClCompile Include="src\PointerInput.cpp" />
+    <ClCompile Include="src\OsdRenderer.cpp" />
     <ClCompile Include="src\ControlPanel.cpp" />
   </ItemGroup>
 
@@ -322,6 +323,7 @@
     <ClInclude Include="src\ViewportController.h" />
     <ClInclude Include="src\SystemCursor.h" />
     <ClInclude Include="src\CursorRenderer.h" />
+    <ClInclude Include="src\OsdRenderer.h" />
     <ClInclude Include="src\ViewportSnapshot.h" />
     <ClInclude Include="src\PointerInput.h" />
     <ClInclude Include="src\App.h" />

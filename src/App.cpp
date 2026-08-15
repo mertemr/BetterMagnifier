@@ -271,17 +271,19 @@ bool App::InitializeComponents()
     // ── 2. GPU device ──
     if (!m_renderer.Initialize())
     {
-        LOG_ERROR("D3DRenderer baslatilamadi");
+        LOG_ERROR("D3DRenderer initialisation failed");
         return false;
     }
 
     m_cursorCache.Initialize(m_renderer.GetDevice());
+    m_osdCache.Initialize(m_renderer.GetDevice());
 
     // ── 3. Per-monitor: overlay + swap chain + capture ──
     const size_t monitorCount = m_monitorManager.GetMonitorCount();
 
-    // reserve ONEMLI: vector buyurken move ediyor, HWND/COM pointer'lar tasiniyor.
-    // reserve olmadan realloc sirasinda gereksiz move + destroy zinciri olusur.
+    // reserve matters: growing the vector moves its elements, and these own
+    // HWNDs and COM pointers. Without it a reallocation drags every overlay
+    // through a move and a destroy for no reason.
     m_overlays.reserve(monitorCount);
     m_captures.reserve(monitorCount);
 
@@ -541,6 +543,70 @@ void App::UpdatePointerCompositing(bool anyMonitorZoomed, bool pointerOnMagnifie
     }
 }
 
+// =============================================================================
+// UpdateOsd — raise a readout when a monitor's state moves
+// =============================================================================
+//
+// Every zoom change used to be silent. The level lived in the control panel,
+// which is off by default and behind a tray menu, so stepping with Win+Plus or
+// the wheel changed the picture and told you nothing about where you had got
+// to. On a magnified screen that matters more than usual: the content looks
+// much the same at 3x and at 4x until you go looking for a landmark.
+//
+// Called for active monitors only, but the previous state is recorded for every
+// monitor including idle ones. Otherwise turning zoom on at the same level it
+// was last used at reads as "nothing changed" and says nothing.
+// =============================================================================
+void App::UpdateOsd(size_t monitorIndex, const MonitorInfo& mon)
+{
+    const size_t slot = (monitorIndex < StatusSnapshot::kMaxMonitors)
+                      ? monitorIndex : StatusSnapshot::kMaxMonitors - 1;
+    OsdState& osd = m_osd[slot];
+
+    const bool  active = mon.zoom.isActive;
+    const bool  frozen = mon.zoom.isFrozen;
+    const float zoom   = mon.zoom.zoomLevel;
+
+    // Quantised to what the readout can actually show. Without this a zoom that
+    // differs in the fourth decimal re-raises the OSD every frame and it never
+    // goes away.
+    const float shown = std::round(zoom * 100.0f) / 100.0f;
+
+    const bool first = !osd.seen;
+    osd.seen = true;
+
+    const bool becameActive = active && !osd.lastActive;
+    const bool zoomMoved    = active && osd.lastActive && (shown != osd.lastZoom);
+    const bool freezeMoved  = active && osd.lastActive && (frozen != osd.lastFrozen);
+
+    osd.lastActive = active;
+    osd.lastZoom   = shown;
+    osd.lastFrozen = frozen;
+
+    // Nothing on the first observation. Starting up with zoom already on would
+    // otherwise greet the user with a readout they did not ask for.
+    if (first)
+        return;
+
+    if (!becameActive && !zoomMoved && !freezeMoved)
+        return;
+
+    // Frozen is a state, not an event, and it is treated as one: the readout
+    // stays up for as long as the freeze lasts. A view that has quietly stopped
+    // following the pointer looks identical to one that is broken, and this is
+    // the difference between the two.
+    if (frozen)
+    {
+        osd.text  = L"Frozen";
+        osd.until = std::chrono::steady_clock::time_point::max();
+        return;
+    }
+
+    osd.text  = freezeMoved ? std::wstring(L"Live")
+                            : std::format(L"{:.2f}x", shown);
+    osd.until = std::chrono::steady_clock::now() + kOsdDuration;
+}
+
 void App::Update()
 {
     m_status.monitorCount.store(m_overlays.size(), std::memory_order_relaxed);
@@ -576,7 +642,12 @@ void App::Update()
         st.captureExcluded.store(m_overlays[i].IsExcludedFromCapture(),
                                  std::memory_order_relaxed);
 
-        // ── Zoom pasif → overlay'i gizle, capture'a dokunma ──
+        // Before the inactive early-out: an idle monitor's state still has to
+        // be recorded, or turning zoom back on at the same level reads as no
+        // change at all and says nothing.
+        UpdateOsd(i, *mon);
+
+        // ── Zoom off: hide the overlay, leave the capture alone ──
         if (!mon->zoom.isActive)
         {
             if (m_overlays[i].IsVisible())
@@ -796,6 +867,31 @@ void App::RenderMonitor(size_t monitorIndex)
             }
         }
 
+        // ── The on-screen readout — also before the skip test ──
+        //
+        // Same reasoning as the sprite. The readout appears and expires without
+        // anything else on screen having to move, so if it is not part of "did
+        // anything change" it either never gets drawn or, worse, gets drawn and
+        // then stays up forever on a still screen.
+        OsdCache::Label osdLabel;
+        const void* osdShape = nullptr;
+
+        {
+            const OsdState& osd = m_osd[rectSlot];
+
+            if (!osd.text.empty() && std::chrono::steady_clock::now() < osd.until)
+            {
+                // Sized from the monitor rather than fixed, so it stays the
+                // same apparent size on a 4K display as on a 1080p one. Not
+                // scaled by zoom: this is our own UI drawn on top of the
+                // magnified content, not part of it.
+                const int fontPx = std::clamp(static_cast<int>(mon->Height() / 20), 22, 80);
+
+                if (m_osdCache.Acquire(osd.text, fontPx, osdLabel))
+                    osdShape = osdLabel.srv;
+            }
+        }
+
         // Nothing new: no frame, no source movement, no cursor movement.
         // Presenting anyway would only block on vSync and burn GPU time.
         const RECT& lastRect = m_lastSrcRect[rectSlot];
@@ -809,7 +905,9 @@ void App::RenderMonitor(size_t monitorIndex)
                              && (m_lastSpritePos[rectSlot].y == spritePos.y)
                              && (m_lastSpriteShape[rectSlot] == spriteShape);
 
-        if (!frame.isNewFrame && rectSame && spriteSame)
+        const bool osdSame = (m_lastOsdShape[rectSlot] == osdShape);
+
+        if (!frame.isNewFrame && rectSame && spriteSame && osdSame)
         {
             capture.ReleaseFrame();
             return;
@@ -818,6 +916,7 @@ void App::RenderMonitor(size_t monitorIndex)
         m_lastSrcRect[rectSlot]     = srcRect;
         m_lastSpritePos[rectSlot]   = spritePos;
         m_lastSpriteShape[rectSlot] = spriteShape;
+        m_lastOsdShape[rectSlot]    = osdShape;
 
         // nullptr means "re-use the last frame".
         ID3D11Texture2D* newFrame = (frame.isNewFrame && frame.texture)
@@ -860,6 +959,25 @@ void App::RenderMonitor(size_t monitorIndex)
                 static_cast<float>(spritePos.y) - shape.hotspotY * scale,
                 static_cast<float>(shape.width)  * scale,
                 static_cast<float>(shape.height) * scale);
+        }
+
+        // ── The readout goes last, so it is on top of everything ──
+        //
+        // Bottom centre: out of the way of the pointer, which spends its time
+        // wherever the user is working, and away from the top edge where menus
+        // and title bars live. Drawn at 1:1 — this is our own UI over the
+        // magnified content, not content to be magnified.
+        if (osdShape)
+        {
+            const float x = (static_cast<float>(mon->Width()) -
+                             static_cast<float>(osdLabel.width)) * 0.5f;
+            const float y = static_cast<float>(mon->Height())
+                          - static_cast<float>(osdLabel.height)
+                          - static_cast<float>(mon->Height()) * 0.08f;
+
+            m_renderer.RenderSprite(monitorIndex, osdLabel.srv, x, y,
+                static_cast<float>(osdLabel.width),
+                static_cast<float>(osdLabel.height));
         }
 
         // vSync only in flip mode.
@@ -1605,30 +1723,31 @@ void App::Shutdown()
     // not, because the user cannot click anything to fix it.
     UpdatePointerCompositing(false, false);
     m_cursorCache.Clear();
+    m_osdCache.Clear();
 
     // GUI thread first: the panel holds pointers to m_settings and m_status and
     // has to be gone before those become invalid.
     m_controlPanel.Stop();
 
-    // 1. Input thread'i sonra durdur — hook'lar kalkmadan mesaj penceresini
-    // yikmak, yolda olan bir PostMessage'in olu HWND'ye gitmesi demek.
+    // 1. Input thread next: destroying the message window while the hooks are
+    //    still up means an in-flight PostMessage aimed at a dead HWND.
     m_inputThread.Stop();
 
-    // 1a. Hotkey kayitlarini kaldir
+    // 1a. Drop the hotkey registrations
     m_hotkeyManager.Shutdown();
 
-    // 2. Tray icon'u kaldir
+    // 2. Remove the tray icon
     m_trayIcon.Destroy();
 
-    // 3. Duplication session'lari kapat (device'dan once!)
+    // 3. Close the duplication sessions — before the device
     m_captures.clear();
 
-    // 4. Swap chain'leri birak — SONRA pencereleri yik.
-    // Ters sira yaparsak swap chain yok olmus bir HWND'ye referans tutar.
+    // 4. Release the swap chains, THEN destroy the windows. The other order
+    //    leaves a swap chain holding a reference to a destroyed HWND.
     for (size_t i = 0; i < m_overlays.size(); ++i)
         m_renderer.RemoveRenderTarget(i);
 
-    // 5. Overlay pencereleri yik
+    // 5. Destroy the overlay windows
     m_overlays.clear();
 
     // 6. Message window

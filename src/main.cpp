@@ -9,6 +9,7 @@
 #include "PointerInput.h"
 #include "SystemCursor.h"
 #include "CursorRenderer.h"
+#include "OsdRenderer.h"
 #include "Logger.h"
 
 #include <cwchar>
@@ -50,7 +51,8 @@ int WINAPI wWinMain(
     // forever instead of failing.
     const bool diagnosticRun =
         std::wcsstr(GetCommandLineW(), L"--self-check")   != nullptr ||
-        std::wcsstr(GetCommandLineW(), L"--dump-cursors") != nullptr;
+        std::wcsstr(GetCommandLineW(), L"--dump-cursors") != nullptr ||
+        std::wcsstr(GetCommandLineW(), L"--dump-osd")     != nullptr;
 
     HANDLE singleInstance = nullptr;
     if (!diagnosticRun)
@@ -194,6 +196,60 @@ int WINAPI wWinMain(
         }
 
         LOG_INFO("Cursor dump complete, {} failure(s)", failures);
+        return failures == 0 ? 0 : 3;
+    }
+
+    // --dump-osd writes the readout bitmaps for eyeball checking, for the same
+    // reason --dump-cursors exists: whether the alpha compositing is right is a
+    // question about what the picture looks like. An assertion that "some
+    // pixels are opaque" passes just as happily for black text on a black pill,
+    // which is precisely the failure the hand-built alpha channel invites.
+    if (std::wcsstr(GetCommandLineW(), L"--dump-osd") != nullptr)
+    {
+        const struct { const wchar_t* text; int px; } kLabels[] = {
+            { L"2.50x",  54 },
+            { L"12.00x", 54 },
+            { L"Frozen", 54 },
+            { L"Live",   22 },
+        };
+
+        wchar_t dir[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"TEMP", dir, MAX_PATH) == 0)
+            wcscpy_s(dir, L".");
+
+        int failures = 0;
+        for (const auto& l : kLabels)
+        {
+            BetterMagnifier::OsdBitmap osd;
+            if (!BetterMagnifier::RenderOsdText(l.text, l.px, osd))
+            {
+                LOG_ERROR("RenderOsdText failed for {}", ToUtf8(l.text));
+                ++failures;
+                continue;
+            }
+
+            // Reuse the cursor BMP writer: both are premultiplied BGRA in a
+            // top-down buffer, and the hotspot fields it wants are ignored.
+            BetterMagnifier::CursorBitmap as;
+            as.pixels = osd.pixels;
+            as.width  = osd.width;
+            as.height = osd.height;
+
+            wchar_t path[MAX_PATH]{};
+            swprintf_s(path, L"%ls\\bm-osd-%ls-%d.bmp", dir, l.text, l.px);
+
+            if (!BetterMagnifier::WriteCursorBitmapFile(as, path))
+            {
+                LOG_ERROR("Could not write {}", ToUtf8(path));
+                ++failures;
+                continue;
+            }
+
+            LOG_INFO("osd \"{}\" @{}px: {}x{} -> {}",
+                     ToUtf8(l.text), l.px, osd.width, osd.height, ToUtf8(path));
+        }
+
+        LOG_INFO("OSD dump complete, {} failure(s)", failures);
         return failures == 0 ? 0 : 3;
     }
 #endif
