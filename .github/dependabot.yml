@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Windows App SDK and friends, pulled in via PackageReference in the vcxproj.
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Keep the CI workflow's actions current — the setup-msbuild/checkout/
+  # upload-artifact versions pinned in build.yml.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
