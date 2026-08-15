@@ -154,7 +154,7 @@ void TrayIcon::HandleMessage(WPARAM /*wParam*/, LPARAM lParam)
         break;
 
     case WM_LBUTTONDBLCLK:
-        // Cift tiklama = toggle zoom
+        // Double click toggles zoom
         if (m_onToggle) m_onToggle();
         break;
 
@@ -173,7 +173,8 @@ void TrayIcon::ShowContextMenu()
 
     AppendMenuW(hMenu, MF_STRING, kMenuToggle, L"Toggle Zoom (Ctrl+Alt+Z)");
 
-    // Only when something is wired up: the control panel is behind BM_PANEL=1.
+    // Guarded because the callback is optional, not because the panel is: App
+    // wires it up unconditionally now.
     if (m_onSettings)
         AppendMenuW(hMenu, MF_STRING, kMenuSettings, L"Settings...");
 

@@ -9,24 +9,24 @@
 namespace BetterMagnifier {
 
 // =============================================================================
-// Initialize — Tum monitorleri bul ve DXGI ile esle
+// Initialize — enumerate the monitors and match them to DXGI outputs
 // =============================================================================
 bool MonitorManager::Initialize()
 {
-    LOG_INFO("MonitorManager baslatiliyor...");
+    LOG_INFO("MonitorManager starting");
 
     m_monitors.clear();
 
     // lParam carries "this" so the static callback can reach m_monitors.
     if (!EnumDisplayMonitors(nullptr, nullptr, EnumMonitorCallback, reinterpret_cast<LPARAM>(this)))
     {
-        LOG_ERROR("EnumDisplayMonitors basarisiz!");
+        LOG_ERROR("EnumDisplayMonitors failed");
         return false;
     }
 
     if (m_monitors.empty())
     {
-        LOG_ERROR("Hic monitor bulunamadi!");
+        LOG_ERROR("No monitors found");
         return false;
     }
 
@@ -46,16 +46,16 @@ bool MonitorManager::Initialize()
 
     LogAllMonitors();
 
-    LOG_INFO("MonitorManager basariyla baslatildi");
+    LOG_INFO("MonitorManager initialised");
     return true;
 }
 
 // =============================================================================
-// Refresh — Monitor listesini yenile (WM_DISPLAYCHANGE)
+// Refresh — rebuild the monitor list (WM_DISPLAYCHANGE)
 // =============================================================================
 void MonitorManager::Refresh()
 {
-    LOG_INFO("Monitor listesi yenileniyor (display change)...");
+    LOG_INFO("Rebuilding the monitor list (display change)");
 
     std::lock_guard lock(m_mutex);
 
@@ -66,7 +66,7 @@ void MonitorManager::Refresh()
         savedZoomStates[mon.deviceName] = mon.zoom;
     }
 
-    // Yeniden enumerate et
+    // Enumerate again
     m_monitors.clear();
     EnumDisplayMonitors(nullptr, nullptr, EnumMonitorCallback, reinterpret_cast<LPARAM>(this));
 
@@ -125,12 +125,12 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
     {
         info.bounds    = monInfo.rcMonitor;
         info.workArea  = monInfo.rcWork;
-        info.deviceName = monInfo.szDevice;     // L"\\\\.\\DISPLAY1" gibi
+        info.deviceName = monInfo.szDevice;     // e.g. L"\\\\.\\DISPLAY1"
         info.isPrimary = (monInfo.dwFlags & MONITORINFOF_PRIMARY) != 0;
     }
     else
     {
-        LOG_WARN("GetMonitorInfo basarisiz, HMONITOR: 0x{:X}",
+        LOG_WARN("GetMonitorInfo failed, HMONITOR: 0x{:X}",
             reinterpret_cast<uintptr_t>(info.hMonitor));
     }
 
@@ -188,7 +188,7 @@ bool MonitorManager::MatchDXGIOutputs()
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
     if (FAILED(hr))
     {
-        LOG_ERROR("CreateDXGIFactory1 basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_ERROR("CreateDXGIFactory1 failed: 0x{:08X}", static_cast<unsigned long>(hr));
         return false;
     }
 
@@ -201,15 +201,15 @@ bool MonitorManager::MatchDXGIOutputs()
         hr = factory->EnumAdapters1(adapterIdx, &adapter);
 
         if (hr == DXGI_ERROR_NOT_FOUND)
-            break;  // Daha fazla adapter yok
+            break;  // no more adapters
 
         if (FAILED(hr))
         {
-            LOG_WARN("EnumAdapters1({}) basarisiz: 0x{:08X}", adapterIdx, static_cast<unsigned long>(hr));
+            LOG_WARN("EnumAdapters1({}) failed: 0x{:08X}", adapterIdx, static_cast<unsigned long>(hr));
             continue;
         }
 
-        // Adapter bilgilerini logla
+        // Log what this adapter is
         DXGI_ADAPTER_DESC1 adapterDesc{};
         adapter->GetDesc1(&adapterDesc);
         LOG_INFO("  GPU {}: {} (VRAM: {} MB)",
@@ -224,19 +224,19 @@ bool MonitorManager::MatchDXGIOutputs()
             hr = adapter->EnumOutputs(outputIdx, &output);
 
             if (hr == DXGI_ERROR_NOT_FOUND)
-                break;  // Bu adapter'de daha fazla output yok
+                break;  // no more outputs on this adapter
 
             if (FAILED(hr))
             {
-                LOG_WARN("EnumOutputs({}) basarisiz: 0x{:08X}", outputIdx, static_cast<unsigned long>(hr));
+                LOG_WARN("EnumOutputs({}) failed: 0x{:08X}", outputIdx, static_cast<unsigned long>(hr));
                 continue;
             }
 
-            // Output'un hangi monitore bagli oldugunu bul
+            // Which monitor is this output attached to?
             DXGI_OUTPUT_DESC outputDesc{};
             output->GetDesc(&outputDesc);
 
-            // MonitorInfo'larla esle: outputDesc.Monitor == info.hMonitor
+            // Match against our MonitorInfo list by HMONITOR
             for (auto& mon : m_monitors)
             {
                 if (mon.hMonitor == outputDesc.Monitor)
@@ -346,9 +346,9 @@ void MonitorManager::ToggleZoom(size_t monitorIndex)
     if (!mon) return;
 
     mon->zoom.isActive = !mon->zoom.isActive;
-    LOG_INFO("Monitor {} zoom {}", monitorIndex, mon->zoom.isActive ? "AKTIF" : "PASIF");
+    LOG_INFO("Monitor {} zoom {}", monitorIndex, mon->zoom.isActive ? "ON" : "OFF");
 
-    // Zoom pasif olursa level'i sifirla
+    // Reset the level when zoom goes off
     if (!mon->zoom.isActive)
     {
         mon->zoom.zoomLevel = ZoomState::kMinZoom;
@@ -370,7 +370,7 @@ void MonitorManager::ToggleFreezeOnMonitor(size_t monitorIndex)
 // =============================================================================
 void MonitorManager::LogAllMonitors() const
 {
-    LOG_INFO("=== Monitor Listesi ({} adet) ===", m_monitors.size());
+    LOG_INFO("=== Monitors ({}) ===", m_monitors.size());
 
     for (size_t i = 0; i < m_monitors.size(); i++)
     {

@@ -77,7 +77,7 @@ bool ApplyStartWithWindows(bool enable)
     LSTATUS st = RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key);
     if (st != ERROR_SUCCESS)
     {
-        LOG_ERROR("Run anahtari acilamadi: {}", st);
+        LOG_ERROR("Could not open the Run key: {}", st);
         return false;
     }
 
@@ -88,12 +88,12 @@ bool ApplyStartWithWindows(bool enable)
         wchar_t exePath[MAX_PATH]{};
         if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0)
         {
-            LOG_ERROR("GetModuleFileNameW basarisiz: {}", GetLastError());
+            LOG_ERROR("GetModuleFileNameW failed: {}", GetLastError());
             RegCloseKey(key);
             return false;
         }
 
-        // Yol bosluk icerebilir; tirnaklamazsak Windows ilk bosluktan keser.
+        // The path may contain spaces, and Windows cuts an unquoted Run entry at the first one.
         const std::wstring quoted = L"\"" + std::wstring(exePath) + L"\"";
 
         st = RegSetValueExW(key, kValueName, 0, REG_SZ,
@@ -102,7 +102,7 @@ bool ApplyStartWithWindows(bool enable)
         ok = (st == ERROR_SUCCESS);
 
         if (!ok)
-            LOG_ERROR("Run degeri yazilamadi: {}", st);
+            LOG_ERROR("Could not write the Run value: {}", st);
     }
     else
     {
@@ -111,7 +111,7 @@ bool ApplyStartWithWindows(bool enable)
         ok = (st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND);
 
         if (!ok)
-            LOG_ERROR("Run degeri silinemedi: {}", st);
+            LOG_ERROR("Could not delete the Run value: {}", st);
     }
 
     RegCloseKey(key);
@@ -150,7 +150,7 @@ App::~App()
 }
 
 // =============================================================================
-// Initialize — Tum component'leri sirayla baslat
+// Initialize — bring every component up, in order
 // =============================================================================
 bool App::Initialize(HINSTANCE hInstance)
 {
@@ -160,7 +160,7 @@ bool App::Initialize(HINSTANCE hInstance)
     m_hInstance = hInstance;
     s_instance  = this;
 
-    LOG_INFO("App baslatiliyor...");
+    LOG_INFO("App starting");
 
     if (!CreateMessageWindow())
         return false;
@@ -171,7 +171,7 @@ bool App::Initialize(HINSTANCE hInstance)
     SetupCallbacks();
 
     m_initialized = true;
-    LOG_INFO("App hazir — Ctrl+Alt+Z ile zoom'u ac, Ctrl+Alt+X freeze");
+    LOG_INFO("App ready — Ctrl+Alt+Z toggles zoom, Ctrl+Alt+X freezes");
     return true;
 }
 
@@ -207,15 +207,15 @@ bool App::CreateMessageWindow()
         0,
         kMsgWindowClass,
         L"BetterMagnifier",
-        WS_POPUP,               // Kenarlik/title bar yok
-        0, 0, 0, 0,             // 0x0 boyut — hic gosterilmeyecek
+        WS_POPUP,               // no border, no title bar
+        0, 0, 0, 0,             // zero sized: it is never shown
         nullptr, nullptr,
         m_hInstance,
         nullptr);
 
     if (!m_messageHwnd)
     {
-        LOG_ERROR("Mesaj penceresi olusturulamadi: {}", GetLastError());
+        LOG_ERROR("Message window could not be created: {}", GetLastError());
         return false;
     }
 
@@ -296,7 +296,7 @@ bool App::InitializeComponents()
         if (!mon)
             continue;
 
-        // Overlay pencere
+        // Overlay window
         OverlayWindow overlay;
         if (!overlay.Create(m_hInstance, *mon, i))
         {
@@ -431,7 +431,7 @@ int App::Run()
         Update();
     }
 
-    LOG_INFO("Message loop bitti (exit code: {})", static_cast<int>(msg.wParam));
+    LOG_INFO("Message loop ended (exit code: {})", static_cast<int>(msg.wParam));
     return static_cast<int>(msg.wParam);
 }
 
@@ -480,7 +480,7 @@ void App::PublishViewportRequests(bool bumpLayout)
 }
 
 // =============================================================================
-// UpdatePointerCompositing — gercek imleci gizle / geri getir
+// UpdatePointerCompositing — hide and restore the real pointer
 // =============================================================================
 //
 // The exposure window is exactly "the pointer is on a magnified monitor", and
@@ -630,8 +630,8 @@ void App::Update()
         if (!mon)
             continue;
 
-        // ── Snapshot'i guncelle (GUI thread bunu 10 Hz okuyor) ──
-        // Pasif monitorler de raporlanmali, bu yuzden zoom kontrolunden ONCE.
+        // ── Publish to the snapshot; the GUI thread reads it at 10 Hz ──
+        // Idle monitors have to be reported too, so this comes BEFORE the check.
         auto& st = m_status.Monitor(i);
         st.zoomLevel.store(mon->zoom.zoomLevel, std::memory_order_relaxed);
         st.isActive.store(mon->zoom.isActive, std::memory_order_relaxed);
@@ -803,7 +803,7 @@ void App::RenderMonitor(size_t monitorIndex)
         srcRect.right  = srcRect.left + srcW;
         srcRect.bottom = srcRect.top  + srcH;
 
-        // ── Imlec sprite'inin durumu — ATLAMA TESTINDEN ONCE ──
+        // ── The cursor sprite's state — BEFORE the skip test ──
         //
         // This has to be decided before the skip below, and that ordering is
         // the whole point. The skip used to ask only "new frame, or did the
@@ -930,7 +930,7 @@ void App::RenderMonitor(size_t monitorIndex)
             return;
         }
 
-        // ── Kendi imlecimizi icerigin uzerine ciz ──
+        // ── Draw our own pointer over the content ──
         //
         // Shape and position were resolved above, before the skip test, because
         // they are part of deciding whether this frame is worth drawing at all.
@@ -1008,7 +1008,7 @@ void App::RenderMonitor(size_t monitorIndex)
             const float dt = std::chrono::duration<float>(now - lastTime).count();
             if (dt > 0.0f)
             {
-                // Ustel yumusatma — ham 1/dt cok zipliyor, gostergede okunmaz.
+                // Exponentially smoothed: raw 1/dt jumps far too much to read.
                 const float instant = 1.0f / dt;
                 auto& fpsSlot = m_status.Monitor(monitorIndex).fps;
                 const float prev = fpsSlot.load(std::memory_order_relaxed);
@@ -1026,7 +1026,7 @@ void App::RenderMonitor(size_t monitorIndex)
 }
 
 // =============================================================================
-// AssertOverlaysTopmost — menu/popup'larin uzerinde kal
+// AssertOverlaysTopmost — stay above menus and popups
 // =============================================================================
 // Two callers:
 //   1. WM_APP_ASSERT_TOPMOST, when the input thread sees a popup or menu
@@ -1087,7 +1087,7 @@ void App::PublishMonitorInfo()
 
         auto& st = m_status.Monitor(i);
 
-        // wcsncpy_s + _TRUNCATE: her zaman null-terminated, tasma yok
+        // wcsncpy_s + _TRUNCATE: always null-terminated, never overruns
         wcsncpy_s(st.deviceName, MonitorStatus::kNameCapacity,
                   mon->deviceName.c_str(), _TRUNCATE);
 
@@ -1104,9 +1104,9 @@ void App::PublishMonitorInfo()
 // Event Handlers
 // =============================================================================
 
-// Win+Z veya tray cift tik / menu → farenin uzerinde oldugu monitorde toggle.
-// Windows Magnifier TUM ekranlari birlikte buyutur; bizim farkimiz bu:
-// her monitorde BAGIMSIZ zoom.
+// Hotkey, tray double click or tray menu: toggles the monitor the pointer is on.
+// Windows Magnifier magnifies every display together; independent per-monitor
+// zoom is the whole difference.
 void App::OnToggleZoom()
 {
     size_t index = 0;
@@ -1125,8 +1125,8 @@ void App::ToggleZoomOnMonitor(size_t i)
     if (!before)
         return;
 
-    // Kullanimdaki seviyeyi toggle'DAN ONCE oku: ToggleZoom kapatirken
-    // zoomLevel'i kMinZoom'a sifirliyor, sonra okursak 1.0 goruruz.
+    // Read the level in use BEFORE toggling: turning zoom off resets zoomLevel
+    // to kMinZoom, so reading afterwards would see 1.0.
     const float levelInUse = before->zoom.zoomLevel;
     const bool  wasActive  = before->zoom.isActive;
 
@@ -1140,9 +1140,8 @@ void App::ToggleZoomOnMonitor(size_t i)
 
     if (mon->zoom.isActive)
     {
-        // Zoom acilinca hangi seviyeden baslasin?
-        // rememberZoomLevel aciksa son kullanilan seviye, degilse
-        // minZoom'un iki kati.
+        // Which level does zoom come on at? The last one used when
+        // rememberZoomLevel is set, otherwise twice the minimum.
         float startZoom = m_settings.General().rememberZoomLevel
             ? std::clamp(ms.lastZoom, ms.minZoom, ms.maxZoom)
             : std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
@@ -1196,14 +1195,14 @@ void App::OnFreeze()
 }
 
 // =============================================================================
-// OnZoomStep — zoom'u bir adim degistir
+// OnZoomStep — change zoom by one increment
 // =============================================================================
-// Kaynaklari: Ctrl+Alt+tekerlek, Win+arti, Win+eksi.
+// Sources: Ctrl+Alt+wheel, Win+Plus, Win+Minus.
 //
-// Windows Magnifier davranisini taklit ediyor:
-//   Zoom KAPALI + yon(+)  -> ac (baslangic seviyesinde)
-//   Zoom ACIK  + yon(+)   -> bir adim buyut
-//   Zoom ACIK  + yon(-)   -> bir adim kucult; minZoom'a inince KAPAT
+// Mirrors Windows Magnifier:
+//   off + up    -> turn on, at the starting level
+//   on  + up    -> one step in
+//   on  + down  -> one step out, and OFF once it reaches minZoom
 //   off + down  -> nothing; there is nothing below off
 //
 // Stepping up turns zoom ON, which it did not used to. The old behaviour only
@@ -1233,11 +1232,11 @@ void App::OnZoomStep(int direction)
 
         const auto ms = m_settings.Monitor(mon->deviceName);
 
-        // ── Kapaliyken buyutme istegi = ac ──
+        // ── Asking to zoom in while off means "turn on" ──
         if (!mon->zoom.isActive)
         {
             if (direction <= 0)
-                return;   // Kapali olani daha fazla kapatamayiz
+                return;   // nothing below off
 
             m_monitorManager.ToggleZoom(i);
 
@@ -1476,21 +1475,21 @@ void App::ApplyPointerSettings()
 
 void App::ApplySettings()
 {
-    LOG_INFO("Ayarlar uygulaniyor...");
+    LOG_INFO("Applying settings");
 
     const auto& g = m_settings.General();
 
-    // Hotkey'leri yeniden kaydet, sonucu panele bildir
+    // Re-register the hotkeys and report the outcome to the panel
     const UINT failedMask = m_hotkeyManager.Reregister(g);
     m_status.hotkeyFailedMask.store(failedMask, std::memory_order_release);
 
-    // Input thread'in atomic bayraklarini guncelle
+    // Update the input thread's atomic flags
     m_inputThread.SetFollowMode(g.followMode);
     m_inputThread.SetHijackMagnifierKeys(g.hijackMagnifierKeys);
 
     ApplyPointerSettings();
 
-    // Mevcut zoom yeni sinirlarin disinda kaldiysa iceri cek
+    // Pull the current zoom back inside the new limits
     for (size_t i = 0; i < m_monitorManager.GetMonitorCount(); ++i)
     {
         MonitorInfo* mon = m_monitorManager.GetMonitor(i);
@@ -1594,7 +1593,7 @@ void App::OnDisplayChange()
 {
     LOG_INFO("Display change — rebuilding the pipeline");
 
-    // Yikma sirasi: capture (duplication session) → swap chain → overlay pencere
+    // Teardown order: capture (duplication session), swap chain, overlay window
     m_captures.clear();
 
     for (size_t i = 0; i < m_overlays.size(); ++i)
@@ -1604,7 +1603,7 @@ void App::OnDisplayChange()
 
     m_monitorManager.Refresh();
 
-    // Yeniden kur (InitializeComponents'in per-monitor kismi)
+    // Rebuild — the per-monitor part of InitializeComponents
     const size_t monitorCount = m_monitorManager.GetMonitorCount();
     m_overlays.reserve(monitorCount);
     m_captures.reserve(monitorCount);
@@ -1633,7 +1632,7 @@ void App::OnDisplayChange()
         m_captures.push_back(std::move(capture));
     }
 
-    // Yeni monitor bilgilerini snapshot'a yaz — panel basliklari guncellensin
+    // Publish the new monitor info so the panel's card headers update
     PublishMonitorInfo();
 
     // Bump the layout epoch so the input thread re-reads every rect and
@@ -1643,7 +1642,7 @@ void App::OnDisplayChange()
 
     m_controlPanel.NotifyDisplayChange();
 
-    LOG_INFO("Pipeline yeniden kuruldu ({} monitor)", m_overlays.size());
+    LOG_INFO("Pipeline rebuilt ({} monitors)", m_overlays.size());
 }
 
 // =============================================================================
@@ -1829,7 +1828,7 @@ void App::Shutdown()
     }
     UnregisterClassW(kMsgWindowClass, m_hInstance);
 
-    // 7. Ayarlari kaydet — son zoom seviyeleri dahil
+    // 7. Save the settings, last zoom levels included
     if (m_settings.General().rememberZoomLevel)
     {
         for (size_t i = 0; i < m_monitorManager.GetMonitorCount(); ++i)
@@ -1857,12 +1856,12 @@ void App::Shutdown()
     }
     m_settings.Save();
 
-    // 8. m_renderer destructor'i device'i en son birakir (member olarak)
+    // 8. m_renderer is a member, so its destructor releases the device last
 
     s_instance    = nullptr;
     m_initialized = false;
 
-    LOG_INFO("App kapatildi");
+    LOG_INFO("App shut down");
 }
 
 } // namespace BetterMagnifier

@@ -48,7 +48,7 @@ InputThread::~InputThread()
 }
 
 // =============================================================================
-// Start — thread'i baslat, hook kurulumunu bekle
+// Start — start the thread and wait for the hooks to come up
 // =============================================================================
 //
 // Start blocks on a promise because the hooks must be installed from inside the
@@ -92,34 +92,34 @@ bool InputThread::Start(HWND targetHwnd, FollowMode initialMode, bool hijackMagn
 
     if (!readyFuture.get())
     {
-        LOG_ERROR("InputThread hook kurulumu basarisiz");
+        LOG_ERROR("InputThread hook installation failed");
         if (m_thread.joinable())
             m_thread.join();
         s_instance = nullptr;
         return false;
     }
 
-    LOG_INFO("InputThread baslatildi (thread id: {})",
+    LOG_INFO("InputThread started (thread id: {})",
         m_threadId.load(std::memory_order_acquire));
     return true;
 }
 
 // =============================================================================
-// InstallHooks — thread ICINDE cagrilir
+// InstallHooks — called from INSIDE the thread
 // =============================================================================
 bool InputThread::InstallHooks()
 {
-    // ── Fare hook'u (scroll wheel zoom) ──
+    // ── Mouse hook: wheel zoom and pointer tracking ──
     m_mouseHook = SetWindowsHookExW(
         WH_MOUSE_LL,
         LowLevelMouseProc,
         GetModuleHandleW(nullptr),
-        0   // 0 = global (tum thread'ler)
+        0   // 0 = global, every thread
     );
 
     if (!m_mouseHook)
     {
-        LOG_ERROR("WH_MOUSE_LL kurulamadi: {}", GetLastError());
+        LOG_ERROR("WH_MOUSE_LL could not be installed: {}", GetLastError());
         return false;
     }
     LOG_INFO("  Mouse hook installed (on the input thread)");
@@ -137,7 +137,7 @@ bool InputThread::InstallHooks()
         0);
 
     if (!m_keyboardHook)
-        LOG_WARN("WH_KEYBOARD_LL kurulamadi: {} — Win+arti/eksi devralma devre disi",
+        LOG_WARN("WH_KEYBOARD_LL could not be installed: {} — the Win+Plus/Minus takeover is off",
             GetLastError());
     else
         LOG_INFO("  Keyboard hook installed");
@@ -172,9 +172,9 @@ bool InputThread::InstallHooks()
         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
     if (!m_popupHook)
-        LOG_WARN("EVENT_SYSTEM_MENUPOPUPSTART hook kurulamadi: {}", GetLastError());
+        LOG_WARN("EVENT_SYSTEM_MENUPOPUPSTART hook failed: {}", GetLastError());
     else
-        LOG_INFO("  Menu popup hook'u aktif");
+        LOG_INFO("  Menu popup hook installed");
 
     return true;
 }
@@ -185,28 +185,28 @@ void InputThread::RemoveHooks()
     {
         UnhookWinEvent(m_popupHook);
         m_popupHook = nullptr;
-        LOG_DEBUG("Menu popup hook'u kaldirildi");
+        LOG_DEBUG("Menu popup hook removed");
     }
 
     if (m_focusHook)
     {
         UnhookWinEvent(m_focusHook);
         m_focusHook = nullptr;
-        LOG_DEBUG("Odak + popup hook'u kaldirildi");
+        LOG_DEBUG("Focus and popup hook removed");
     }
 
     if (m_keyboardHook)
     {
         UnhookWindowsHookEx(m_keyboardHook);
         m_keyboardHook = nullptr;
-        LOG_DEBUG("Klavye hook'u kaldirildi");
+        LOG_DEBUG("Keyboard hook removed");
     }
 
     if (m_mouseHook)
     {
         UnhookWindowsHookEx(m_mouseHook);
         m_mouseHook = nullptr;
-        LOG_DEBUG("Mouse hook kaldirildi");
+        LOG_DEBUG("Mouse hook removed");
     }
 }
 
@@ -406,7 +406,7 @@ void InputThread::Stop()
 
     if (tid != 0)
     {
-        // Thread-only WM_QUIT — GetMessage 0 dondurur, loop cikar.
+        // A thread-only WM_QUIT: GetMessage returns 0 and the loop ends.
         PostThreadMessageW(tid, WM_QUIT, 0, 0);
     }
 
@@ -568,12 +568,12 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
                 PostMessageW(s_instance->m_target, WM_APP_ZOOM_STEP,
                              (delta > 0) ? kZoomIn : kZoomOut, 0);
 
-                // YUT — alttaki uygulama ne zoom ne scroll gormesin.
+                // Swallowed, so the application below sees neither a zoom nor a scroll.
                 return 1;
             }
         }
 
-        // ── Win + orta tik = zoom bolgesini sabitle/coz ──
+        // ── Win + middle click freezes and unfreezes the view ──
         //
         // Freeze from the mouse, since the hand is already there. MBUTTONUP is
         // swallowed too: leaving it through hands the application below half a
@@ -591,7 +591,7 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
                     PostMessageW(s_instance->m_target, WM_APP_TOGGLE_FREEZE,
                                  kFocusedMonitor, 0);
                 }
-                return 1;   // ikisini de yut
+                return 1;   // swallow both
             }
         }
     }
@@ -717,7 +717,7 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
                     PostMessageW(s_instance->m_target, WM_APP_ZOOM_STEP,
                                  isPlus ? kZoomIn : kZoomOut, 0);
 
-                    // YUT — Windows Magnifier acilmasin.
+                    // Swallowed, so the Windows Magnifier does not also open.
                     return 1;
                 }
             }
@@ -746,7 +746,7 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
                 static std::atomic<bool> panicStarted{false};
                 if (!panicStarted.exchange(true, std::memory_order_relaxed))
                 {
-                    LOG_WARN("PANIK CIKISI (Ctrl+Alt+Shift+Q) — nazik kapatma deneniyor");
+                    LOG_WARN("PANIC EXIT (Ctrl+Alt+Shift+Q) — trying a graceful shutdown");
 
                     // Pointer first, before anything that can fail or stall.
                     // This shortcut exists for the case where the app has gone
@@ -754,21 +754,21 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
                     // with it" is the state it must never leave behind.
                     SystemCursor::Restore();
 
-                    // 1. Nazik yol: mesaj penceresine WM_CLOSE.
+                    // 1. The graceful route: WM_CLOSE to the message window.
                     PostMessageW(s_instance->m_target, WM_CLOSE, 0, 0);
 
-                    // 2. Hook icinde BEKLEMEK YASAK (LowLevelHooksTimeout).
-                    //    Ayri, detached bir thread bekleyip gerekirse zorlar.
+                    // 2. Waiting inside a hook is forbidden (LowLevelHooksTimeout), so a
+                    //    separate detached thread does the waiting and forces the issue.
                     std::thread([]{
                         std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-                        LOG_ERROR("Nazik kapatma 1.5 sn'de tamamlanmadi — TerminateProcess");
+                        LOG_ERROR("Graceful shutdown did not finish in 1.5 s — TerminateProcess");
                         // Restore again: the graceful path may have hung after
                         // re-hiding, and TerminateProcess runs no cleanup.
                         SystemCursor::Restore();
                         TerminateProcess(GetCurrentProcess(), 1);
                     }).detach();
                 }
-                return 1;   // Q'yu yut
+                return 1;   // swallow the Q
             }
         }
     }
@@ -777,10 +777,10 @@ LRESULT CALLBACK InputThread::LowLevelKeyboardProc(int nCode, WPARAM wParam, LPA
 }
 
 // =============================================================================
-// WinEventProc — klavye odagi degisti
+// WinEventProc — keyboard focus moved
 // =============================================================================
-// WINEVENT_SKIPOWNPROCESS sayesinde kendi pencerelerimiz buraya dusmez —
-// panelde gezinirken zoom bolgesinin ziplamasi engellendi.
+// WINEVENT_SKIPOWNPROCESS keeps our own windows out of this, which is what
+// stops the view jumping around while the user navigates the panel.
 // =============================================================================
 void CALLBACK InputThread::WinEventProc(
     HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG /*idChild*/,
@@ -806,9 +806,9 @@ void CALLBACK InputThread::WinEventProc(
     if (event != EVENT_OBJECT_FOCUS)
         return;
 
-    // idObject == OBJID_CLIENT: gercek bir kontrol odaklandi.
-    // Menu/scrollbar/caret gibi alt nesneleri yoksayiyoruz — zoom bolgesini
-    // her scrollbar tiklamasinda ziplatmak istemiyoruz.
+    // idObject == OBJID_CLIENT means a real control took focus. Sub-objects
+    // such as menus, scrollbars and carets are ignored: jumping the view on
+    // every scrollbar click is not what anyone wants.
     if (idObject != OBJID_CLIENT)
         return;
 
