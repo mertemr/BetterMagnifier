@@ -30,9 +30,11 @@ OverlayWindow::OverlayWindow(OverlayWindow&& other) noexcept
     : m_hwnd(other.m_hwnd)
     , m_monitorIndex(other.m_monitorIndex)
     , m_visible(other.m_visible)
+    , m_excludedFromCapture(other.m_excludedFromCapture)
 {
     other.m_hwnd = nullptr;
     other.m_visible = false;
+    other.m_excludedFromCapture = false;
 }
 
 OverlayWindow& OverlayWindow::operator=(OverlayWindow&& other) noexcept
@@ -40,17 +42,19 @@ OverlayWindow& OverlayWindow::operator=(OverlayWindow&& other) noexcept
     if (this != &other)
     {
         if (m_hwnd) DestroyWindow(m_hwnd);
-        m_hwnd         = other.m_hwnd;
-        m_monitorIndex = other.m_monitorIndex;
-        m_visible      = other.m_visible;
+        m_hwnd                = other.m_hwnd;
+        m_monitorIndex        = other.m_monitorIndex;
+        m_visible             = other.m_visible;
+        m_excludedFromCapture = other.m_excludedFromCapture;
         other.m_hwnd    = nullptr;
         other.m_visible = false;
+        other.m_excludedFromCapture = false;
     }
     return *this;
 }
 
 // =============================================================================
-// RegisterWindowClass — Overlay icin window class kaydi
+// RegisterWindowClass — window class for the overlay
 // =============================================================================
 bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
 {
@@ -78,30 +82,31 @@ bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
 }
 
 // =============================================================================
-// Create — Overlay penceresi olustur
+// Create — the per-monitor overlay window
 // =============================================================================
 //
-// NEDEN WS_EX_LAYERED KULLANMIYORUZ (onemli mimari karar):
-//   DXGI flip-model swap chain (DXGI_SWAP_EFFECT_FLIP_DISCARD) layered pencerede
-//   CALISMAZ — CreateSwapChainForHwnd DXGI_ERROR_INVALID_CALL doner.
-//   Layered + D3D icin DirectComposition kurmak gerekirdi.
+// WS_EX_LAYERED is mandatory, and this was got wrong once. It was dropped so a
+// flip-model swap chain could be used, justified as "a fullscreen magnifier
+// does not need transparency". Visually true, catastrophic for input: the
+// overlay swallowed every click and Windows became unusable while zoomed.
 //
-//   Ama gerek yok: bu bir TAM EKRAN magnifier. Buyutulmus goruntu monitorun
-//   tamamini kapliyor, altinda hicbir sey gorunmeyecek — yani seffafliga
-//   ihtiyacimiz yok. Overlay opak olabilir, swap chain dogrudan calisir.
-//   (Kismi ekran "lens" modu eklenirse o zaman DirectComposition gerekir.)
+// WS_EX_TRANSPARENT alone is not enough, and neither is returning HTTRANSPARENT
+// from WM_NCHITTEST. LAYERED | TRANSPARENT together is the recipe that works.
 //
-// Window Styles Aciklamasi:
-//   WS_EX_TRANSPARENT  — Mouse olaylari bu pencereden gecer (click-through)
-//   WS_EX_TOPMOST      — Her zaman ustte (diger pencerelerin uzerinde)
-//   WS_EX_NOACTIVATE   — Tiklayinca focus almasin (calisan uygulama focus'unu kaybetmesin)
-//   WS_EX_TOOLWINDOW   — Taskbar'da gorunmesin
-//   WS_POPUP           — Title bar, kenar cizgisi yok (tam seffaf)
+// The cost is real: flip model refuses layered windows, so the swap chain falls
+// back to blt (see D3DRenderer::CreateSwapChainForWindow). Slightly more
+// latency, in exchange for input that works at all.
 //
-// Python analojisi:
-//   tkinter: root.attributes("-alpha", 0.0, "-topmost", True)
-//   PyQt: Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.WindowTransparentForInput
+// One subtlety worth keeping: a window made layered via
+// SetLayeredWindowAttributes keeps its normal redirection surface, so D3D
+// rendering into it works. The UpdateLayeredWindow route would not.
 //
+//   WS_EX_LAYERED      with TRANSPARENT, gives real click-through
+//   WS_EX_TRANSPARENT  mouse events pass through to what is underneath
+//   WS_EX_TOPMOST      above ordinary windows
+//   WS_EX_NOACTIVATE   never takes focus from the app being magnified
+//   WS_EX_TOOLWINDOW   keeps it out of the taskbar and Alt+Tab
+//   WS_POPUP           no title bar and no border
 // =============================================================================
 bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, size_t monitorIndex)
 {
@@ -114,6 +119,11 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
                   | WS_EX_TOPMOST
                   | WS_EX_NOACTIVATE
                   | WS_EX_TOOLWINDOW;
+
+    // Layered by default; BM_OVERLAY_FLIP=1 restores the flip-model behaviour,
+    // which has lower latency and no click-through. Kept for comparison only.
+    if (!UseFlipOverlay())
+        exStyle |= WS_EX_LAYERED;
 
     DWORD style = WS_POPUP;
 
@@ -140,18 +150,35 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
         return false;
     }
 
+    // Fully opaque. The window is layered for input transparency, not visual
+    // transparency — and without this call a layered window is never drawn at
+    // all.
+    if (!UseFlipOverlay())
+    {
+        if (!SetLayeredWindowAttributes(m_hwnd, 0, 255, LWA_ALPHA))
+        {
+            LOG_ERROR("SetLayeredWindowAttributes basarisiz: {} — overlay gorunmeyebilir",
+                GetLastError());
+        }
+    }
+
     // ── FEEDBACK LOOP ONLEME (kritik!) ──
     // Desktop Duplication tum masaustunu yakaliyor — overlay de masaustunun
     // parcasi. Onlem alinmazsa overlay kendi icerigini yakalar → sonsuz ayna
     // (kamerayi kendi ekranina tutmak gibi).
     //
-    // WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+): pencere kullaniciya normal
-    // gorunur ama ekran yakalama API'lerine gorunmez. Tam istedigimiz sey.
-    // Eski Windows'ta basarisiz olur — o zaman feedback loop olusur, uyari veriyoruz.
-    if (!SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE))
+    // WDA_EXCLUDEFROMCAPTURE (Windows 10 2004+): visible on screen, invisible
+    // to capture APIs — exactly what is needed here. Without it Desktop
+    // Duplication would capture our own output and feed it back.
+    if (SetWindowDisplayAffinity(m_hwnd, WDA_EXCLUDEFROMCAPTURE))
     {
-        LOG_WARN("SetWindowDisplayAffinity basarisiz ({}) — Windows 10 2004+ gerekiyor, "
-                 "feedback loop olusabilir", GetLastError());
+        m_excludedFromCapture = true;
+    }
+    else
+    {
+        m_excludedFromCapture = false;
+        LOG_WARN("SetWindowDisplayAffinity failed ({}), needs Windows 10 2004+ — "
+                 "capture feedback is possible", GetLastError());
     }
 
     LOG_INFO("Overlay window olusturuldu: monitor={}, pos=({},{}), size={}x{}, HWND=0x{:X}",
@@ -188,6 +215,20 @@ void OverlayWindow::Hide()
 bool OverlayWindow::IsVisible() const
 {
     return m_visible;
+}
+
+// =============================================================================
+// EnsureTopmost — menulerin uzerinde kal
+// =============================================================================
+void OverlayWindow::EnsureTopmost()
+{
+    if (!m_hwnd || !m_visible)
+        return;
+
+    // Z-order only: NOMOVE and NOSIZE keep the geometry, NOACTIVATE keeps the
+    // focus where the user put it.
+    SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 // =============================================================================

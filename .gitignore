@@ -360,4 +360,5 @@ MigrationBackup/
 .ionide/
 
 # Fody - auto-generated XML schema
-FodyWeavers.xsd
+FodyWeavers.xsdspike/xaml-island-thread/x64/
+spike/xaml-island-thread/spike/

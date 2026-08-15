@@ -17,11 +17,7 @@ bool MonitorManager::Initialize()
 
     m_monitors.clear();
 
-    // ── 1. EnumDisplayMonitors ile tum monitorleri listele ──
-    // Python analojisi: screeninfo.get_monitors()
-    // Windows bu callback fonksiyonunu her monitor icin bir kez cagirir.
-    // lParam ile "this" pointer'ini geciyoruz ki callback icinden
-    // m_monitors vector'une erisim olsun.
+    // lParam carries "this" so the static callback can reach m_monitors.
     if (!EnumDisplayMonitors(nullptr, nullptr, EnumMonitorCallback, reinterpret_cast<LPARAM>(this)))
     {
         LOG_ERROR("EnumDisplayMonitors basarisiz!");
@@ -34,19 +30,18 @@ bool MonitorManager::Initialize()
         return false;
     }
 
-    LOG_INFO("{} adet monitor bulundu", m_monitors.size());
+    LOG_INFO("Found {} monitor(s)", m_monitors.size());
 
-    // ── 2. Her monitor icin detayli bilgileri doldur ──
     for (auto& mon : m_monitors)
     {
         PopulateMonitorDetails(mon);
     }
 
-    // ── 3. DXGI adapter/output eslestirmesi ──
     if (!MatchDXGIOutputs())
     {
-        LOG_WARN("DXGI output eslestirmesi kismen basarisiz — bazi monitorler capture edilemeyebilir");
-        // Kritik degil, devam edebiliriz
+        // Not fatal: an unmatched output only means that monitor cannot be
+        // captured, and the rest still work.
+        LOG_WARN("DXGI output matching partially failed, some monitors may not capture");
     }
 
     LogAllMonitors();
@@ -64,9 +59,7 @@ void MonitorManager::Refresh()
 
     std::lock_guard lock(m_mutex);
 
-    // Mevcut zoom state'leri koru — yeni listeye aktarilacak
-    // Python analojisi: 
-    //   old_states = {mon.device_name: mon.zoom for mon in self.monitors}
+    // Keep the current zoom states so they can be carried into the new list.
     std::unordered_map<std::wstring, ZoomState> savedZoomStates;
     for (const auto& mon : m_monitors)
     {
@@ -81,12 +74,12 @@ void MonitorManager::Refresh()
     {
         PopulateMonitorDetails(mon);
 
-        // Eski zoom state'i geri yukle (ayni device name ile eslesen monitor varsa)
+        // Carry zoom state across a topology change, keyed by device name.
         auto it = savedZoomStates.find(mon.deviceName);
         if (it != savedZoomStates.end())
         {
             mon.zoom = it->second;
-            LOG_DEBUG("Zoom state korundu: {} -> level={:.2f}", 
+            LOG_DEBUG("Zoom state preserved: {} -> level={:.2f}",
                 ToUtf8(mon.deviceName),
                 mon.zoom.zoomLevel);
         }
@@ -97,11 +90,9 @@ void MonitorManager::Refresh()
 }
 
 // =============================================================================
-// EnumMonitorCallback — Her monitor icin Windows tarafindan cagirilir
+// EnumMonitorCallback — invoked by Windows once per monitor
 // =============================================================================
-// Bu bir "static" fonksiyon — class instance'ina erisimi yok.
-// Bu yuzden lParam ile "this" pointer'ini geciyoruz.
-// Python'da: lambda self=self: self.monitors.append(...)
+// Static, as the Win32 signature requires, so the instance arrives via lParam.
 // =============================================================================
 BOOL CALLBACK MonitorManager::EnumMonitorCallback(
     HMONITOR hMon, HDC /*hDC*/, LPRECT lpRect, LPARAM lParam)
@@ -118,16 +109,15 @@ BOOL CALLBACK MonitorManager::EnumMonitorCallback(
 
     self->m_monitors.push_back(std::move(info));
 
-    return TRUE;  // TRUE = devam et (sonraki monitor), FALSE = dur
+    return TRUE;   // FALSE would stop the enumeration early
 }
 
 // =============================================================================
-// PopulateMonitorDetails — Tek bir monitor icin detayli bilgileri doldur
+// PopulateMonitorDetails — name, bounds, DPI and refresh rate for one monitor
 // =============================================================================
 void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
 {
-    // ── 1. MONITORINFOEX ile temel bilgiler ──
-    // Python'da: win32api.GetMonitorInfo(hMonitor)
+    // MONITORINFOEX rather than MONITORINFO: the device name comes with it.
     MONITORINFOEXW monInfo{};
     monInfo.cbSize = sizeof(monInfo);
 
@@ -145,9 +135,10 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
     }
 
     // ── 2. Per-Monitor DPI ──
-    // Windows 8.1+ API — her monitörun gerçek DPI değerini alır.
-    // 96 DPI = %100 scaling, 144 DPI = %150, 192 DPI = %200
-    // Bu değer zoom hesaplamasında ve overlay boyutlandırmada lazım.
+    // Windows 8.1+, and the only way to get a per-monitor DPI rather than the
+    // system one.
+    // 96 DPI is 100% scaling, 144 is 150%, 192 is 200%. Needed for overlay
+    // sizing and reported in the panel.
     UINT dpiX = 96, dpiY = 96;
     HRESULT hr = GetDpiForMonitor(info.hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
     if (SUCCEEDED(hr))
@@ -157,12 +148,10 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
     }
     else
     {
-        LOG_WARN("GetDpiForMonitor basarisiz: 0x{:08X}", static_cast<unsigned long>(hr));
+        LOG_WARN("GetDpiForMonitor failed: 0x{:08X}", static_cast<unsigned long>(hr));
     }
 
-    // ── 3. Refresh Rate ──
-    // DEVMODE yapisinda monitorun refresh rate'i (Hz) var.
-    // 60Hz, 144Hz, 240Hz gibi — v-sync icin lazim.
+    // Refresh rate, needed to pace Present against the right vblank.
     DEVMODEW devMode{};
     devMode.dmSize = sizeof(devMode);
 
@@ -190,19 +179,15 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
 // Hangi IDXGIOutput'un hangi fiziksel monitore denk geldigini bilmemiz lazim.
 // Eslestirme: DXGI_OUTPUT_DESC.Monitor == MonitorInfo.hMonitor
 //
-// COM Release Sirasi (KRITIK!):
-//   Bu fonksiyonda olusturulan COM objeleri (Factory, Adapter, Output):
-//   - ComPtr<T> kullanıyoruz → scope bitince otomatik Release
-//   - Manuel Release yapmaya GEREK YOK (Python GC gibi dusun)
-//   - Ama Output pointer'ini MonitorInfo'ya kaydediyoruz → 
-//     onun omru MonitorInfo'nun omru kadar uzar
+// Lifetime: the factory, adapters and outputs created here are held in ComPtr
+// and released when the scope ends. The exception is the output pointer stored
+// into MonitorInfo, whose lifetime then follows that MonitorInfo — which is
+// why a display change has to tear the whole chain down rather than patch it.
 // =============================================================================
 bool MonitorManager::MatchDXGIOutputs()
 {
-    LOG_INFO("DXGI output eslestirmesi basliyor...");
+    LOG_INFO("Matching DXGI outputs");
 
-    // DXGI Factory olustur — tum GPU adapter'larina erisim noktası
-    // Python analojisi: factory = DXGIFactory.create()
     ComPtr<IDXGIFactory1> factory;
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
     if (FAILED(hr))
@@ -213,8 +198,7 @@ bool MonitorManager::MatchDXGIOutputs()
 
     bool anyMatched = false;
 
-    // Her GPU adapter'ini iterate et
-    // Python analojisi: for i, adapter in enumerate(factory.get_adapters()):
+    // Walk every adapter; a machine can have more than one GPU.
     for (UINT adapterIdx = 0; ; adapterIdx++)
     {
         ComPtr<IDXGIAdapter1> adapter;
@@ -237,8 +221,7 @@ bool MonitorManager::MatchDXGIOutputs()
             ToUtf8(adapterDesc.Description),
             adapterDesc.DedicatedVideoMemory / (1024 * 1024));
 
-        // Her adapter'in output'larini iterate et
-        // Python analojisi: for j, output in enumerate(adapter.get_outputs()):
+        // Enumerate the outputs on this adapter.
         for (UINT outputIdx = 0; ; outputIdx++)
         {
             ComPtr<IDXGIOutput> output;
@@ -308,9 +291,7 @@ MonitorInfo* MonitorManager::FindByHandle(HMONITOR hMon)
     return nullptr;
 }
 
-// Bir noktanin hangi monitorde oldugunu bul
-// Python analojisi: 
-//   next((m for m in monitors if m.rect.contains(point)), None)
+// Which monitor contains a point.
 MonitorInfo* MonitorManager::FindByPoint(POINT pt)
 {
     for (auto& mon : m_monitors)
@@ -319,7 +300,7 @@ MonitorInfo* MonitorManager::FindByPoint(POINT pt)
             return &mon;
     }
 
-    // Hicbir monitorde degilse, Windows'un MonitorFromPoint'ini kullan
+    // Outside every monitor rect: let Windows pick the nearest.
     HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     return FindByHandle(hMon);
 }
@@ -331,7 +312,7 @@ MonitorInfo* MonitorManager::GetPrimaryMonitor()
         if (mon.isPrimary)
             return &mon;
     }
-    // Primary yoksa ilkini don
+    // No monitor flagged primary; the first will do.
     if (!m_monitors.empty())
         return &m_monitors[0];
     return nullptr;

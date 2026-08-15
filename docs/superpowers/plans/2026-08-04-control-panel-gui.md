@@ -1,5 +1,50 @@
 # BetterMagnifier Kontrol Paneli Implementation Plan
 
+> ## DURUM — 2026-08-05 (plan tamamlandı)
+>
+> | Task | Durum |
+> |---|---|
+> | 1 — XAML island spike | **BAŞARILI** → [`spike/xaml-island-thread/FINDINGS.md`](../../../spike/xaml-island-thread/FINDINGS.md) |
+> | 2 — AppMessages + StatusSnapshot | Tamam, doğrulandı |
+> | 3 — SettingsStore | Tamam, 11 assert geçti |
+> | 4 — InputThread | Tamam, thread ayrımı log'dan doğrulandı |
+> | 5 — ControlPanel iskeleti | Tamam, `Control panel opened` log'da |
+> | 6 — Durum sekmesi | Tamam, elle test bekliyor |
+> | 7 — Ayarlar sekmesi | Tamam, elle test bekliyor |
+> | 8 — Odak takibi | **Bu plan dışında yapıldı** — `FollowMode::MouseAndFocus` |
+> | 9 — `Win+Z` ele geçirme | **Kapsam değişti** — `hijackMagnifierKeys` (Win+artı/eksi, Ctrl+Alt+tekerlek, Win+orta tık) |
+>
+> **Task 5-7'de plandan bilinçli üç sapma var**, üçü de spike düzeltildikten
+> sonra öğrenildi ve gerekli:
+>
+> 1. `Application::Start` ÇAĞRILIYOR ve callback'i bir `Application` örneği
+>    oluşturuyor. Doğrudan `Application app{}` kurmak `RPC_E_WRONG_THREAD`
+>    veriyor. Bunun sonucu: mesaj loop'u Start'a ait, GUI thread'e iş
+>    `PostThreadMessage` ile değil `DispatcherQueue.TryEnqueue` ile geçiyor.
+> 2. `XamlControlsResources` ATANMIYOR — atamak tema sözlüğünü siliyor.
+> 3. `MddBootstrapInitialize` ÇAĞRILMIYOR — `WindowsPackageType=None`
+>    auto-initializer'ı hallediyor.
+>
+> Ayrıca planın Step 2'sindeki `ItemDefinitionGroup` + `%(Filename)` koşulu
+> MSBuild'de yasak (MSB4190); yerine `BeforeTargets="ClCompile"` bir target var.
+> `WasdkLibDir` de `Microsoft.Cpp.props`'tan SONRA tanımlanmak zorunda, yoksa
+> `NuGetPackageRoot` henüz boş.
+>
+> Güncel durum ve kalan işler: [`docs/STATUS.md`](../../STATUS.md).
+>
+> **Pinlenen sürüm: Windows App SDK `1.8.250916003`** (2.3.1 değil).
+>
+> ### Ortam notu — toolset
+>
+> Bu makinede VS2022 yok, **VS 18.8 Community** var ve kurulu tek toolset `v145`.
+> Projeler artık `v143` pinlemiyor, `$(DefaultPlatformToolset)` kullanıyor —
+> her iki VS'te de derleniyor. Plandaki MSBuild yolları VS2022'yi gösteriyor;
+> bu makinede karşılığı:
+>
+> ```bash
+> "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" BetterMagnifier.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal /nologo
+> ```
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** BetterMagnifier'a per-monitor zoom durumunu canlı gösteren ve tüm ayarları yönetebilen küçük bir WinUI 3 kontrol paneli eklemek.
