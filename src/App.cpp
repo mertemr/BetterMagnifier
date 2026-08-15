@@ -33,18 +33,21 @@ App* App::s_instance = nullptr;
 
 namespace {
 
-// The control panel is OFF unless BM_PANEL=1.
+// Should the panel be opened at STARTUP?
 //
-// It is not finished: a XAML TextBox in the island takes the whole process down
-// with a stowed exception, and the tree is only partly verified without one.
-// The magnifier itself does not need it, so it stays behind a switch instead of
-// shipping a window that can kill the app. Details: docs/PANEL-BLANK.md.
+// The panel itself is always available now — the tray's Settings entry is
+// unconditional. What stayed behind BM_PANEL=1 is opening it automatically,
+// and that is a test affordance rather than a feature: the application requires
+// administrator rights, so a script in an ordinary shell cannot click the tray
+// or post the window a message (UIPI drops both), and asking the app to open
+// its own panel is the only way to reach it from outside.
 //
-// With the switch on, the panel also opens at startup. The app requires
-// administrator rights, so a script in a normal shell cannot click the tray or
-// post it a message - UIPI drops both - and this is the only way to reach it
-// from a test.
-bool PanelEnabled()
+// The two crashes that kept the whole panel switched off are fixed: the blank
+// island needed WindowsXamlManager::InitializeForCurrentThread, and any control
+// embedding a TextBox takes the process down with a stowed exception, so there
+// are none. Hotkeys are captured through the keyboard hook instead of typed.
+// Details in docs/PANEL-BLANK.md.
+bool OpenPanelAtStartup()
 {
     static const bool enabled = []() {
         wchar_t buf[8]{};
@@ -359,7 +362,7 @@ bool App::InitializeComponents()
     // and edge-push settings sat unread until the user changed one.
     ApplyPointerSettings();
 
-    if (PanelEnabled())
+    if (OpenPanelAtStartup())
         OnShowPanel();
 
     return true;
@@ -380,10 +383,7 @@ void App::SetupCallbacks()
     m_trayIcon.SetToggleCallback([this] { OnToggleZoom(); });
     m_trayIcon.SetExitCallback([] { PostQuitMessage(0); });
 
-    // No callback, no menu entry: a Settings item that cannot open anything is
-    // worse than no item.
-    if (PanelEnabled())
-        m_trayIcon.SetSettingsCallback([this] { OnShowPanel(); });
+    m_trayIcon.SetSettingsCallback([this] { OnShowPanel(); });
 }
 
 // =============================================================================

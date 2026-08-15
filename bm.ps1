@@ -5,16 +5,21 @@
 #   .\bm.ps1              # Debug derle
 #   .\bm.ps1 run          # Debug derle + calistir
 #   .\bm.ps1 release      # Release derle
+#   .\bm.ps1 check        # Debug derle + tanilama modlarini calistir
 #   .\bm.ps1 log          # en son log dosyasini goster
 #   .\bm.ps1 errors       # en son log'daki WARN/ERROR satirlari
 #   .\bm.ps1 kill         # calisan ornekleri kapat
 #   .\bm.ps1 clean        # bin + obj sil
 #
 # Neden script: msbuild yolu uzun ve Developer PowerShell acmak gerekmiyor.
+#
+# 'check' neden ayri: manifest RequireAdministrator istedigi icin exe'yi normal
+# bir kabuktan calistirmak mumkun degil ("requires elevation"). Bu komut
+# -Verb RunAs ile bir kez UAC sorar, sonucu log'dan okur.
 # =============================================================================
 
 param(
-    [ValidateSet('build', 'run', 'release', 'log', 'errors', 'kill', 'clean')]
+    [ValidateSet('build', 'run', 'release', 'check', 'log', 'errors', 'kill', 'clean')]
     [string]$Action = 'build'
 )
 
@@ -62,6 +67,34 @@ switch ($Action) {
         Write-Host "==> Calistiriliyor. Kapatmak icin: tepsi ikonu > Exit" -ForegroundColor Cyan
         Write-Host "    Ctrl+Alt+Z = zoom ac/kapa   Ctrl+Alt+X = freeze   tekerlek = zoom" -ForegroundColor DarkGray
         Start-Process ".\bin\Debug-x64\BetterMagnifier.exe"
+    }
+
+    'check' {
+        Invoke-Build 'Debug'
+
+        $exe = ".\bin\Debug-x64\BetterMagnifier.exe"
+        $ok  = $true
+
+        # --self-check and --dump-osd are both exempt from the single-instance
+        # mutex, so this works while the app is running. They are NOT exempt
+        # from elevation: that is a property of the manifest, not the mode.
+        foreach ($mode in '--self-check', '--dump-osd', '--dump-cursors') {
+            Write-Host "==> $mode" -ForegroundColor Cyan
+            $p = Start-Process $exe -ArgumentList $mode -Verb RunAs -Wait -PassThru
+            if ($p.ExitCode -ne 0) {
+                Write-Host "    FAILED (exit $($p.ExitCode))" -ForegroundColor Red
+                $ok = $false
+            }
+        }
+
+        $log = Get-LatestLog
+        if ($log) {
+            Select-String -Path $log.FullName -Pattern 'passed|failure\(s\)|FAILED|\[ERROR' |
+                ForEach-Object { "    " + $_.Line.Trim() }
+        }
+
+        if ($ok) { Write-Host "==> Tanilama temiz" -ForegroundColor Green }
+        else     { Write-Host "==> Tanilamada hata var" -ForegroundColor Red; exit 1 }
     }
 
     'log' {
