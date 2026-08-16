@@ -60,28 +60,42 @@ jobs:
       - name: Self-check
         if: matrix.configuration == 'Debug'
         shell: pwsh
+        timeout-minutes: 5
         run: |
-          # Start-Process -Wait, not a bare call. This is a /SUBSYSTEM:WINDOWS
-          # binary, so PowerShell does not wait for it and never sets
-          # $LASTEXITCODE - which is null, compares unequal to 0, and fails the
-          # step while the self-check itself was fine.
-          #
-          # No -Verb RunAs: the runner is already elevated, so the manifest's
-          # RequireAdministrator is satisfied without a prompt there is nobody
-          # to answer. Locally use .\bm.ps1 check, which does elevate.
-          $p = Start-Process ".\bin\Debug-x64\BetterMagnifier.exe" `
-                   -ArgumentList '--self-check' -Wait -PassThru
+          # Bounded wait, and the log either way. A /SUBSYSTEM:WINDOWS binary
+          # that stops on something the runner cannot answer - a message box
+          # with nobody to click it, say - would otherwise sit here until the
+          # job's own timeout. The logger flushes every line, so the tail of
+          # the log says how far it actually got.
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName        = (Resolve-Path ".\bin\Debug-x64\BetterMagnifier.exe").Path
+          $psi.Arguments       = '--self-check'
+          $psi.UseShellExecute = $false
 
-          if ($null -eq $p) {
-              Write-Host "::error::the self-check process did not start"
+          $proc   = [System.Diagnostics.Process]::Start($psi)
+          $exited = $proc.WaitForExit(120000)
+
+          function Show-Log {
+              $log = Get-ChildItem .\bin\Debug-x64\logs\*.log -ErrorAction SilentlyContinue |
+                     Sort-Object LastWriteTime | Select-Object -Last 1
+              if ($log) {
+                  Write-Host "---- $($log.Name) (last 40 lines) ----"
+                  Get-Content $log.FullName -Tail 40
+              } else {
+                  Write-Host "no log was written at all"
+              }
+          }
+
+          if (-not $exited) {
+              Write-Host "::error::self-check did not exit within 120s"
+              Show-Log
+              try { $proc.Kill() } catch { }
               exit 1
           }
 
-          if ($p.ExitCode -ne 0) {
-              Write-Host "::error::self-check failed with exit $($p.ExitCode)"
-              Get-ChildItem .\bin\Debug-x64\logs\*.log -ErrorAction SilentlyContinue |
-                  Sort-Object LastWriteTime | Select-Object -Last 1 |
-                  Get-Content | Select-String 'SELF-CHECK FAILED|FATAL'
+          if ($proc.ExitCode -ne 0) {
+              Write-Host "::error::self-check failed with exit $($proc.ExitCode)"
+              Show-Log
               exit 1
           }
 
