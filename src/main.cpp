@@ -14,9 +14,38 @@
 #include "Logger.h"
 
 #include <cwchar>
+#include <winver.h>
+#pragma comment(lib, "version.lib")
 
 static void SetupDpiAwareness();
 static void AttachDebugConsole();
+
+// Reads the version out of the exe's own VERSIONINFO resource (see
+// BetterMagnifier.rc) instead of a string literal here, so the two can't
+// drift apart the way FILEVERSION and the FileVersion string already have.
+static std::wstring GetAppVersionString()
+{
+    wchar_t exePath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+
+    DWORD handle = 0;
+    const DWORD size = GetFileVersionInfoSizeW(exePath, &handle);
+    if (size == 0)
+        return L"0.0.0.0";
+
+    std::vector<BYTE> buffer(size);
+    if (!GetFileVersionInfoW(exePath, handle, size, buffer.data()))
+        return L"0.0.0.0";
+
+    VS_FIXEDFILEINFO* info = nullptr;
+    UINT infoLen = 0;
+    if (!VerQueryValueW(buffer.data(), L"\\", reinterpret_cast<void**>(&info), &infoLen) || !info)
+        return L"0.0.0.0";
+
+    return std::format(L"{}.{}.{}.{}",
+        HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS),
+        HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS));
+}
 
 int WINAPI wWinMain(
     _In_ HINSTANCE hInstance,
@@ -102,7 +131,7 @@ int WINAPI wWinMain(
     }
 
     LOG_INFO("═══════════════════════════════════════════════════");
-    LOG_INFO("  BetterMagnifier v0.1.0 starting");
+    LOG_INFO("  BetterMagnifier v{} starting", ToUtf8(GetAppVersionString()));
     LOG_INFO("═══════════════════════════════════════════════════");
     LOG_INFO("HINSTANCE: 0x{:X}", reinterpret_cast<uintptr_t>(hInstance));
 

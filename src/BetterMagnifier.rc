@@ -22,8 +22,8 @@ IDI_TRAY_OFF   ICON   "..\\res\\tray-off.ico"
 // wrong first impression.
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION      0,1,0,0
- PRODUCTVERSION   0,1,0,0
+ FILEVERSION      0,1,1,0
+ PRODUCTVERSION   0,1,1,0
  FILEFLAGSMASK    VS_FFI_FILEFLAGSMASK
 #ifdef _DEBUG
  FILEFLAGS        VS_FF_DEBUG
@@ -39,12 +39,12 @@ BEGIN
         BLOCK "040904b0"   // US English, Unicode
         BEGIN
             VALUE "FileDescription", "BetterMagnifier"
-            VALUE "FileVersion",     "0.1.0.0"
+            VALUE "FileVersion",     "0.1.1.0"
             VALUE "InternalName",    "BetterMagnifier"
-            VALUE "LegalCopyright",  "MIT licensed"
+            VALUE "LegalCopyright",  "Apache License 2.0"
             VALUE "OriginalFilename","BetterMagnifier.exe"
             VALUE "ProductName",     "BetterMagnifier"
-            VALUE "ProductVersion",  "0.1.0.0"
+            VALUE "ProductVersion",  "0.1.1.0"
             VALUE "Comments",        "Screen magnifier with independent zoom per monitor"
         END
     END
