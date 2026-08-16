@@ -2,6 +2,7 @@
 // tools\make-icons.ps1 for the glyph and the palette.
 
 #include "resource.h"
+#include "Version.h"
 #include <winver.h>
 
 /////////////////////////////////////////////////////////////////////////////
@@ -39,12 +40,12 @@ BEGIN
         BLOCK "040904b0"   // US English, Unicode
         BEGIN
             VALUE "FileDescription", "BetterMagnifier"
-            VALUE "FileVersion",     "0.1.1.0"
+            VALUE "FileVersion",     BM_VERSION_STRING_FULL
             VALUE "InternalName",    "BetterMagnifier"
             VALUE "LegalCopyright",  "Apache License 2.0"
             VALUE "OriginalFilename","BetterMagnifier.exe"
             VALUE "ProductName",     "BetterMagnifier"
-            VALUE "ProductVersion",  "0.1.1.0"
+            VALUE "ProductVersion",  BM_VERSION_STRING_FULL
             VALUE "Comments",        "Screen magnifier with independent zoom per monitor"
         END
     END
