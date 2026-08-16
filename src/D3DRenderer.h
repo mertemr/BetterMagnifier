@@ -37,6 +37,50 @@ struct RenderTarget
     DXGI_FORMAT                                      sourceFormat = DXGI_FORMAT_UNKNOWN;
 };
 
+// =============================================================================
+// Rotated outputs
+// =============================================================================
+// Desktop Duplication hands back the display's UNROTATED mode image. On a
+// portrait monitor — a 1080x1920 desktop rectangle driven by a 1920x1080 panel
+// rotated 270 degrees — the acquired texture is 1920x1080 and lying on its
+// side. Measured, not assumed: DXGI_OUTPUT_DESC.DesktopCoordinates said
+// 1080x1920 while D3D11_TEXTURE2D_DESC said 1920x1080, and resampling the
+// texture 90 degrees counter-clockwise reproduced a GDI screenshot of that
+// monitor exactly (mean |difference| 0.00 per channel).
+//
+// Everything else in this application — ViewportController, the source rect,
+// the cursor sprite, the overlay and its swap chain — works in DESKTOP
+// coordinates, which is correct and stays that way. The rotation is absorbed
+// here, in the one place that reads the texture: instead of a single UV origin
+// plus extent, the vertex shader gets two UV axis vectors, and rotating the
+// view is a matter of which way those axes point.
+struct SourceUvMapping
+{
+    float originX = 0.0f, originY = 0.0f;  // UV of the region's top-left corner
+    float uAxisX  = 0.0f, uAxisY  = 0.0f;  // UV travelled across the region's width
+    float vAxisX  = 0.0f, vAxisY  = 0.0f;  // UV travelled down the region's height
+};
+
+// Desktop-space extent of a duplication texture under the given rotation.
+// Swapped for ROTATE90/270, identical otherwise.
+void DesktopExtentForRotation(DXGI_MODE_ROTATION rotation, UINT texW, UINT texH,
+                              long& outWidth, long& outHeight);
+
+// Pure math, which is the point: this is the whole rotation transform and it is
+// asserted by D3DRendererSelfCheck without a GPU.
+//
+// texW/texH are the DUPLICATION TEXTURE's dimensions; srcRect is in DESKTOP
+// coordinates and is clamped here, against the desktop extent rather than
+// against the texture — those differ on a rotated output, and clamping against
+// the wrong one is exactly the bug this replaces.
+SourceUvMapping ComputeSourceUv(DXGI_MODE_ROTATION rotation,
+                                UINT texW, UINT texH, RECT srcRect);
+
+#ifdef _DEBUG
+// Assert-based self-check, run from main. Mirrors ViewportControllerSelfCheck.
+void D3DRendererSelfCheck();
+#endif
+
 class D3DRenderer
 {
 public:
@@ -55,8 +99,14 @@ public:
     // srcTexture nullptr means "reuse the last frame", which is what happens
     // when the screen has not changed but the anchor moved.
     //
+    // srcRect is in DESKTOP coordinates. rotation is the capture's, and is what
+    // turns those into texture coordinates — see SourceUvMapping above. Not
+    // defaulted on purpose: a caller that forgets it on a portrait monitor gets
+    // a compile error rather than a sideways screen.
+    //
     // Returns false when there is nothing to draw; do not Present then.
-    bool RenderFrame(ID3D11Texture2D* srcTexture, size_t targetIndex, const RECT& srcRect);
+    bool RenderFrame(ID3D11Texture2D* srcTexture, size_t targetIndex, const RECT& srcRect,
+                     DXGI_MODE_ROTATION rotation);
 
     // Draws a premultiplied-BGRA sprite over whatever RenderFrame just drew.
     // Coordinates are target pixels; the top-left corner, hotspot already

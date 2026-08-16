@@ -43,6 +43,13 @@ the Windows App SDK through `PackageReference`.
   in the system behind our frame — and exceeding `LowLevelHooksTimeout` (300 ms)
   makes Windows uninstall the hook without telling us. Hook callbacks may only
   `PostMessage` and return.
+- **The captured texture is not in desktop orientation.** Desktop Duplication
+  returns the display's *unrotated* mode image, so a 1080x1920 portrait monitor
+  arrives as a 1920x1080 texture on its side. Everything outside `RenderFrame`
+  works in desktop coordinates and must keep doing so; the rotation is absorbed
+  by `ComputeSourceUv` alone. `DXGI_OUTDUPL_DESC.ModeDesc` is no help here — it
+  reports the rotated size while the texture has the unrotated one, so trust
+  `D3D11_TEXTURE2D_DESC`.
 - **No shared mutable state on the hot path.** Render/input/GUI threads communicate
   by `PostMessage` (`WM_APP_*`) and lock-free atomic writes to `StatusSnapshot`.
   Adding a lock to the render path is a correctness regression, not an optimisation.
@@ -69,6 +76,11 @@ the Windows App SDK through `PackageReference`.
   separate asset — the script derives it.
 
 ## Verifying without hands
+
+Four assertion suites run on every debug start and under `--self-check`:
+`SettingsStore`, `ViewportController`, `PointerInput` and `D3DRenderer`. The
+last one covers the rotated-output transform, which is pure math precisely so
+that it can be asserted without a GPU or a portrait monitor to hand.
 
 Three diagnostic modes cover everything checkable without looking at a screen —
 `--self-check` (pure-logic assertions), `--dump-cursors` and `--dump-osd` (both

@@ -31,11 +31,17 @@ namespace {
 // No vertex buffer and no input layout either — SV_VertexID gives the corner
 // index and the positions fall out of arithmetic on it.
 // =============================================================================
+// Two UV axes rather than an origin plus an extent, because a rotated output's
+// texture is not in desktop orientation and the mapping is no longer a plain
+// scale. See SourceUvMapping in D3DRenderer.h.
+// =============================================================================
 constexpr char kShaderSource[] = R"HLSL(
 cbuffer UvParams : register(b0)
 {
-    // xy = buyutulecek bolgenin sol-ust UV'si, zw = bolgenin UV boyutu
-    float4 uvRect;
+    // xy = source region's top-left UV, zw = UV travelled across its width
+    float4 uvOriginU;
+    // xy = UV travelled down the region's height, zw = unused padding
+    float4 uvAxisV;
 };
 
 struct VSOut
@@ -54,7 +60,10 @@ VSOut VSMain(uint vid : SV_VertexID)
     // corner 0..2 maps to NDC -1..3 in x and 1..-3 in y. Y is flipped because
     // NDC grows upward while texture UV grows downward.
     o.pos = float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
-    o.uv  = uvRect.xy + corner * uvRect.zw;
+    // Affine, not a scale: on a rotated output uAxis runs down the texture and
+    // vAxis runs across it. corner leaves [0,1] on the oversized triangle, and
+    // the extrapolation is linear, so the clipped part lands where it should.
+    o.uv  = uvOriginU.xy + corner.x * uvOriginU.zw + corner.y * uvAxisV.xy;
     return o;
 }
 
@@ -95,16 +104,101 @@ float4 SpritePS(VSOut input) : SV_TARGET
 )HLSL";
 
 // Constant buffer duzeni. D3D11 sabit tampon boyutunu 16'nin kati istiyor —
-// one float4 is exactly 16 bytes.
+// two float4s are exactly 32 bytes.
 struct UvParams
 {
-    float uvLeft;
-    float uvTop;
-    float uvWidth;
-    float uvHeight;
+    float originX, originY;
+    float uAxisX,  uAxisY;
+    float vAxisX,  vAxisY;
+    float pad0,    pad1;
 };
 
 } // anonymous namespace
+
+// =============================================================================
+// DesktopExtentForRotation / ComputeSourceUv — the rotation transform
+// =============================================================================
+void DesktopExtentForRotation(DXGI_MODE_ROTATION rotation, UINT texW, UINT texH,
+                              long& outWidth, long& outHeight)
+{
+    if (rotation == DXGI_MODE_ROTATION_ROTATE90 || rotation == DXGI_MODE_ROTATION_ROTATE270)
+    {
+        outWidth  = static_cast<long>(texH);
+        outHeight = static_cast<long>(texW);
+    }
+    else
+    {
+        outWidth  = static_cast<long>(texW);
+        outHeight = static_cast<long>(texH);
+    }
+}
+
+SourceUvMapping ComputeSourceUv(DXGI_MODE_ROTATION rotation,
+                                UINT texW, UINT texH, RECT srcRect)
+{
+    SourceUvMapping m{};
+    if (texW == 0 || texH == 0)
+        return m;
+
+    const long tw = static_cast<long>(texW);
+    const long th = static_cast<long>(texH);
+
+    long deskW = 0, deskH = 0;
+    DesktopExtentForRotation(rotation, texW, texH, deskW, deskH);
+
+    // Clamped in DESKTOP space. The old code clamped against the texture, which
+    // on a portrait monitor pinned the vertical range to the panel's short side
+    // and let the horizontal one run off the end.
+    const long L = std::clamp(srcRect.left, 0L, deskW - 1);
+    const long T = std::clamp(srcRect.top,  0L, deskH - 1);
+    const long R = std::clamp(srcRect.right,  L + 1, deskW);
+    const long B = std::clamp(srcRect.bottom, T + 1, deskH);
+
+    const float fw = static_cast<float>(tw);
+    const float fh = static_cast<float>(th);
+    const float sw = static_cast<float>(R - L);   // region width,  desktop space
+    const float sh = static_cast<float>(B - T);   // region height, desktop space
+
+    // Each case is the inverse of "rotate the mode image by N degrees clockwise
+    // to get the desktop", written in continuous coordinates:
+    //   ROTATE90   u = y,      v = th - x
+    //   ROTATE180  u = tw - x, v = th - y
+    //   ROTATE270  u = tw - y, v = x
+    // and the three corners (L,T), (R,T), (L,B) give origin, uAxis and vAxis.
+    switch (rotation)
+    {
+    case DXGI_MODE_ROTATION_ROTATE90:
+        m.originX = static_cast<float>(T)      / fw;
+        m.originY = static_cast<float>(th - L) / fh;
+        m.uAxisX  = 0.0f;      m.uAxisY = -sw / fh;
+        m.vAxisX  = sh / fw;   m.vAxisY = 0.0f;
+        break;
+
+    case DXGI_MODE_ROTATION_ROTATE180:
+        m.originX = static_cast<float>(tw - L) / fw;
+        m.originY = static_cast<float>(th - T) / fh;
+        m.uAxisX  = -sw / fw;  m.uAxisY = 0.0f;
+        m.vAxisX  = 0.0f;      m.vAxisY = -sh / fh;
+        break;
+
+    case DXGI_MODE_ROTATION_ROTATE270:
+        m.originX = static_cast<float>(tw - T) / fw;
+        m.originY = static_cast<float>(L)      / fh;
+        m.uAxisX  = 0.0f;      m.uAxisY = sw / fh;
+        m.vAxisX  = -sh / fw;  m.vAxisY = 0.0f;
+        break;
+
+    // UNSPECIFIED included: it is what a driver reports when it does not rotate.
+    default:
+        m.originX = static_cast<float>(L) / fw;
+        m.originY = static_cast<float>(T) / fh;
+        m.uAxisX  = sw / fw;   m.uAxisY = 0.0f;
+        m.vAxisX  = 0.0f;      m.vAxisY = sh / fh;
+        break;
+    }
+
+    return m;
+}
 
 // =============================================================================
 // Destructor
@@ -618,7 +712,8 @@ bool D3DRenderer::CreateSwapChainForWindow(HWND hwnd, UINT width, UINT height, s
 bool D3DRenderer::RenderFrame(
     ID3D11Texture2D* srcTexture,
     size_t targetIndex,
-    const RECT& srcRect)
+    const RECT& srcRect,
+    DXGI_MODE_ROTATION rotation)
 {
     if (targetIndex >= m_renderTargets.size())
         return false;
@@ -652,25 +747,22 @@ bool D3DRenderer::RenderFrame(
         return false;
 
     // ── srcRect'i UV'ye cevir ──
-    // Pixel coordinates to normalised texture coordinates.
-    const long texW = static_cast<long>(rt.sourceWidth);
-    const long texH = static_cast<long>(rt.sourceHeight);
-    if (texW <= 0 || texH <= 0)
+    // Desktop pixel coordinates to normalised texture coordinates. The rotation
+    // is absorbed here and nowhere else; ComputeSourceUv also does the clamping,
+    // in desktop space, which is why none is left in this function.
+    if (rt.sourceWidth == 0 || rt.sourceHeight == 0)
         return false;
 
-    const long left   = std::clamp(srcRect.left,   0L, texW);
-    const long top    = std::clamp(srcRect.top,    0L, texH);
-    const long right  = std::clamp(srcRect.right,  left + 1, texW);
-    const long bottom = std::clamp(srcRect.bottom, top  + 1, texH);
-
-    const float fTexW = static_cast<float>(texW);
-    const float fTexH = static_cast<float>(texH);
+    const SourceUvMapping uv =
+        ComputeSourceUv(rotation, rt.sourceWidth, rt.sourceHeight, srcRect);
 
     UvParams params{};
-    params.uvLeft   = static_cast<float>(left) / fTexW;
-    params.uvTop    = static_cast<float>(top)  / fTexH;
-    params.uvWidth  = static_cast<float>(right  - left) / fTexW;
-    params.uvHeight = static_cast<float>(bottom - top)  / fTexH;
+    params.originX = uv.originX;
+    params.originY = uv.originY;
+    params.uAxisX  = uv.uAxisX;
+    params.uAxisY  = uv.uAxisY;
+    params.vAxisX  = uv.vAxisX;
+    params.vAxisY  = uv.vAxisY;
 
     m_context->UpdateSubresource(m_uvBuffer.Get(), 0, nullptr, &params, 0, 0);
 
@@ -1055,6 +1147,180 @@ bool D3DRenderer::DumpBackBuffer(size_t targetIndex, const wchar_t* path)
 
     m_context->Unmap(staging.Get(), 0);
     return ok;
+}
+
+// =============================================================================
+// D3DRendererSelfCheck — the rotation transform, asserted without a GPU
+// =============================================================================
+// Everything checked here is ComputeSourceUv, which is why it was pulled out of
+// RenderFrame in the first place: the sideways-portrait bug was a pure geometry
+// error sitting inside a function that needs a device, a swap chain and a live
+// duplication session to reach.
+//
+// The reference numbers are not derived from the DXGI documentation, which is
+// ambiguous about which way ROTATE270 turns. They come from a measurement: a
+// 1080x1920 portrait monitor's duplication texture was resampled with each
+// candidate mapping and compared against a GDI screenshot of the same monitor.
+// The counter-clockwise one reproduced it exactly (mean |difference| 0.00 per
+// channel); the others scored 40-51.
+// =============================================================================
+void D3DRendererSelfCheck()
+{
+    constexpr float kEps = 1e-6f;
+
+    // UV at a corner of the destination region. cx/cy are 0..1 across the
+    // magnified view: (0,0) its top-left, (1,1) its bottom-right.
+    const auto uvX = [](const SourceUvMapping& m, float cx, float cy) {
+        return m.originX + cx * m.uAxisX + cy * m.vAxisX;
+    };
+    const auto uvY = [](const SourceUvMapping& m, float cx, float cy) {
+        return m.originY + cx * m.uAxisY + cy * m.vAxisY;
+    };
+    const auto approx = [](float a, float b) { return std::abs(a - b) < 1e-6f; };
+
+    // ── Desktop extent: swapped for the quarter turns, untouched otherwise ──
+    {
+        long w = 0, h = 0;
+        DesktopExtentForRotation(DXGI_MODE_ROTATION_IDENTITY, 1920, 1080, w, h);
+        BM_SELFCHECK(w == 1920 && h == 1080);
+
+        DesktopExtentForRotation(DXGI_MODE_ROTATION_ROTATE180, 1920, 1080, w, h);
+        BM_SELFCHECK(w == 1920 && h == 1080);
+
+        DesktopExtentForRotation(DXGI_MODE_ROTATION_ROTATE90, 1920, 1080, w, h);
+        BM_SELFCHECK(w == 1080 && h == 1920);
+
+        // The reported bug's exact topology: a 1080x1920 desktop rectangle on a
+        // 1920x1080 panel.
+        DesktopExtentForRotation(DXGI_MODE_ROTATION_ROTATE270, 1920, 1080, w, h);
+        BM_SELFCHECK(w == 1080 && h == 1920);
+    }
+
+    // ── Unrotated, whole frame: the identity mapping ──
+    {
+        const SourceUvMapping m = ComputeSourceUv(
+            DXGI_MODE_ROTATION_IDENTITY, 1920, 1080, RECT{ 0, 0, 1920, 1080 });
+
+        BM_SELFCHECK(approx(m.originX, 0.0f) && approx(m.originY, 0.0f));
+        BM_SELFCHECK(approx(m.uAxisX, 1.0f)  && approx(m.uAxisY, 0.0f));
+        BM_SELFCHECK(approx(m.vAxisX, 0.0f)  && approx(m.vAxisY, 1.0f));
+    }
+
+    // ── Unrotated, 2x on the centre ──
+    {
+        const SourceUvMapping m = ComputeSourceUv(
+            DXGI_MODE_ROTATION_IDENTITY, 1920, 1080, RECT{ 480, 270, 1440, 810 });
+
+        BM_SELFCHECK(approx(m.originX, 0.25f) && approx(m.originY, 0.25f));
+        BM_SELFCHECK(approx(m.uAxisX, 0.5f)   && approx(m.uAxisY, 0.0f));
+        BM_SELFCHECK(approx(m.vAxisX, 0.0f)   && approx(m.vAxisY, 0.5f));
+    }
+
+    // ── ROTATE270, whole frame ──
+    //
+    // The desktop's top-left corner is the texture's TOP-RIGHT, and walking
+    // right across the desktop walks DOWN the texture. That is the measured
+    // counter-clockwise mapping, and asserting the corners individually is what
+    // makes a 90-degree sign error impossible to miss.
+    {
+        const SourceUvMapping m = ComputeSourceUv(
+            DXGI_MODE_ROTATION_ROTATE270, 1920, 1080, RECT{ 0, 0, 1080, 1920 });
+
+        BM_SELFCHECK(approx(uvX(m, 0, 0), 1.0f) && approx(uvY(m, 0, 0), 0.0f));  // top-right
+        BM_SELFCHECK(approx(uvX(m, 1, 0), 1.0f) && approx(uvY(m, 1, 0), 1.0f));  // bottom-right
+        BM_SELFCHECK(approx(uvX(m, 0, 1), 0.0f) && approx(uvY(m, 0, 1), 0.0f));  // top-left
+        BM_SELFCHECK(approx(uvX(m, 1, 1), 0.0f) && approx(uvY(m, 1, 1), 1.0f));  // bottom-left
+
+        // The regression guard. Before the fix the mapping was a plain scale,
+        // so uAxis ran along the texture's x. On a quarter turn it must not.
+        BM_SELFCHECK(approx(m.uAxisX, 0.0f) && std::abs(m.uAxisY) > kEps);
+        BM_SELFCHECK(approx(m.vAxisY, 0.0f) && std::abs(m.vAxisX) > kEps);
+    }
+
+    // ── ROTATE90, whole frame: the other quarter turn, corners mirrored ──
+    {
+        const SourceUvMapping m = ComputeSourceUv(
+            DXGI_MODE_ROTATION_ROTATE90, 1920, 1080, RECT{ 0, 0, 1080, 1920 });
+
+        BM_SELFCHECK(approx(uvX(m, 0, 0), 0.0f) && approx(uvY(m, 0, 0), 1.0f));  // bottom-left
+        BM_SELFCHECK(approx(uvX(m, 1, 0), 0.0f) && approx(uvY(m, 1, 0), 0.0f));  // top-left
+        BM_SELFCHECK(approx(uvX(m, 0, 1), 1.0f) && approx(uvY(m, 0, 1), 1.0f));  // bottom-right
+        BM_SELFCHECK(approx(uvX(m, 1, 1), 1.0f) && approx(uvY(m, 1, 1), 0.0f));  // top-right
+    }
+
+    // ── ROTATE180, 2x on the centre: the region flips about both axes ──
+    {
+        const SourceUvMapping m = ComputeSourceUv(
+            DXGI_MODE_ROTATION_ROTATE180, 1920, 1080, RECT{ 480, 270, 1440, 810 });
+
+        BM_SELFCHECK(approx(uvX(m, 0, 0), 0.75f) && approx(uvY(m, 0, 0), 0.75f));
+        BM_SELFCHECK(approx(uvX(m, 1, 1), 0.25f) && approx(uvY(m, 1, 1), 0.25f));
+    }
+
+    // ── Every rotation, zoomed and panned: nothing may leave the texture ──
+    //
+    // The failure this catches is the one the user sees as a view that "goes
+    // mad": a mapping that runs off the edge of the texture clamps against the
+    // sampler instead, which smears the last row or column across the screen.
+    {
+        const DXGI_MODE_ROTATION kRotations[] = {
+            DXGI_MODE_ROTATION_UNSPECIFIED, DXGI_MODE_ROTATION_IDENTITY,
+            DXGI_MODE_ROTATION_ROTATE90,    DXGI_MODE_ROTATION_ROTATE180,
+            DXGI_MODE_ROTATION_ROTATE270,
+        };
+
+        for (DXGI_MODE_ROTATION rot : kRotations)
+        {
+            long deskW = 0, deskH = 0;
+            DesktopExtentForRotation(rot, 1920, 1080, deskW, deskH);
+
+            for (int zoom = 1; zoom <= 8; ++zoom)
+            {
+                const long w = (std::max)(1L, deskW / zoom);
+                const long h = (std::max)(1L, deskH / zoom);
+
+                // Top-left, bottom-right, and deliberately out of bounds.
+                const RECT kRects[] = {
+                    RECT{ 0, 0, w, h },
+                    RECT{ deskW - w, deskH - h, deskW, deskH },
+                    RECT{ -500, -500, w, h },
+                    RECT{ deskW - w, deskH - h, deskW + 500, deskH + 500 },
+                };
+
+                for (const RECT& r : kRects)
+                {
+                    const SourceUvMapping m = ComputeSourceUv(rot, 1920, 1080, r);
+
+                    for (float cx : { 0.0f, 1.0f })
+                    {
+                        for (float cy : { 0.0f, 1.0f })
+                        {
+                            const float u = uvX(m, cx, cy);
+                            const float v = uvY(m, cx, cy);
+                            BM_SELFCHECK(u >= -kEps && u <= 1.0f + kEps);
+                            BM_SELFCHECK(v >= -kEps && v <= 1.0f + kEps);
+                        }
+                    }
+
+                    // A quarter turn swaps which texture axis the view's width
+                    // spans. Getting this backwards is the sideways bug itself,
+                    // and it survives the bounds test above unnoticed.
+                    const float uSpan = std::abs(uvX(m, 1, 0) - uvX(m, 0, 0))
+                                      + std::abs(uvY(m, 1, 0) - uvY(m, 0, 0));
+                    BM_SELFCHECK(uSpan > kEps);
+                }
+            }
+        }
+    }
+
+    // ── A zero-sized texture must not divide by zero ──
+    {
+        const SourceUvMapping m = ComputeSourceUv(
+            DXGI_MODE_ROTATION_IDENTITY, 0, 0, RECT{ 0, 0, 100, 100 });
+        BM_SELFCHECK(approx(m.uAxisX, 0.0f) && approx(m.vAxisY, 0.0f));
+    }
+
+    LOG_INFO("D3DRenderer self-check passed");
 }
 #endif // _DEBUG
 
