@@ -9,6 +9,7 @@
 #include "resource.h"
 #include "SettingsStore.h"
 #include "StatusSnapshot.h"
+#include "Version.h"
 #include "Logger.h"
 
 // windows.h defines GetCurrentTime as a macro and
@@ -197,6 +198,24 @@ struct ControlPanel::Impl
     WUXC::TextBlock   zoomStepLabel{ nullptr };
     WUXC::CheckBox    startWithWindowsBox{ nullptr };
     WUXC::CheckBox    rememberZoomBox{ nullptr };
+
+    // ── Updates ──
+    // Each of these already appears elsewhere in this tree, which is the only
+    // reason any of them is here.
+    //
+    // NO ProgressBar: it kills the process on first layout the way TextBox
+    // does, with the log ending at "Control panel opened" and no error. The
+    // proven-safe list in CLAUDE.md is empirical — extend it by measurement.
+    // Download progress goes in the status text instead.
+    WUXC::TextBlock   updateStatusText{ nullptr };
+    WUXC::Button      updateButton{ nullptr };
+    WUXC::CheckBox    checkForUpdatesBox{ nullptr };
+
+    // Last state pushed, so the 10 Hz tick can skip the work when nothing
+    // moved: otherwise every tick is a layout pass for a card that changes a
+    // handful of times per session.
+    int  lastUpdateState = -1;
+    int  lastUpdatePct   = -1;
 
     bool suppressSettingsEvents = false;
 };
@@ -662,6 +681,75 @@ void ControlPanel::UpdateLiveValues()
     if (m_impl->host && !IsWindowVisible(m_impl->host))
         return;
 
+    // ── Updates ──
+    //
+    // Guarded on the controls existing: the Settings section is built after the
+    // monitor cards and this timer can tick in between.
+    if (m_impl->updateStatusText && m_impl->updateButton)
+    {
+        const int stateInt = m_status->updateState.load(std::memory_order_acquire);
+        const int pct      = m_status->updateProgressPct.load(std::memory_order_acquire);
+
+        // Nothing moved, nothing to do.
+        if (stateInt != m_impl->lastUpdateState || pct != m_impl->lastUpdatePct)
+        {
+            m_impl->lastUpdateState = stateInt;
+            m_impl->lastUpdatePct   = pct;
+
+            // Copied out: updateVersion is written by the update thread and is
+            // deliberately not atomic, like deviceName.
+            wchar_t version[StatusSnapshot::kUpdateVersionCapacity]{};
+            wcsncpy_s(version, m_status->updateVersion, _TRUNCATE);
+
+            const auto state = static_cast<UpdateState>(stateInt);
+
+            std::wstring status;
+            std::wstring label = L"Check now";
+
+            switch (state)
+            {
+            case UpdateState::Idle:
+                status = L"Not checked yet.";
+                break;
+            case UpdateState::Checking:
+                status = L"Checking for updates...";
+                break;
+            case UpdateState::UpToDate:
+                status = L"You are on the latest version.";
+                break;
+            case UpdateState::Available:
+                status = std::format(L"Version {} is available.", version);
+                label  = std::format(L"Download and install {}", version);
+                break;
+            case UpdateState::Downloading:
+                // No ProgressBar - see the note on the Impl members.
+                status = std::format(L"Downloading... {}%", pct);
+                break;
+            case UpdateState::Verifying:
+                status = L"Verifying the download...";
+                break;
+            case UpdateState::Ready:
+                status = L"Installing. BetterMagnifier will restart.";
+                label  = L"Installing...";
+                break;
+            case UpdateState::Failed:
+                status = L"The last update check did not complete. See the log for details.";
+                break;
+            }
+
+            m_impl->updateStatusText.Text(winrt::hstring{ status });
+            m_impl->updateButton.Content(winrt::box_value(winrt::hstring{ label }));
+
+            // Disabled while something is in flight, so a second press cannot
+            // start a second download.
+            m_impl->updateButton.IsEnabled(
+                state != UpdateState::Checking &&
+                state != UpdateState::Downloading &&
+                state != UpdateState::Verifying &&
+                state != UpdateState::Ready);
+        }
+    }
+
     const size_t count = m_status->monitorCount.load(std::memory_order_acquire);
     const size_t n = (count < m_impl->cards.size()) ? count : m_impl->cards.size();
 
@@ -1086,6 +1174,39 @@ void ControlPanel::BuildSettingsTab()
         L"Everything on this tab is stored in that file and is applied without a restart. "
         L"Use Reload after editing it by hand."));
 
+    // ── Updates ──
+    panel.Children().Append(MakeHeader(L"Updates"));
+
+    {
+        WUXC::TextBlock running{};
+        running.Text(L"Installed version: " BM_VERSION_STRING_W);
+        running.Opacity(0.65);
+        running.FontSize(12.0);
+        panel.Children().Append(running);
+    }
+
+    m_impl->updateStatusText = WUXC::TextBlock{};
+    m_impl->updateStatusText.Text(L"Not checked yet.");
+    m_impl->updateStatusText.TextWrapping(WUX::TextWrapping::Wrap);
+    m_impl->updateStatusText.Margin(WUX::ThicknessHelper::FromLengths(0, 4, 0, 0));
+    panel.Children().Append(m_impl->updateStatusText);
+
+    m_impl->updateButton = WUXC::Button{};
+    m_impl->updateButton.Content(winrt::box_value(L"Check now"));
+    m_impl->updateButton.HorizontalAlignment(WUX::HorizontalAlignment::Left);
+    panel.Children().Append(m_impl->updateButton);
+
+    m_impl->checkForUpdatesBox = WUXC::CheckBox{};
+    m_impl->checkForUpdatesBox.Content(winrt::box_value(L"Check for updates automatically"));
+    m_impl->checkForUpdatesBox.IsChecked(
+        winrt::Windows::Foundation::IReference<bool>{ g.checkForUpdates });
+    panel.Children().Append(m_impl->checkForUpdatesBox);
+
+    panel.Children().Append(MakeHint(
+        L"Checked once a day at most. Nothing is downloaded or installed without you "
+        L"pressing the button above. Updates are only offered to an installed copy - "
+        L"a portable one has nothing for the installer to replace."));
+
     // ── Wiring ──
     auto onChanged = [this](winrt::Windows::Foundation::IInspectable const&,
                             WUX::RoutedEventArgs const&)
@@ -1103,6 +1224,28 @@ void ControlPanel::BuildSettingsTab()
     m_impl->startWithWindowsBox.Unchecked(onChanged);
     m_impl->rememberZoomBox.Checked(onChanged);
     m_impl->rememberZoomBox.Unchecked(onChanged);
+    m_impl->checkForUpdatesBox.Checked(onChanged);
+    m_impl->checkForUpdatesBox.Unchecked(onChanged);
+
+    {
+        const HWND engine = m_engineHwnd;
+        m_impl->updateButton.Click(
+            [this, engine](winrt::Windows::Foundation::IInspectable const&,
+                           WUX::RoutedEventArgs const&)
+        {
+            if (!engine || !m_status)
+                return;
+
+            // The label follows the state, so the handler must too. Read it
+            // here: the engine can move between tick and click.
+            const auto state = static_cast<UpdateState>(
+                m_status->updateState.load(std::memory_order_acquire));
+
+            PostMessageW(engine, WM_APP_UPDATE_ACTION,
+                         state == UpdateState::Available ? kUpdateInstall
+                                                         : kUpdateCheckNow, 0);
+        });
+    }
 
     auto makeLimitChanged = [this](WUXC::TextBlock label)
     {
@@ -1149,6 +1292,7 @@ void ControlPanel::PushSettings()
     g.hijackMagnifierKeys = IsCheckedTrue(m_impl->hijackBox);
     g.startWithWindows    = IsCheckedTrue(m_impl->startWithWindowsBox);
     g.rememberZoomLevel   = IsCheckedTrue(m_impl->rememberZoomBox);
+    g.checkForUpdates     = IsCheckedTrue(m_impl->checkForUpdatesBox);
     // Every mode has to be represented here. A radio missing from this chain
     // does not read as "leave it alone" — it reads as one of the others, so
     // changing an unrelated setting silently rewrites the mode.

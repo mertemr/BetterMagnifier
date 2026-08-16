@@ -87,6 +87,20 @@ struct GeneralSettings
     // display exactly when the user was reaching for the edge of the magnified
     // content. Edge-push already gets you to that edge.
     bool  lockPointerToMonitor = true;
+
+    // ── Updates ──
+    // A network call on someone else's machine, so it is a setting rather than
+    // an assumption. On by default.
+    bool checkForUpdates = true;
+
+    // Unix seconds. Persisted so the 24-hour floor survives the process,
+    // otherwise a restart loop becomes a request loop. long long and stored as
+    // a string: GetPrivateProfileIntW is a 32-bit read and would truncate this
+    // in 2038, silently.
+    long long lastUpdateCheck = 0;
+
+    // A version the user declined, suppressed until something newer appears.
+    std::wstring skippedVersion;
 };
 
 // Keyed by device name, e.g. "\\\\.\\DISPLAY1"

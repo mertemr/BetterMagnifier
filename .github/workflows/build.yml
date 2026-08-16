@@ -15,6 +15,9 @@ on:
       - 'LICENSE'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -26,7 +29,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        configuration: [Debug, Release]
+        configuration: >-
+          ${{ github.event_name == 'pull_request'
+              && fromJSON('["Debug"]')
+              || fromJSON('["Debug","Release"]') }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -46,6 +52,54 @@ jobs:
           /p:Platform=x64
           /v:minimal
           /nologo
+
+      - name: Check the version is consistent
+        shell: pwsh
+        run: .\tools\check-version.ps1 -Configuration ${{ matrix.configuration }}
+
+      - name: Self-check
+        if: matrix.configuration == 'Debug'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          # Bounded wait, and the log either way. A /SUBSYSTEM:WINDOWS binary
+          # that stops on something the runner cannot answer - a message box
+          # with nobody to click it, say - would otherwise sit here until the
+          # job's own timeout. The logger flushes every line, so the tail of
+          # the log says how far it actually got.
+          $psi = [System.Diagnostics.ProcessStartInfo]::new()
+          $psi.FileName        = (Resolve-Path ".\bin\Debug-x64\BetterMagnifier.exe").Path
+          $psi.Arguments       = '--self-check'
+          $psi.UseShellExecute = $false
+
+          $proc   = [System.Diagnostics.Process]::Start($psi)
+          $exited = $proc.WaitForExit(120000)
+
+          function Show-Log {
+              $log = Get-ChildItem .\bin\Debug-x64\logs\*.log -ErrorAction SilentlyContinue |
+                     Sort-Object LastWriteTime | Select-Object -Last 1
+              if ($log) {
+                  Write-Host "---- $($log.Name) (last 40 lines) ----"
+                  Get-Content $log.FullName -Tail 40
+              } else {
+                  Write-Host "no log was written at all"
+              }
+          }
+
+          if (-not $exited) {
+              Write-Host "::error::self-check did not exit within 120s"
+              Show-Log
+              try { $proc.Kill() } catch { }
+              exit 1
+          }
+
+          if ($proc.ExitCode -ne 0) {
+              Write-Host "::error::self-check failed with exit $($proc.ExitCode)"
+              Show-Log
+              exit 1
+          }
+
+          Write-Host "self-check passed"
 
       - name: Upload build output
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

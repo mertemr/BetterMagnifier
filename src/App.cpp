@@ -362,6 +362,12 @@ bool App::InitializeComponents()
     // and edge-push settings sat unread until the user changed one.
     ApplyPointerSettings();
 
+    // Nothing can be mid-download here, so an abandoned update leaves nothing
+    // behind.
+    ClearUpdateStagingDir();
+
+    m_updateChecker.Start(m_messageHwnd, &m_status);
+
     if (OpenPanelAtStartup())
         OnShowPanel();
 
@@ -384,6 +390,12 @@ void App::SetupCallbacks()
     m_trayIcon.SetExitCallback([] { PostQuitMessage(0); });
 
     m_trayIcon.SetSettingsCallback([this] { OnShowPanel(); });
+
+    // A direct call would work - the tray callback is already on this thread -
+    // but routing it like the panel keeps one path into the updater.
+    m_trayIcon.SetCheckUpdateCallback([this] {
+        PostMessageW(m_messageHwnd, WM_APP_UPDATE_ACTION, kUpdateCheckNow, 0);
+    });
 }
 
 // =============================================================================
@@ -611,6 +623,15 @@ void App::Update()
 {
     m_status.monitorCount.store(m_overlays.size(), std::memory_order_relaxed);
     m_presentedThisTick = false;
+
+    // Deferred to the first frame: the check is a network call, and how
+    // promptly the magnifier appears matters more. Costs an exchange and a
+    // SetEvent.
+    if (!m_updateCheckStarted)
+    {
+        m_updateCheckStarted = true;
+        MaybeCheckForUpdates();
+    }
 
     PublishViewportRequests(false);
 
@@ -1577,6 +1598,96 @@ void App::OnHotkeyCaptured(UINT modifiers, UINT packed)
 // Windows App Runtime the panel does not open and the magnifier is unaffected.
 // See ControlPanel.h.
 // =============================================================================
+// =============================================================================
+// Updates
+// =============================================================================
+
+void App::MaybeCheckForUpdates()
+{
+    const GeneralSettings& g = m_settings.General();
+
+    if (!g.checkForUpdates)
+    {
+        LOG_INFO("Update: checking is off in settings");
+        return;
+    }
+
+    const long long now = static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    constexpr long long kFloorSeconds = 24LL * 60LL * 60LL;
+
+    if (now - g.lastUpdateCheck < kFloorSeconds)
+    {
+        LOG_INFO("Update: checked within the last 24 hours, skipping");
+        return;
+    }
+
+    // Stamped before the check, not after: a failed check should still consume
+    // the day's allowance, or a machine with no network asks on every start.
+    m_settings.MutableGeneral().lastUpdateCheck = now;
+    m_settings.Save();
+
+    m_updateChecker.RequestCheck(false);
+}
+
+void App::OnUpdateState(UpdateState state)
+{
+    if (state != UpdateState::Available)
+        return;
+
+    ReleaseInfo info;
+    if (!m_updateChecker.LatestRelease(info))
+        return;
+
+    // "Not now" should mean not now, not "ask me every launch".
+    const std::wstring& skipped = m_settings.General().skippedVersion;
+    if (!skipped.empty() && CompareVersion(info.version, skipped) <= 0)
+    {
+        LOG_INFO("Update: {} was skipped by the user, staying quiet",
+                 ToUtf8(info.version));
+        return;
+    }
+
+    // One balloon per version per session.
+    if (m_announcedVersion == info.version)
+        return;
+
+    m_announcedVersion = info.version;
+    m_trayIcon.ShowUpdateBalloon(info.version);
+}
+
+void App::OnUpdateAction(WPARAM action)
+{
+    switch (action)
+    {
+    case kUpdateCheckNow:
+        m_updateChecker.RequestCheck(true);
+        break;
+
+    case kUpdateInstall:
+        m_updateChecker.RequestInstall();
+        break;
+
+    case kUpdateSkip:
+    {
+        ReleaseInfo info;
+        if (m_updateChecker.LatestRelease(info))
+        {
+            m_settings.MutableGeneral().skippedVersion = info.version;
+            m_settings.Save();
+            LOG_INFO("Update: {} skipped by the user", ToUtf8(info.version));
+        }
+        break;
+    }
+
+    default:
+        LOG_WARN("Update: unknown action {}", static_cast<unsigned>(action));
+        break;
+    }
+}
+
 void App::OnShowPanel()
 {
     m_controlPanel.Show(m_messageHwnd, &m_settings, &m_status);
@@ -1734,6 +1845,16 @@ LRESULT CALLBACK App::MessageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             s_instance->OnShowPanel();
         return 0;
 
+    case WM_APP_UPDATE_STATE:
+        if (s_instance)
+            s_instance->OnUpdateState(static_cast<UpdateState>(wParam));
+        return 0;
+
+    case WM_APP_UPDATE_ACTION:
+        if (s_instance)
+            s_instance->OnUpdateAction(wParam);
+        return 0;
+
     case WM_APP_CAPTURE_HOTKEY:
         if (s_instance)
             s_instance->m_inputThread.ArmHotkeyCapture(wParam);
@@ -1798,7 +1919,11 @@ void App::Shutdown()
     m_cursorCache.Clear();
     m_osdCache.Clear();
 
-    // GUI thread first: the panel holds pointers to m_settings and m_status and
+    // Update thread first: it posts to the message window and writes m_status,
+    // both of which are about to go.
+    m_updateChecker.Stop();
+
+    // GUI thread next: the panel holds pointers to m_settings and m_status and
     // has to be gone before those become invalid.
     m_controlPanel.Stop();
 

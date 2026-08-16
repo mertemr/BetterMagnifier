@@ -5,10 +5,20 @@
   <!-- BetterMagnifier application manifest                                  -->
   <!-- ===================================================================== -->
 
+  <!--
+    The version here is written by release-please, like the ones in
+    src\Version.h and version.txt - the marker on the version line is what it
+    matches. Four components because assemblyIdentity requires them; the tool
+    rewrites the leading three and leaves the trailing .0 alone.
+
+    tools\check-version.ps1 asserts this agrees with src\Version.h, because a
+    manifest that quietly disagreed with the resource is precisely the drift
+    9d6838d had to go and clean up.
+  -->
   <assemblyIdentity type="win32"
                     name="BetterMagnifier"
-                    version="0.1.1.0"
-                    processorArchitecture="*" />
+                    processorArchitecture="*"
+                    version="0.1.1.0" /> <!-- x-release-please-version -->
 
   <!--
     ── WHERE administrator privilege is actually declared ──

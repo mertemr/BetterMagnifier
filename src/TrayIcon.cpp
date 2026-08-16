@@ -127,6 +127,33 @@ void TrayIcon::SetState(size_t activeCount, float zoom)
 }
 
 // =============================================================================
+// ShowUpdateBalloon
+// =============================================================================
+// Works on a COPY of m_nid: NIF_INFO left set on the member would make the next
+// SetState - which runs every frame - raise the balloon again.
+// =============================================================================
+void TrayIcon::ShowUpdateBalloon(const std::wstring& version)
+{
+    if (!m_created)
+        return;
+
+    NOTIFYICONDATAW nid = m_nid;
+    nid.uFlags      = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+
+    wcsncpy_s(nid.szInfoTitle, L"BetterMagnifier", _TRUNCATE);
+
+    const std::wstring body =
+        std::format(L"Version {} is available. Open Settings to install it.", version);
+    wcsncpy_s(nid.szInfo, body.c_str(), _TRUNCATE);
+
+    if (!Shell_NotifyIconW(NIM_MODIFY, &nid))
+        LOG_WARN("Tray: the shell refused the update balloon");
+    else
+        LOG_INFO("Tray: announced version {}", ToUtf8(version));
+}
+
+// =============================================================================
 // Destroy
 // =============================================================================
 void TrayIcon::Destroy()
@@ -158,6 +185,12 @@ void TrayIcon::HandleMessage(WPARAM /*wParam*/, LPARAM lParam)
         if (m_onToggle) m_onToggle();
         break;
 
+    case NIN_BALLOONUSERCLICK:
+        // The balloon is only raised for an available update, and the panel's
+        // Updates card is where one is installed from.
+        if (m_onSettings) m_onSettings();
+        break;
+
     default:
         break;
     }
@@ -177,6 +210,9 @@ void TrayIcon::ShowContextMenu()
     // wires it up unconditionally now.
     if (m_onSettings)
         AppendMenuW(hMenu, MF_STRING, kMenuSettings, L"Settings...");
+
+    if (m_onCheckUpdate)
+        AppendMenuW(hMenu, MF_STRING, kMenuCheckUpdate, L"Check for updates...");
 
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, kMenuExit, L"Exit");
@@ -202,6 +238,9 @@ void TrayIcon::ShowContextMenu()
         break;
     case kMenuSettings:
         if (m_onSettings) m_onSettings();
+        break;
+    case kMenuCheckUpdate:
+        if (m_onCheckUpdate) m_onCheckUpdate();
         break;
     case kMenuExit:
         if (m_onExit) m_onExit();

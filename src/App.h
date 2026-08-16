@@ -21,6 +21,7 @@
 #include "CursorRenderer.h"
 #include "OsdRenderer.h"
 #include "ControlPanel.h"
+#include "UpdateChecker.h"
 
 #include <windows.h>
 #include <vector>
@@ -71,6 +72,19 @@ private:
 
     void OnShowPanel();
 
+    // ── Updates ──
+
+    // Raises the tray balloon on the transition into Available; the panel
+    // polls the rest.
+    void OnUpdateState(UpdateState state);
+
+    // Check now / install / skip, from the panel or the tray menu.
+    void OnUpdateAction(WPARAM action);
+
+    // The 24-hour floor lives here rather than in UpdateChecker: it is a
+    // settings question, and UpdateChecker owns no settings.
+    void MaybeCheckForUpdates();
+
     // A binding came back from the input thread's keyboard hook.
     // packed = (which << 16) | virtual key; see WM_APP_HOTKEY_CAPTURED.
     void OnHotkeyCaptured(UINT modifiers, UINT packed);
@@ -113,6 +127,14 @@ private:
     InputThread                 m_inputThread;
     StatusSnapshot              m_status;
     ControlPanel                m_controlPanel;
+    UpdateChecker               m_updateChecker;
+
+    // One balloon per version per run.
+    std::wstring                m_announcedVersion;
+
+    // The startup check is deferred to the first frame: a network call should
+    // not be able to slow the application coming up.
+    bool                        m_updateCheckStarted = false;
 
     // The source rectangle and the edge-push pan. Owned here for lifetime, but
     // mutated only on the input thread — see InputThread::Attach.

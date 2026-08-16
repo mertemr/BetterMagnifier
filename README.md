@@ -69,17 +69,48 @@ them, follow mode, and zoom limits.
   the architecture doc; the short version is that low-level input hooks need
   the elevation to reliably see input from other elevated windows
 
-## Getting started
+## Install
 
-Download the latest build from [Releases](../../releases), extract it
-anywhere, and run `BetterMagnifier.exe`. Windows will ask for administrator
-approval on every launch — that's the manifest, not a bug.
+Download **`BetterMagnifier-<version>-x64-setup.exe`** from
+[Releases](../../releases/latest) and run it. It installs to
+`C:\Program Files\BetterMagnifier`, adds a Start Menu shortcut, and brings the
+Windows App Runtime with it, so a machine that has never run a WinUI
+application works out of the box.
+
+> **Windows will warn you.** These builds are not code-signed, so SmartScreen
+> shows *"Windows protected your PC"*. Choose **More info → Run anyway**. If you
+> would rather verify than trust, check your download against the
+> `SHA256SUMS.txt` published with each release.
+
+Windows also asks for administrator approval on every launch. That is the
+manifest rather than a bug — see [Requirements](#requirements).
+
+**Portable ZIP.** There is one, for people who would rather not install
+anything, with two caveats stated in the archive: it needs the
+[Windows App Runtime](https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe)
+installed separately, and it does not update itself.
+
+### Using it
 
 - **Toggle zoom:** `Ctrl+Alt+Z`, or the tray icon
 - **Settings:** right-click the tray icon → Settings
 - **Quit:** tray icon → Exit, or `Ctrl+Alt+Shift+Q` if something has gone wrong
 
-Settings live at `%APPDATA%\BetterMagnifier\settings.ini`.
+Settings live at `%APPDATA%\BetterMagnifier\settings.ini`, and an uninstall
+leaves them alone unless you tick the box that says otherwise.
+
+### Updates
+
+The installed copy checks GitHub for a newer release once a day and tells you
+through a tray notification when it finds one. Nothing is downloaded or
+installed until you press the button in **Settings → Updates**, and the whole
+thing can be switched off there.
+
+What it downloads is checked against the SHA-256 published with the release
+before it is run. Note the limit of that: the digest and the installer come from
+the same place, so it protects against a corrupted or truncated download rather
+than against a compromised release. Authenticode signing is wired up and waiting
+for a certificate.
 
 ## Building from source
 

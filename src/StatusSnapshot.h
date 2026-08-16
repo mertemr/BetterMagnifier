@@ -21,6 +21,20 @@
 
 namespace BetterMagnifier {
 
+// Where the updater is. Nothing depends on the numbering beyond it crossing a
+// thread boundary as an int.
+enum class UpdateState : int
+{
+    Idle,          // nothing has been asked for yet
+    Checking,
+    UpToDate,
+    Available,     // updateVersion names it
+    Downloading,   // updateProgressPct is meaningful
+    Verifying,
+    Ready,         // the installer has been launched; we are about to exit
+    Failed,
+};
+
 struct MonitorStatus
 {
     // Updated every frame
@@ -78,6 +92,20 @@ public:
     // so the two stack and neither behaves as expected. Surfaced so the panel
     // can say so rather than leaving the user to work it out.
     std::atomic<bool> osMagnifierRunning{false};
+
+    // ── Updates ──
+    //
+    // Written by the update thread, read by the panel, same contract as the
+    // rest of this struct. Nothing decides anything on it: the engine is told
+    // what to do by WM_APP_UPDATE_ACTION, never by reading this back.
+    std::atomic<int> updateState{static_cast<int>(UpdateState::Idle)};
+    std::atomic<int> updateProgressPct{0};
+
+    static constexpr size_t kUpdateVersionCapacity = 32;
+
+    // Not atomic, for the same reason deviceName is not: written once per
+    // state change, read by a label, so the worst case is one wrong tick.
+    wchar_t updateVersion[kUpdateVersionCapacity]{};
 
 private:
     std::array<MonitorStatus, kMaxMonitors> m_monitors{};

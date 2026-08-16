@@ -1,0 +1,237 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release PR / tag
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.rp.outputs.releases_created }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  package:
+    name: Build and attach the installer
+    needs: release-please
+    if: needs.release-please.outputs.releases_created == 'true'
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read the version release-please just wrote
+        shell: pwsh
+        run: |
+          $header = Get-Content src\Version.h -Raw
+          $major  = [regex]::Match($header, '#define\s+BM_VERSION_MAJOR\s+(\d+)').Groups[1].Value
+          $minor  = [regex]::Match($header, '#define\s+BM_VERSION_MINOR\s+(\d+)').Groups[1].Value
+          $patch  = [regex]::Match($header, '#define\s+BM_VERSION_PATCH\s+(\d+)').Groups[1].Value
+          $version = "$major.$minor.$patch"
+
+          git fetch --tags --quiet
+          $tag = "v$version"
+          git rev-parse --verify --quiet "refs/tags/$tag" > $null
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::src/Version.h says $version but there is no tag $tag"
+              exit 1
+          }
+
+          Write-Host "Releasing $version ($tag)"
+          "VERSION=$version" >> $env:GITHUB_ENV
+          "TAG=$tag"         >> $env:GITHUB_ENV
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
+
+      - name: Build Release x64
+        shell: pwsh
+        run: >-
+          msbuild .\BetterMagnifier.sln
+          /restore
+          /p:Configuration=Release
+          /p:Platform=x64
+          /v:minimal
+          /nologo
+
+      - name: Check the version is consistent
+        shell: pwsh
+        run: .\tools\check-version.ps1 -Configuration Release
+
+      - name: Sign the application
+        if: env.SIGN_CERT_PFX != ''
+        shell: pwsh
+        env:
+          SIGN_CERT_PFX:      ${{ secrets.SIGN_CERT_PFX }}
+          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_CERT_PFX))
+
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+                      Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw "signtool.exe not found on the runner" }
+          "SIGNTOOL=$($signtool.FullName)" >> $env:GITHUB_ENV
+
+          & $signtool.FullName sign /f $pfx /p $env:SIGN_CERT_PASSWORD `
+              /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+              .\bin\Release-x64\BetterMagnifier.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with $LASTEXITCODE" }
+
+      - name: Fetch the Windows App Runtime redistributable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build | Out-Null
+          $url = 'https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe'
+          Invoke-WebRequest -Uri $url -OutFile build\WindowsAppRuntimeInstall-x64.exe -MaximumRedirection 10
+
+          $size = (Get-Item build\WindowsAppRuntimeInstall-x64.exe).Length
+          Write-Host "Runtime redistributable: $([math]::Round($size/1MB,1)) MB"
+          if ($size -lt 20MB) {
+              throw "that is too small to be the runtime installer - has the aka.ms link moved?"
+          }
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+              choco install nsis -y --no-progress
+              $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          }
+
+          New-Item -ItemType Directory -Force installer\out | Out-Null
+
+          & $makensis "/DVERSION=$env:VERSION" `
+              "/DRUNTIME_EXE=..\build\WindowsAppRuntimeInstall-x64.exe" `
+              installer\BetterMagnifier.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with $LASTEXITCODE" }
+
+      - name: Sign the installer
+        if: env.SIGN_CERT_PFX != ''
+        shell: pwsh
+        env:
+          SIGN_CERT_PFX:      ${{ secrets.SIGN_CERT_PFX }}
+          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+          & $env:SIGNTOOL sign /f $pfx /p $env:SIGN_CERT_PASSWORD `
+              /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+              "installer\out\BetterMagnifier-$env:VERSION-x64-setup.exe"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with $LASTEXITCODE" }
+
+      - name: Remove the signing key
+        if: always()
+        shell: pwsh
+        run: Remove-Item (Join-Path $env:RUNNER_TEMP 'sign.pfx') -ErrorAction SilentlyContinue
+
+      - name: Build the portable ZIP
+        shell: pwsh
+        run: |
+          $stage = "build\portable"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+
+          Copy-Item bin\Release-x64\BetterMagnifier.exe                       $stage
+          Copy-Item bin\Release-x64\Microsoft.WindowsAppRuntime.Bootstrap.dll $stage
+          Copy-Item bin\Release-x64\Microsoft.Web.WebView2.Core.dll           $stage
+          Copy-Item bin\Release-x64\BetterMagnifier.pri                       $stage
+          Copy-Item LICENSE, README.md                                        $stage
+
+          @"
+          BetterMagnifier $env:VERSION - portable
+          =======================================
+
+          This copy needs the Microsoft Windows App Runtime 1.8 installed on the
+          machine. Only the installer carries it. Without it the control panel
+          cannot open, and on a machine that has never had it the application
+          will not start at all:
+
+              https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe
+
+          BetterMagnifier requires administrator rights. Without them it cannot
+          magnify windows that are themselves elevated, and it fails silently
+          rather than visibly.
+
+          In-app updates are off in a portable copy: there is no installed
+          location for a setup to replace, so new releases have to be downloaded
+          by hand. The setup does update itself.
+          "@ | Set-Content "$stage\PORTABLE-README.txt" -Encoding UTF8
+
+          Compress-Archive -Path "$stage\*" `
+              -DestinationPath "installer\out\BetterMagnifier-$env:VERSION-x64-portable.zip"
+
+      - name: Write SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          Push-Location installer\out
+          Get-ChildItem -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+              "$hash  $($_.Name)"
+          } | Set-Content SHA256SUMS.txt -Encoding ASCII
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+
+      - name: Attach the assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload $env:TAG `
+              "installer\out\BetterMagnifier-$env:VERSION-x64-setup.exe" `
+              "installer\out\BetterMagnifier-$env:VERSION-x64-portable.zip" `
+              "installer\out\SHA256SUMS.txt" `
+              --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload failed with $LASTEXITCODE" }
+
+      - name: Add installation notes to the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $existing = gh release view $env:TAG --json body --jq .body
+
+          $notes = @"
+          ## Install
+
+          Download **BetterMagnifier-$env:VERSION-x64-setup.exe** and run it. The
+          installer carries the Windows App Runtime and installs it if the machine
+          does not already have it.
+
+          > **Windows will warn you.** These builds are not code-signed, so
+          > SmartScreen shows "Windows protected your PC". Choose *More info* then
+          > *Run anyway*. Check the download against ``SHA256SUMS.txt`` if you would
+          > rather verify than trust.
+
+          BetterMagnifier requires administrator rights: without them it cannot
+          magnify windows that are themselves elevated, and it fails silently
+          rather than visibly.
+
+          The portable ZIP needs the Windows App Runtime installed separately and
+          does not update itself - see the note inside it.
+
+          ---
+
+          $existing
+          "@
+
+          $notes | Set-Content release-notes.md -Encoding UTF8
+          gh release edit $env:TAG --notes-file release-notes.md

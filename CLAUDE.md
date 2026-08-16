@@ -24,6 +24,8 @@ the Windows App SDK through `PackageReference`.
 .\bm.ps1 check      # Debug + run the diagnostic modes (elevates, see below)
 .\bm.ps1 errors     # WARN/ERROR lines from the newest log
 .\bm.ps1 kill       # kill stray instances
+.\bm.ps1 installer  # Release + the NSIS setup (needs NSIS; it says how)
+.\bm.ps1 check-update  # ask the build what the latest release is
 ```
 
 `TreatWarningAsError` is on for both configurations. A warning is a build failure.
@@ -57,13 +59,46 @@ the Windows App SDK through `PackageReference`.
   now only makes it **open at startup**, which is a test affordance: UIPI stops a
   normal-integrity script from clicking the tray or posting the window a message,
   so having the app open it is the only way in from outside.
-- **No XAML control that embeds a `TextBox` may go in the panel.** `TextBox` and
-  `NumberBox` both take the process down with a stowed exception on first layout.
-  Sliders, checkboxes, radio buttons, toggles and buttons are proven safe.
-  Hotkeys are captured through the existing `WH_KEYBOARD_LL` hook rather than
-  typed.
+- **The panel's control list is empirical. Extend it by measurement, never by
+  assumption.** `TextBox`, `NumberBox` and `ProgressBar` each take the process
+  down with a stowed exception on first layout. Proven safe: `TextBlock`,
+  `Button`, `CheckBox`, `RadioButton`, `Slider`, `ToggleSwitch`, `ToggleButton`,
+  `StackPanel`, `Border`. Hotkeys are captured through the existing
+  `WH_KEYBOARD_LL` hook rather than typed.
+
+  The failure has no error attached to it: the log ends at "Control panel
+  opened" and the process is simply gone. If that is what you are looking at,
+  the last control you added is the one to remove.
 - The GUI thread runs its own `GetMessage` loop rather than `Application::Start`,
   so `PostThreadMessage(WM_QUIT)` can end it. Don't "simplify" it back.
+
+## Releasing
+
+**Never type a version number, and never edit `src/Version.h` by hand.**
+release-please owns it. It reads the Conventional Commits since the last tag,
+works out the next version, and opens a Release PR that rewrites
+`src/Version.h`, `version.txt`, `src/app.manifest` and `CHANGELOG.md`. Merging
+that PR creates the tag and the GitHub Release; `.github/workflows/release.yml`
+then builds the installer and the portable ZIP and attaches them.
+
+So the whole procedure is: write good commit messages, and merge the Release PR
+when you want to ship. `fix:` bumps the patch, `feat:` the minor, `feat!:` or a
+`BREAKING CHANGE:` footer the major.
+
+That single writer is the point. `UpdateChecker` compares the release feed's
+`tag_name` against `BM_VERSION_STRING`, so a version that drifts from its tag
+shows a user either a permanent "update available" or an update that never
+arrives. `tools/check-version.ps1` asserts all four places agree — the header,
+`version.txt`, the manifest, and the resource actually stamped into the exe —
+and CI runs it on both configurations.
+
+`tools/set-version.ps1` exists for bootstrapping and emergencies. Reaching for
+it routinely means the commit messages are not saying what you mean.
+
+Code signing is wired but off: set the `SIGN_CERT_PFX` (base64 of the `.pfx`)
+and `SIGN_CERT_PASSWORD` repository secrets and the signing steps start running
+with no code change. Until then releases are unsigned and SmartScreen warns,
+which the release notes say plainly.
 
 ## Conventions
 

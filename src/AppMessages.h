@@ -86,6 +86,22 @@ inline constexpr UINT WM_APP_HOTKEY_CAPTURED  = WM_APP + 11;
 inline constexpr WPARAM kHotkeyToggle = 0;
 inline constexpr WPARAM kHotkeyFreeze = 1;
 
+// ── Updates ──
+//
+// update thread -> engine. wParam = the new UpdateState, lParam unused.
+//
+// Only "something moved": the version and progress live in StatusSnapshot,
+// which the panel already polls. Carrying them here too would give the panel
+// two sources for one fact and a way for them to disagree.
+inline constexpr UINT WM_APP_UPDATE_STATE  = WM_APP + 12;
+
+// panel / tray -> engine. wParam = one of the three below.
+inline constexpr UINT WM_APP_UPDATE_ACTION = WM_APP + 13;
+
+inline constexpr WPARAM kUpdateCheckNow = 0;   // ignores the 24-hour floor
+inline constexpr WPARAM kUpdateInstall  = 1;   // download, verify, hand to setup
+inline constexpr WPARAM kUpdateSkip     = 2;   // suppress this version
+
 // wParam sentinel: not a specific monitor, whichever one holds the cursor.
 inline constexpr WPARAM kFocusedMonitor = static_cast<WPARAM>(-1);
 

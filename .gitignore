@@ -362,3 +362,6 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsdspike/xaml-island-thread/x64/
 spike/xaml-island-thread/spike/
+
+# NSIS installer output
+installer/out/
