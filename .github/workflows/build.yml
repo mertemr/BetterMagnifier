@@ -101,6 +101,17 @@ jobs:
 
           Write-Host "self-check passed"
 
+      # always(): the point of these logs is the runs that do not finish
+      # normally, so they have to survive a failure, a timeout and a cancel.
+      - name: Upload the self-check log
+        if: always() && matrix.configuration == 'Debug'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: self-check-log
+          path: bin/Debug-x64/logs/
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload build output
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

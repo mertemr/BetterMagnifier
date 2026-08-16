@@ -22,6 +22,26 @@
 static void SetupDpiAwareness();
 static void AttachDebugConsole();
 
+// A startup problem, said in whichever way the caller can actually receive.
+//
+// A message box is right for a user who double-clicked the exe and wrong for a
+// script: nobody clears it, so the process waits forever holding the exit code
+// the caller is blocking on. Diagnostic runs get stderr and the debugger
+// channel instead, both of which a build agent captures.
+static void ReportStartupFailure(bool diagnosticRun, const wchar_t* message, UINT icon)
+{
+    if (diagnosticRun)
+    {
+        std::fwprintf(stderr, L"BetterMagnifier: %ls\n", message);
+        std::fflush(stderr);
+        OutputDebugStringW(message);
+        OutputDebugStringW(L"\n");
+        return;
+    }
+
+    MessageBoxW(nullptr, message, L"BetterMagnifier", icon);
+}
+
 // Reads the version out of the exe's own VERSIONINFO resource (see
 // BetterMagnifier.rc) instead of a string literal here, so the two can't
 // drift apart the way FILEVERSION and the FileVersion string already have.
@@ -60,8 +80,22 @@ int WINAPI wWinMain(
     // job is to be legible.
     SetupDpiAwareness();
 
+    // Worked out first, because everything below behaves differently for a
+    // scripted run. A diagnostic mode exists to be driven from a script, so it
+    // must never stop on something only a human can clear.
+    const bool diagnosticRun =
+        std::wcsstr(GetCommandLineW(), L"--self-check")   != nullptr ||
+        std::wcsstr(GetCommandLineW(), L"--dump-cursors") != nullptr ||
+        std::wcsstr(GetCommandLineW(), L"--dump-osd")     != nullptr ||
+        std::wcsstr(GetCommandLineW(), L"--check-update") != nullptr;
+
 #ifdef _DEBUG
-    AttachDebugConsole();
+    // Not for a diagnostic run. AttachDebugConsole reopens stdout and stderr on
+    // CONOUT$, which points them at a console window nobody is reading - so on
+    // a build agent every message the run produces disappears. Left alone, they
+    // stay on whatever pipe the caller gave us.
+    if (!diagnosticRun)
+        AttachDebugConsole();
 #endif
 
     // ── Single instance ──
@@ -81,12 +115,11 @@ int WINAPI wWinMain(
     // exactly when you most want to check something — and worse, it blocks on
     // the "already running" message box, so a script waiting on it hangs
     // forever instead of failing.
-    const bool diagnosticRun =
-        std::wcsstr(GetCommandLineW(), L"--self-check")   != nullptr ||
-        std::wcsstr(GetCommandLineW(), L"--dump-cursors") != nullptr ||
-        std::wcsstr(GetCommandLineW(), L"--dump-osd")     != nullptr ||
-        std::wcsstr(GetCommandLineW(), L"--check-update") != nullptr;
-
+    //
+    // Which is exactly what happened to the two message boxes below, and the
+    // reasoning above applies to them word for word: a build agent has nobody
+    // to click OK, so the run sat there until the job timed out with no log and
+    // no output to say why.
     HANDLE singleInstance = nullptr;
     if (!diagnosticRun)
     {
@@ -111,8 +144,7 @@ int WINAPI wWinMain(
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr))
     {
-        MessageBoxW(nullptr, L"COM initialisation failed.",
-                    L"BetterMagnifier", MB_ICONERROR);
+        ReportStartupFailure(diagnosticRun, L"COM initialisation failed.", MB_ICONERROR);
         return 1;
     }
 
@@ -128,8 +160,8 @@ int WINAPI wWinMain(
         if (!logger.Initialize(logDir, BetterMagnifier::LogLevel::Debug))
         {
             // Not fatal. Running without a log beats not running.
-            MessageBoxW(nullptr, L"Logger initialisation failed.",
-                        L"BetterMagnifier", MB_ICONWARNING);
+            ReportStartupFailure(diagnosticRun, L"Logger initialisation failed.",
+                                 MB_ICONWARNING);
         }
     }
 
