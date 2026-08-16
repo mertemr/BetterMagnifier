@@ -288,6 +288,78 @@ the input thread and the hotkeys on `WTS_SESSION_UNLOCK`. The hidden pointer
 is also restored on `WTS_SESSION_LOCK`, so a later `Hide()` cannot early-out
 on "already hidden" and leave the real pointer visible under the sprite.
 
+## Updates and packaging
+
+### A fourth thread, and why it is not one of the three
+
+`UpdateChecker` owns a `std::thread` of its own. It could not live anywhere
+else: on the render thread a network call stalls `Present`; on the input
+thread it puts every mouse and key event in the system behind an HTTP timeout,
+which is exactly the stall `LowLevelHooksTimeout` answers by uninstalling the
+hook; on the GUI thread it freezes the panel. It talks to the engine the same
+way everything here does — `PostMessage` for events, lock-free atomics in
+`StatusSnapshot` for state the panel polls at 10 Hz.
+
+Its parsing, version comparison and digest handling are free functions with no
+network, clock or registry in them, for the same reason `ViewportController` is
+pure math: that is the part `--self-check` can assert. JSON comes from
+`Windows.Data.Json`, an OS API reached through the C++/WinRT projection this
+project already links — the same argument that put settings in an INI file read
+by `GetPrivateProfileStringW`. No parser to own.
+
+### The runtime is machine-wide state, so the installer carries it
+
+`WindowsPackageType=None` makes the Windows App SDK auto-initializer resolve
+`Microsoft.WindowsAppRuntime.1.8` while the module loads. That package is not
+in the build output — `bin\Release-x64\` holds the exe, `Bootstrap.dll`,
+`WebView2.Core.dll` and the `.pri`, and nothing else. On a machine without the
+runtime the process dies before `wWinMain`.
+
+The installer therefore bundles `WindowsAppRuntimeInstall-x64.exe` (~102 MB)
+and runs it. `WindowsAppSDKSelfContained=true` would put the runtime beside the
+exe instead, and was rejected for now: it inflates the output to roughly the
+same size, changes the build, and invalidates the reasoning at
+`BetterMagnifier.vcxproj:288` for pinning the 1.8 line — which would have to be
+re-established by hand, on a machine with a panel that can actually be opened.
+
+**The consequence is that the portable ZIP is not self-contained**, and its
+README says so.
+
+### The version has one writer
+
+Four files carry it — `src/Version.h`, `version.txt`, `src/app.manifest`, and
+the version resource compiled into the exe — and they have drifted apart
+before; commit `9d6838d` had to go and reconcile the `.rc`'s numeric and string
+blocks. release-please now writes the first three from the Conventional Commits
+since the last tag, and `tools/check-version.ps1` asserts all four agree,
+including the one actually stamped into the binary.
+
+This is not bookkeeping. `UpdateChecker` compares the release feed's `tag_name`
+against `BM_VERSION_STRING`, so a version that drifts from its tag reads to a
+user as either a permanent "update available" or an update that never arrives —
+and neither failure announces what it is.
+
+### What the update path does and does not trust
+
+TLS to `api.github.com` and `objects.githubusercontent.com`, a download URL
+required to be `https` on a GitHub host (`IsTrustedDownloadUrl` also refuses
+userinfo and explicit ports), and SHA-256 against a digest taken from the same
+release's `SHA256SUMS.txt`. A release with no digest file is refused rather than
+run unverified.
+
+**What that does not cover:** the digest and the binary share a trust root.
+Anyone able to publish to the repository defeats both. The answer is
+Authenticode, which needs a certificate. `WinVerifyTrust` is called already and
+accepts an *absent* signature — refusing one would ship an updater that can
+never update anything — but a signature that is present and does not verify is
+refused today. Set `SIGN_CERT_PFX` and `SIGN_CERT_PASSWORD` and the check
+starts meaning something with no code change.
+
+Auto-update runs only in an installed copy, gated on
+`HKLM\SOFTWARE\BetterMagnifier\InstallDir` naming the directory the running exe
+is in. A portable copy still checks and still says so; it just has nothing for a
+setup to replace.
+
 ## Known limitations
 
 - **Popups double up or go unmagnified** — see [The central tension](#the-central-tension).
@@ -303,6 +375,16 @@ on "already hidden" and leave the real pointer visible under the sprite.
   a picker in the panel.
 - `ZoomState::targetZoom` is currently write-only — a marker for smooth zoom
   interpolation that was never built.
+- **The portable ZIP is not portable in the strict sense.** It needs the Windows
+  App Runtime installed on the machine, because only the installer carries it.
+- **In-app updates run only in an installed copy**, and releases are unsigned,
+  so SmartScreen warns on every download. Both are stated in the release notes.
+- **Releases are not signed.** The signing path is wired into the workflow and
+  skipped while `SIGN_CERT_PFX` is unset; nothing else is conditional on it.
+- **The Release PR gets no build check.** A pull request opened with the default
+  `GITHUB_TOKEN` does not trigger other workflows. What it contains is a version
+  bump and a generated changelog, and the push to main after the merge runs the
+  full gate before anything is packaged.
 
 ## Environment variables
 
@@ -319,15 +401,22 @@ Kept deliberately, for testing across machines and configurations.
 | `BM_DUMP_EVERY=<n>` | Frames between dumps (default 30) |
 | `BM_DUMP_MONITOR=<n>` | Which monitor to dump (default 0) |
 | `BM_PANEL=1` | Open the control panel at startup |
+| `BM_UPDATE_FEED=<url>` | Check this URL instead of the GitHub API — points the updater at a test release without publishing one |
 | `BM_POINTER_BREAKOUT_PX=<n>` | Hand travel a shove at a spent edge must spend before the monitor lock opens (default 150; 0 makes the lock nominal) |
 
 Command lines: `--self-check` (pure-logic assertions, then exit),
-`--dump-cursors`, `--dump-osd` (both write BMPs for eyeballing). All three are
-exempt from the single-instance mutex, so they run while the app is running —
-but **not** from elevation, which is a property of the binary rather than the
-mode. From an ordinary shell they fail with "requires elevation" before
-`main` is reached. `.\bm.ps1 check` builds, elevates once, runs all three and
-reports from the log.
+`--dump-cursors`, `--dump-osd` (both write BMPs for eyeballing), and
+`--check-update`. All four are exempt from the single-instance mutex, so they
+run while the app is running — but **not** from elevation, which is a property
+of the binary rather than the mode. From an ordinary shell they fail with
+"requires elevation" before `main` is reached. `.\bm.ps1 check` builds, elevates
+once, runs the first three and reports from the log.
+
+`--check-update` is the odd one out: it is compiled into **Release as well as
+Debug**, because the binary you actually want to ask about its update state is
+the one that ships. It performs a real feed check and reports through the exit
+code — `0` up to date, `2` an update is available, `3` the check failed — so a
+script can gate on it. `.\bm.ps1 check-update` wraps it.
 
 **Environment variables have to be set persistently.** Elevation breaks the
 obvious way of using them: a process elevated through UAC gets a fresh
