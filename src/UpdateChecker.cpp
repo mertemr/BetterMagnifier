@@ -484,6 +484,29 @@ bool IsInstalledCopy()
 }
 
 // =============================================================================
+// Staging
+// =============================================================================
+
+std::filesystem::path UpdateStagingDir()
+{
+    wchar_t temp[MAX_PATH]{};
+    if (GetTempPathW(MAX_PATH, temp) == 0)
+        return {};
+
+    return std::filesystem::path(temp) / L"BetterMagnifier-update";
+}
+
+void ClearUpdateStagingDir()
+{
+    const std::filesystem::path dir = UpdateStagingDir();
+    if (dir.empty())
+        return;
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+// =============================================================================
 // The feed
 // =============================================================================
 
@@ -588,6 +611,15 @@ void UpdateChecker::RequestCheck(bool force)
 
     m_checkRequested.store(true, std::memory_order_release);
     SetEvent(m_wake);
+}
+
+void UpdateChecker::RequestInstall()
+{
+    // Filled in by the download-and-verify work. Declared and reachable now so
+    // the message route from the panel and the tray can be built and exercised
+    // before the thing at the end of it exists.
+    LOG_WARN("Update: install requested, but the installer path is not built yet");
+    PublishState(UpdateState::Failed);
 }
 
 bool UpdateChecker::LatestRelease(ReleaseInfo& out) const

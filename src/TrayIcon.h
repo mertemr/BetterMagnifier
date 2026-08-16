@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <functional>
+#include <string>
 
 namespace BetterMagnifier {
 
@@ -37,6 +38,10 @@ public:
 
     // Handles kTrayCallbackMsg
     void HandleMessage(WPARAM wParam, LPARAM lParam);
+
+    // A balloon rather than a dialog: there is no window to interrupt, and a
+    // modal over a magnified screen is the last thing a low-vision user wants.
+    void ShowUpdateBalloon(const std::wstring& version);
 
     void SetToggleCallback(std::function<void()> cb)   { m_onToggle = std::move(cb); }
     void SetSettingsCallback(std::function<void()> cb) { m_onSettings = std::move(cb); }

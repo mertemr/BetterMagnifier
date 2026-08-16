@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -77,6 +78,12 @@ bool IsInstalledCopy();
 
 // ── The parts that touch the network ──────────────────────────────────────
 
+// Where a downloaded installer is staged, under %TEMP%.
+std::filesystem::path UpdateStagingDir();
+
+// Removes it, at startup, so an abandoned update leaves no installers behind.
+void ClearUpdateStagingDir();
+
 // The API endpoint, or whatever BM_UPDATE_FEED names — the override lets a
 // test release be checked against without publishing one.
 std::wstring UpdateFeedUrl();
@@ -105,6 +112,10 @@ public:
     // The 24-hour floor is enforced in App, next to the settings that describe
     // it; `force` is only a marker for the caller.
     void RequestCheck(bool force);
+
+    // Download the last-seen release, verify it, and hand it to the installer.
+    // Refuses in a portable copy: there is nothing for a setup to replace.
+    void RequestInstall();
 
     // The last successful result. False when there has not been one.
     bool LatestRelease(ReleaseInfo& out) const;

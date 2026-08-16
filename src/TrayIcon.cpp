@@ -127,6 +127,33 @@ void TrayIcon::SetState(size_t activeCount, float zoom)
 }
 
 // =============================================================================
+// ShowUpdateBalloon
+// =============================================================================
+// Works on a COPY of m_nid: NIF_INFO left set on the member would make the next
+// SetState - which runs every frame - raise the balloon again.
+// =============================================================================
+void TrayIcon::ShowUpdateBalloon(const std::wstring& version)
+{
+    if (!m_created)
+        return;
+
+    NOTIFYICONDATAW nid = m_nid;
+    nid.uFlags      = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+
+    wcsncpy_s(nid.szInfoTitle, L"BetterMagnifier", _TRUNCATE);
+
+    const std::wstring body =
+        std::format(L"Version {} is available. Open Settings to install it.", version);
+    wcsncpy_s(nid.szInfo, body.c_str(), _TRUNCATE);
+
+    if (!Shell_NotifyIconW(NIM_MODIFY, &nid))
+        LOG_WARN("Tray: the shell refused the update balloon");
+    else
+        LOG_INFO("Tray: announced version {}", ToUtf8(version));
+}
+
+// =============================================================================
 // Destroy
 // =============================================================================
 void TrayIcon::Destroy()
