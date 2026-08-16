@@ -460,6 +460,16 @@ bug and was a test-harness bug. The hooks now ignore `LLKHF_INJECTED` /
 `LLMHF_INJECTED` input by default so automation cannot drive the app at all;
 `BM_ALLOW_INJECTED=1` re-enables it deliberately, for verification.
 
+**PowerShell does not wait for a GUI-subsystem binary, and `$LASTEXITCODE`
+stays unset.** The CI self-check called the exe directly, read a null
+`$LASTEXITCODE`, compared it unequal to 0 and failed the build — while the
+self-check itself had passed. Two other harnesses in this project have reported
+the wrong answer the same way: one marshalled `$null` into `""` and concluded
+the app was not running, another injected nothing and blamed the app. **When a
+script says this application is broken, check the script first.** Anything
+launching the exe from PowerShell wants `Start-Process -Wait -PassThru` and
+`.ExitCode`.
+
 **A capture API's reported size is not necessarily its buffer's size.**
 `DXGICapture` took its dimensions from `DesktopCoordinates` and the renderer
 took its from the texture, and for years those agreed — because every monitor

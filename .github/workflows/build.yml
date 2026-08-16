@@ -58,14 +58,30 @@ jobs:
         if: matrix.configuration == 'Debug'
         shell: pwsh
         run: |
-          .\bin\Debug-x64\BetterMagnifier.exe --self-check
-          if ($LASTEXITCODE -ne 0) {
-              Write-Host "::error::self-check failed with exit $LASTEXITCODE"
+          # Start-Process -Wait, not a bare call. This is a /SUBSYSTEM:WINDOWS
+          # binary, so PowerShell does not wait for it and never sets
+          # $LASTEXITCODE - which is null, compares unequal to 0, and fails the
+          # step while the self-check itself was fine.
+          #
+          # No -Verb RunAs: the runner is already elevated, so the manifest's
+          # RequireAdministrator is satisfied without a prompt there is nobody
+          # to answer. Locally use .\bm.ps1 check, which does elevate.
+          $p = Start-Process ".\bin\Debug-x64\BetterMagnifier.exe" `
+                   -ArgumentList '--self-check' -Wait -PassThru
+
+          if ($null -eq $p) {
+              Write-Host "::error::the self-check process did not start"
+              exit 1
+          }
+
+          if ($p.ExitCode -ne 0) {
+              Write-Host "::error::self-check failed with exit $($p.ExitCode)"
               Get-ChildItem .\bin\Debug-x64\logs\*.log -ErrorAction SilentlyContinue |
                   Sort-Object LastWriteTime | Select-Object -Last 1 |
                   Get-Content | Select-String 'SELF-CHECK FAILED|FATAL'
               exit 1
           }
+
           Write-Host "self-check passed"
 
       - name: Upload build output
