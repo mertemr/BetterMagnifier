@@ -57,6 +57,26 @@ jobs:
         shell: pwsh
         run: .\tools\check-version.ps1 -Configuration ${{ matrix.configuration }}
 
+      # Running the binary needs what a user's machine needs. The Windows App
+      # SDK auto-initializer resolves Microsoft.WindowsAppRuntime.1.8 at module
+      # load - before wWinMain - and a runner does not have it. That is what the
+      # installer carries for users, and the same thing has to be true here.
+      - name: Install the Windows App Runtime
+        if: matrix.configuration == 'Debug'
+        shell: pwsh
+        run: |
+          $url = 'https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe'
+          $exe = Join-Path $env:RUNNER_TEMP 'WindowsAppRuntimeInstall-x64.exe'
+          Invoke-WebRequest -Uri $url -OutFile $exe -MaximumRedirection 10
+
+          $p = Start-Process $exe -ArgumentList '--quiet' -Wait -PassThru
+          # 0x80073D06 is "already installed", which is a success for us.
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 0x80073D06) {
+              Write-Host "::error::the runtime installer returned $($p.ExitCode)"
+              exit 1
+          }
+          Write-Host "Windows App Runtime ready"
+
       - name: Self-check
         if: matrix.configuration == 'Debug'
         shell: pwsh
