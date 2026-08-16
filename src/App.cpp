@@ -923,7 +923,11 @@ void App::RenderMonitor(size_t monitorIndex)
                                   ? frame.texture.Get()
                                   : nullptr;
 
-        if (!m_renderer.RenderFrame(newFrame, monitorIndex, srcRect))
+        // srcRect is in desktop coordinates; on a rotated output the texture is
+        // not, so the renderer needs the rotation to sample it upright. Read
+        // from the capture rather than from MonitorInfo: it is the object that
+        // produced the texture, and it re-reads the orientation on recovery.
+        if (!m_renderer.RenderFrame(newFrame, monitorIndex, srcRect, capture.GetRotation()))
         {
             // Henuz hic frame gelmemis olabilir — bir sonraki turda tekrar denenir.
             capture.ReleaseFrame();

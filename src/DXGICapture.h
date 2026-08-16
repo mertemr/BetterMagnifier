@@ -58,8 +58,19 @@ public:
 
     bool IsInitialized() const { return m_initialized; }
     bool NeedsReinit()   const { return m_needsReinit; }
+
+    // DESKTOP dimensions, from DXGI_OUTPUT_DESC.DesktopCoordinates. On a
+    // rotated output these are deliberately NOT the acquired texture's
+    // dimensions — see GetRotation.
     UINT GetWidth()      const { return m_width; }
     UINT GetHeight()     const { return m_height; }
+
+    // How the panel is turned relative to the desktop image. Desktop
+    // Duplication hands back the UNROTATED mode image, so on a portrait monitor
+    // a 1080x1920 desktop arrives as a 1920x1080 texture lying on its side.
+    // The renderer needs this to sample it upright; without it a portrait
+    // monitor magnifies as though it were landscape.
+    DXGI_MODE_ROTATION GetRotation() const { return m_rotation; }
 
 private:
     // Full teardown, including the borrowed device/output pointers. Only for
@@ -83,6 +94,10 @@ private:
     bool  m_needsReinit   = false;
     UINT  m_width  = 0;
     UINT  m_height = 0;
+
+    // Re-read on every Initialize AND Reinitialize: rotating a display costs
+    // the duplication session, and recovery must not carry the old orientation.
+    DXGI_MODE_ROTATION m_rotation = DXGI_MODE_ROTATION_IDENTITY;
 
     uint64_t m_frameCount = 0;
     uint64_t m_errorCount = 0;
