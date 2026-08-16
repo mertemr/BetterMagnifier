@@ -1,0 +1,14 @@
+*       @mertemr
+
+/.github/workflows/             @mertemr
+/.github/CODEOWNERS             @mertemr
+/release-please-config.json     @mertemr
+/.release-please-manifest.json  @mertemr
+/installer/                     @mertemr
+/src/Version.h                  @mertemr
+/version.txt                    @mertemr
+/src/app.manifest               @mertemr
+/src/UpdateChecker.cpp          @mertemr
+/src/UpdateChecker.h            @mertemr
+/BetterMagnifier.vcxproj        @mertemr
+/src/InputThread.cpp            @mertemr
