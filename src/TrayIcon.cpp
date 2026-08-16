@@ -185,6 +185,12 @@ void TrayIcon::HandleMessage(WPARAM /*wParam*/, LPARAM lParam)
         if (m_onToggle) m_onToggle();
         break;
 
+    case NIN_BALLOONUSERCLICK:
+        // The balloon is only raised for an available update, and the panel's
+        // Updates card is where one is installed from.
+        if (m_onSettings) m_onSettings();
+        break;
+
     default:
         break;
     }
@@ -204,6 +210,9 @@ void TrayIcon::ShowContextMenu()
     // wires it up unconditionally now.
     if (m_onSettings)
         AppendMenuW(hMenu, MF_STRING, kMenuSettings, L"Settings...");
+
+    if (m_onCheckUpdate)
+        AppendMenuW(hMenu, MF_STRING, kMenuCheckUpdate, L"Check for updates...");
 
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, kMenuExit, L"Exit");
@@ -229,6 +238,9 @@ void TrayIcon::ShowContextMenu()
         break;
     case kMenuSettings:
         if (m_onSettings) m_onSettings();
+        break;
+    case kMenuCheckUpdate:
+        if (m_onCheckUpdate) m_onCheckUpdate();
         break;
     case kMenuExit:
         if (m_onExit) m_onExit();

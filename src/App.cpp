@@ -390,6 +390,12 @@ void App::SetupCallbacks()
     m_trayIcon.SetExitCallback([] { PostQuitMessage(0); });
 
     m_trayIcon.SetSettingsCallback([this] { OnShowPanel(); });
+
+    // A direct call would work - the tray callback is already on this thread -
+    // but routing it like the panel keeps one path into the updater.
+    m_trayIcon.SetCheckUpdateCallback([this] {
+        PostMessageW(m_messageHwnd, WM_APP_UPDATE_ACTION, kUpdateCheckNow, 0);
+    });
 }
 
 // =============================================================================

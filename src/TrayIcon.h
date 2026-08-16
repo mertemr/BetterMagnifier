@@ -46,6 +46,7 @@ public:
     void SetToggleCallback(std::function<void()> cb)   { m_onToggle = std::move(cb); }
     void SetSettingsCallback(std::function<void()> cb) { m_onSettings = std::move(cb); }
     void SetExitCallback(std::function<void()> cb)     { m_onExit = std::move(cb); }
+    void SetCheckUpdateCallback(std::function<void()> cb) { m_onCheckUpdate = std::move(cb); }
 
     static constexpr UINT kTrayCallbackMsg = WM_APP_TRAY;
     static constexpr UINT kTrayIconId      = 1;
@@ -53,6 +54,7 @@ public:
     static constexpr UINT kMenuToggle   = 1001;
     static constexpr UINT kMenuExit     = 1002;
     static constexpr UINT kMenuSettings = 1003;
+    static constexpr UINT kMenuCheckUpdate = 1004;
 
 private:
     void ShowContextMenu();
@@ -76,6 +78,7 @@ private:
     std::function<void()> m_onToggle;
     std::function<void()> m_onSettings;
     std::function<void()> m_onExit;
+    std::function<void()> m_onCheckUpdate;
 };
 
 } // namespace BetterMagnifier

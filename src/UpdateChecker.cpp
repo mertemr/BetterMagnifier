@@ -36,10 +36,30 @@ std::wstring Utf8ToWide(std::string_view utf8)
     return wide;
 }
 
-bool EndsWith(std::wstring_view text, std::wstring_view suffix)
+// Case-insensitive: these are Windows filenames and Windows does not
+// distinguish their case, so matching case-sensitively would reject our own
+// installer the day CI capitalised it differently, for no gain. The required
+// shape is unchanged.
+bool EndsWithNoCase(std::wstring_view text, std::wstring_view suffix)
 {
-    return text.size() >= suffix.size() &&
-           text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+    if (text.size() < suffix.size())
+        return false;
+
+    const std::wstring_view tail = text.substr(text.size() - suffix.size());
+
+    return CompareStringOrdinal(tail.data(), static_cast<int>(tail.size()),
+                                suffix.data(), static_cast<int>(suffix.size()),
+                                TRUE) == CSTR_EQUAL;
+}
+
+bool EqualsNoCase(std::wstring_view a, std::wstring_view b)
+{
+    if (a.size() != b.size())
+        return false;
+
+    return CompareStringOrdinal(a.data(), static_cast<int>(a.size()),
+                                b.data(), static_cast<int>(b.size()),
+                                TRUE) == CSTR_EQUAL;
 }
 
 // Reads the leading numeric triple; anything non-numeric ends the scan, so
@@ -367,7 +387,21 @@ bool ParseSha256Sums(std::string_view text, std::wstring_view fileName,
                (name.front() == ' ' || name.front() == '\t' || name.front() == '*'))
             name.remove_prefix(1);
 
-        if (name != want)
+        // Case-insensitive for the same reason the asset match is.
+        if (name.size() != want.size())
+            continue;
+
+        bool same = true;
+        for (size_t i = 0; i < name.size(); ++i)
+        {
+            if (std::tolower(static_cast<unsigned char>(name[i])) !=
+                std::tolower(static_cast<unsigned char>(want[i])))
+            {
+                same = false;
+                break;
+            }
+        }
+        if (!same)
             continue;
 
         outHex.assign(hex);
@@ -421,9 +455,9 @@ bool ParseRelease(std::string_view json, ReleaseInfo& out)
             if (a.url.empty() || a.name.empty())
                 continue;
 
-            if (EndsWith(a.name, L"-setup.exe"))
+            if (EndsWithNoCase(a.name, L"-setup.exe"))
                 info.setup = a;
-            else if (a.name == L"SHA256SUMS.txt")
+            else if (EqualsNoCase(a.name, L"SHA256SUMS.txt"))
                 info.sums = a;
         }
 
@@ -776,6 +810,11 @@ void UpdateCheckerSelfCheck()
 
         // A name that is a prefix of a listed one must not match it.
         BM_SELFCHECK(!ParseSha256Sums(sums, L"BetterMagnifier-0.2.0-x64-setup", hex));
+
+        // Case-insensitive, matching the asset rule: both sides are Windows
+        // filenames written by our own workflow.
+        BM_SELFCHECK(ParseSha256Sums(sums, L"BETTERMAGNIFIER-0.2.0-X64-SETUP.EXE", hex));
+        BM_SELFCHECK(hex == std::string(64, 'a'));
     }
 
     // ── 6. HexEncodeLower ──
@@ -817,19 +856,28 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(!info.sums.url.empty());
     }
 
-    // ── 8. ParseRelease: the setup asset is matched strictly ──
+    // ── 8. ParseRelease: the setup asset is matched by shape, not by case ──
     //
-    // "-setup.exe", not "contains setup" and not "any .exe". This is the rule
-    // that picks which binary we later execute, so it is deliberately narrow:
-    // our own release workflow builds the name, and nothing else in a release
-    // should be able to present itself as our installer.
-    //
-    // The example is real. ShareX ships "ShareX-21.0.0-setup-x64.exe", which is
-    // plainly an installer and which this correctly refuses — the check was run
-    // against their live feed while building this, and the refusal is the
-    // wanted behaviour rather than a gap.
+    // "ends with -setup.exe", not "contains setup" and not "any .exe": this
+    // picks the binary we later execute, so it stays narrow. Case is a separate
+    // question and the answer is no. Both examples are real, from live feeds.
     {
-        const std::string otherConvention = R"JSON({
+        // Flow Launcher: same shape, different case. Must match.
+        const std::string capitalised = R"JSON({
+            "tag_name": "v1.2.3",
+            "assets": [
+                { "name": "Flow-Launcher-Setup.exe", "size": 7,
+                  "browser_download_url": "https://github.com/o/r/releases/download/v1.2.3/Flow-Launcher-Setup.exe" }
+            ]
+        })JSON";
+
+        ReleaseInfo info;
+        BM_SELFCHECK(ParseRelease(capitalised, info));
+        BM_SELFCHECK(info.setup.name == L"Flow-Launcher-Setup.exe");
+
+        // ShareX: plainly an installer, but a different shape. Must not match
+        // — loosening the rule this far would also catch any other .exe.
+        const std::string otherShape = R"JSON({
             "tag_name": "v21.0.0",
             "assets": [
                 { "name": "Thing-21.0.0-setup-x64.exe", "size": 1,
@@ -839,8 +887,8 @@ void UpdateCheckerSelfCheck()
             ]
         })JSON";
 
-        ReleaseInfo info;
-        BM_SELFCHECK(!ParseRelease(otherConvention, info));
+        ReleaseInfo other;
+        BM_SELFCHECK(!ParseRelease(otherShape, other));
     }
 
     // ── 9. ParseRelease: a release with nothing to install is a failure ──
