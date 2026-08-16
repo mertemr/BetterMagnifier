@@ -246,16 +246,25 @@ Three things about the XAML island are load-bearing and not obvious:
 See `spike/xaml-island-thread/FINDINGS.md` for how these were found — both
 were access violations and an `E_FAIL` with no obvious cause until isolated.
 
-**No control that embeds a `TextBox` may go in this tree.** `TextBox` itself
-and `NumberBox` both kill the process on first layout with
-`STATUS_STOWED_EXCEPTION` (0xC000027B), bisected to exactly those controls
-while `CheckBox`, `RadioButton`, `Slider`, `Button`, `ToggleSwitch` and
-`ToggleButton` in the same tree are fine. Text input services do not come up
+**The list of controls this tree tolerates is empirical, and the only way to
+extend it is to measure.** `TextBox`, `NumberBox` and `ProgressBar` each kill
+the process on first layout with `STATUS_STOWED_EXCEPTION` (0xC000027B),
+bisected to exactly those controls while `TextBlock`, `CheckBox`, `RadioButton`,
+`Slider`, `Button`, `ToggleSwitch` and `ToggleButton` in the same tree are fine.
+
+For the first two the explanation is text input services, which do not come up
 for an island on a secondary STA thread in an unpackaged process. That is why
-zoom limits are sliders and why hotkeys are captured through the keyboard
-hook instead of typed — which turns out to be the better UI anyway: nothing to
+zoom limits are sliders and why hotkeys are captured through the keyboard hook
+instead of typed — which turns out to be the better UI anyway: nothing to
 mistype, no format to explain, and the extended-key and left/right-modifier
 questions never arise.
+
+`ProgressBar` was added later, for the updater's download progress, on the
+assumption that a control with no text in it would be fine. It was not: the log
+ended at "Control panel opened" and the process was gone, with no error
+recorded anywhere. The percentage is a `TextBlock` now. **The absence of a
+plausible mechanism is not evidence that a control is safe** — this list is a
+record of what has been tried, not a theory about what should work.
 
 `ControlPanel::Stop()` waits on the GUI thread's own promise with a
 three-second deadline instead of joining flat, and abandons the thread if

@@ -57,11 +57,16 @@ the Windows App SDK through `PackageReference`.
   now only makes it **open at startup**, which is a test affordance: UIPI stops a
   normal-integrity script from clicking the tray or posting the window a message,
   so having the app open it is the only way in from outside.
-- **No XAML control that embeds a `TextBox` may go in the panel.** `TextBox` and
-  `NumberBox` both take the process down with a stowed exception on first layout.
-  Sliders, checkboxes, radio buttons, toggles and buttons are proven safe.
-  Hotkeys are captured through the existing `WH_KEYBOARD_LL` hook rather than
-  typed.
+- **The panel's control list is empirical. Extend it by measurement, never by
+  assumption.** `TextBox`, `NumberBox` and `ProgressBar` each take the process
+  down with a stowed exception on first layout. Proven safe: `TextBlock`,
+  `Button`, `CheckBox`, `RadioButton`, `Slider`, `ToggleSwitch`, `ToggleButton`,
+  `StackPanel`, `Border`. Hotkeys are captured through the existing
+  `WH_KEYBOARD_LL` hook rather than typed.
+
+  The failure has no error attached to it: the log ends at "Control panel
+  opened" and the process is simply gone. If that is what you are looking at,
+  the last control you added is the one to remove.
 - The GUI thread runs its own `GetMessage` loop rather than `Application::Start`,
   so `PostThreadMessage(WM_QUIT)` can end it. Don't "simplify" it back.
 
