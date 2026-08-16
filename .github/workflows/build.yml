@@ -30,7 +30,7 @@ jobs:
         configuration: [Debug, Release]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
