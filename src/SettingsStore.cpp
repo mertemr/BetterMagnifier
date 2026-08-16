@@ -284,6 +284,31 @@ bool SettingsStore::Load()
     m_general.rememberZoomLevel =
         GetPrivateProfileIntW(L"General", L"RememberZoomLevel", 1, file.c_str()) != 0;
 
+    // ── Guncelleme ──
+    m_general.checkForUpdates =
+        GetPrivateProfileIntW(L"General", L"CheckForUpdates", 1, file.c_str()) != 0;
+
+    // Read as a string: GetPrivateProfileIntW is a 32-bit read and a Unix
+    // timestamp outgrows it in 2038, silently.
+    {
+        wchar_t buf[32]{};
+        GetPrivateProfileStringW(L"General", L"LastUpdateCheck", L"0",
+                                 buf, 32, file.c_str());
+        m_general.lastUpdateCheck = _wtoi64(buf);
+
+        // A backwards clock or a hand-edited negative would stop the floor
+        // ever expiring.
+        if (m_general.lastUpdateCheck < 0)
+            m_general.lastUpdateCheck = 0;
+    }
+
+    {
+        wchar_t buf[32]{};
+        GetPrivateProfileStringW(L"General", L"SkippedVersion", L"",
+                                 buf, 32, file.c_str());
+        m_general.skippedVersion = buf;
+    }
+
     // ── Takip modu ──
     {
         // EdgePush is the default now. It is what the pointer work was built
@@ -396,6 +421,19 @@ bool SettingsStore::Save() const
             m_general.startWithWindows ? 1 : 0) && ok;
     ok = WriteInt(file, L"General", L"RememberZoomLevel",
             m_general.rememberZoomLevel ? 1 : 0) && ok;
+    ok = WriteInt(file, L"General", L"CheckForUpdates",
+            m_general.checkForUpdates ? 1 : 0) && ok;
+
+    // A string for the same reason it is read as one.
+    {
+        wchar_t buf[32]{};
+        swprintf_s(buf, L"%lld", m_general.lastUpdateCheck);
+        ok = WritePrivateProfileStringW(L"General", L"LastUpdateCheck",
+                                        buf, file.c_str()) && ok;
+    }
+
+    ok = WritePrivateProfileStringW(L"General", L"SkippedVersion",
+            m_general.skippedVersion.c_str(), file.c_str()) && ok;
     ok = WriteFloat(file, L"General", L"EdgeBandFraction",
                     m_general.edgeBandFraction) && ok;
     ok = WriteInt(file, L"General", L"PointerScaling",
@@ -635,6 +673,42 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(fm.maxZoom  == 10.0f);   // below the minimum -> default
         BM_SELFCHECK(fm.zoomStep == 0.25f);   // zero -> default
         BM_SELFCHECK(fm.lastZoom >= fm.minZoom && fm.lastZoom <= fm.maxZoom);
+
+        // ── 12. Update settings survive a save/load round trip ──
+        //
+        // lastUpdateCheck is the one that matters: a value that failed to
+        // persist would silently turn the 24-hour floor off.
+        SettingsStore u;
+        u.MutableGeneral().checkForUpdates = false;
+        u.MutableGeneral().lastUpdateCheck = 1771200000LL;   // 2026-02-16
+        u.MutableGeneral().skippedVersion  = L"9.9.9";
+        BM_SELFCHECK(u.Save());
+
+        SettingsStore ur;
+        BM_SELFCHECK(ur.Load());
+        BM_SELFCHECK(ur.General().checkForUpdates == false);
+        BM_SELFCHECK(ur.General().lastUpdateCheck == 1771200000LL);
+        BM_SELFCHECK(ur.General().skippedVersion == L"9.9.9");
+
+        // Past the 32-bit ceiling. GetPrivateProfileIntW would truncate this,
+        // which is why the field is read as a string.
+        // Not named "far": windows.h still carries the legacy far/near macros
+        // and the collision is a syntax error three lines further down.
+        SettingsStore distant;
+        distant.MutableGeneral().lastUpdateCheck = 4102444800LL;   // 2100-01-01
+        BM_SELFCHECK(distant.Save());
+
+        SettingsStore distantBack;
+        BM_SELFCHECK(distantBack.Load());
+        BM_SELFCHECK(distantBack.General().lastUpdateCheck == 4102444800LL);
+
+        // Defaults: updates on, never checked, nothing skipped.
+        {
+            const GeneralSettings d;
+            BM_SELFCHECK(d.checkForUpdates == true);
+            BM_SELFCHECK(d.lastUpdateCheck == 0);
+            BM_SELFCHECK(d.skippedVersion.empty());
+        }
 
         // Cleanup is a courtesy now, not a correctness requirement: an aborted
         // run leaves a stray temp file and nothing else, and the next run
