@@ -66,6 +66,50 @@ alignment: the real cursor sits at `round(V)`, the sprite is drawn at
 `(V - srcOrigin) * zoom`, and clicks land on what the pointer appears to point
 at.
 
+## Rotated outputs
+
+Desktop Duplication hands back the display's **unrotated** mode image. A
+portrait monitor — a 1080x1920 rectangle of desktop driven by a 1920x1080
+panel turned 270 degrees — produces a 1920x1080 texture lying on its side,
+while `DXGI_OUTPUT_DESC.DesktopCoordinates` reports 1080x1920. Sampling that
+texture as though it were in desktop orientation magnifies a portrait monitor
+as though it were landscape, which is what it looked like: the wrong region,
+the wrong way round, and the view running off the end of one axis while
+clamping on the other.
+
+`DXGI_OUTDUPL_DESC` is not the place to look for the surface size, incidentally.
+It reports `ModeDesc` **rotated** — 1080x1920, matching the desktop — while the
+texture `AcquireNextFrame` returns is 1920x1080. Only `D3D11_TEXTURE2D_DESC` is
+authoritative, which is why `ComputeSourceUv` takes the texture's dimensions and
+derives the desktop extent from them rather than the other way round.
+
+Everything else in the codebase works in desktop coordinates and stays that
+way: `ViewportController`, the source rect, the cursor sprite, the overlay and
+its swap chain. The rotation is absorbed in the one place that reads the
+texture. `RenderFrame` used to send the shader a UV origin plus an extent,
+which can only express a scale; it now sends two UV axis vectors, and a
+quarter turn is a matter of which way those axes point.
+
+| `DXGI_MODE_ROTATION` | desktop → texture | desktop extent |
+|---|---|---|
+| `IDENTITY` / `UNSPECIFIED` | `u = x`, `v = y` | `texW x texH` |
+| `ROTATE90` | `u = y`, `v = texH - x` | `texH x texW` |
+| `ROTATE180` | `u = texW - x`, `v = texH - y` | `texW x texH` |
+| `ROTATE270` | `u = texW - y`, `v = x` | `texH x texW` |
+
+**Which way each enum turns was measured, not read.** The documentation is
+ambiguous about the direction, and a 90-degree sign error looks plausible from
+either side. A `ROTATE270` output's texture was resampled with every candidate
+mapping and scored against a GDI screenshot of the same monitor: the
+counter-clockwise one reproduced it exactly, mean |difference| 0.00 per
+channel, against 40 to 51 for the others. Those corner positions are now
+asserted individually in `D3DRendererSelfCheck`, so the sign cannot drift.
+
+`DXGICapture` re-reads the orientation in `Reinitialize` as well as
+`Initialize`. Rotating a display costs the duplication session and comes back
+through recovery, and carrying the old orientation across would leave the
+monitor sideways until a restart.
+
 ## Edge-push panning and the composite cursor
 
 The view holds still while the cursor moves inside it and scrolls once the
@@ -317,6 +361,14 @@ layer, so no key was ever actually injected — the failure looked like an app
 bug and was a test-harness bug. The hooks now ignore `LLKHF_INJECTED` /
 `LLMHF_INJECTED` input by default so automation cannot drive the app at all;
 `BM_ALLOW_INJECTED=1` re-enables it deliberately, for verification.
+
+**A capture API's reported size is not necessarily its buffer's size.**
+`DXGICapture` took its dimensions from `DesktopCoordinates` and the renderer
+took its from the texture, and for years those agreed — because every monitor
+tested was landscape. On the first rotated one they disagreed by a transpose,
+and neither side was wrong on its own terms; the bug lived in the assumption
+that the two were interchangeable. Where two sources describe the same thing,
+it is worth asking what makes them differ before treating either as the size.
 
 **Write-only state is a bug with a grace period, not a harmless leftover.**
 A follow mode wrote a field that nothing had read for some time, and stayed

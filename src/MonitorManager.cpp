@@ -246,10 +246,20 @@ bool MonitorManager::MatchDXGIOutputs()
                     mon.dxgiOutput   = output;
                     anyMatched = true;
 
-                    LOG_INFO("    Output {} -> {} (Adapter {})",
+                    // Rotation is logged rather than stored: only the renderer
+                    // needs it and it takes it from DXGICapture, which re-reads
+                    // it on recovery. Here it is the first thing worth seeing
+                    // when a portrait monitor misbehaves.
+                    const char* rot =
+                        (outputDesc.Rotation == DXGI_MODE_ROTATION_ROTATE90)  ? "90"  :
+                        (outputDesc.Rotation == DXGI_MODE_ROTATION_ROTATE180) ? "180" :
+                        (outputDesc.Rotation == DXGI_MODE_ROTATION_ROTATE270) ? "270" : "none";
+
+                    LOG_INFO("    Output {} -> {} (Adapter {}, rotation {})",
                         outputIdx,
                         ToUtf8(mon.deviceName),
-                        adapterIdx);
+                        adapterIdx,
+                        rot);
                     break;
                 }
             }

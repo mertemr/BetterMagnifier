@@ -16,6 +16,18 @@ namespace {
 // every DuplicateOutput call fails, so retrying per frame only spams the log.
 constexpr auto kReinitInterval = std::chrono::milliseconds(500);
 
+const char* RotationName(DXGI_MODE_ROTATION rotation)
+{
+    switch (rotation)
+    {
+    case DXGI_MODE_ROTATION_IDENTITY:  return "none";
+    case DXGI_MODE_ROTATION_ROTATE90:  return "90";
+    case DXGI_MODE_ROTATION_ROTATE180: return "180";
+    case DXGI_MODE_ROTATION_ROTATE270: return "270";
+    default:                           return "unspecified";
+    }
+}
+
 } // namespace
 
 DXGICapture::~DXGICapture()
@@ -33,6 +45,7 @@ DXGICapture::DXGICapture(DXGICapture&& other) noexcept
     , m_needsReinit(other.m_needsReinit)
     , m_width(other.m_width)
     , m_height(other.m_height)
+    , m_rotation(other.m_rotation)
     , m_frameCount(other.m_frameCount)
     , m_errorCount(other.m_errorCount)
     , m_lastReinitAttempt(other.m_lastReinitAttempt)
@@ -57,6 +70,7 @@ DXGICapture& DXGICapture::operator=(DXGICapture&& other) noexcept
         m_needsReinit       = other.m_needsReinit;
         m_width             = other.m_width;
         m_height            = other.m_height;
+        m_rotation          = other.m_rotation;
         m_frameCount        = other.m_frameCount;
         m_errorCount        = other.m_errorCount;
         m_lastReinitAttempt = other.m_lastReinitAttempt;
@@ -90,10 +104,16 @@ bool DXGICapture::Initialize(ID3D11Device* device, IDXGIOutput* output)
         return false;
     }
 
+    // DesktopCoordinates, so m_width/m_height are DESKTOP dimensions. That is
+    // what the rest of the application works in, and on a rotated output it is
+    // not the size of the texture AcquireFrame returns — the panel's own,
+    // unrotated resolution, with the axes the other way round. The renderer is
+    // told the rotation and resolves the difference there.
     DXGI_OUTPUT_DESC outputDesc{};
     m_output1->GetDesc(&outputDesc);
     m_width  = static_cast<UINT>(outputDesc.DesktopCoordinates.right - outputDesc.DesktopCoordinates.left);
     m_height = static_cast<UINT>(outputDesc.DesktopCoordinates.bottom - outputDesc.DesktopCoordinates.top);
+    m_rotation = outputDesc.Rotation;
 
     // Subscribes to the monitor's desktop composition.
     //
@@ -126,7 +146,8 @@ bool DXGICapture::Initialize(ID3D11Device* device, IDXGIOutput* output)
     m_frameCount  = 0;
     m_errorCount  = 0;
 
-    LOG_INFO("DXGICapture started: {}x{}", m_width, m_height);
+    LOG_INFO("DXGICapture started: {}x{} desktop, rotation {}",
+        m_width, m_height, RotationName(m_rotation));
     return true;
 }
 
@@ -252,6 +273,15 @@ bool DXGICapture::Reinitialize()
     }
     m_duplication.Reset();
 
+    // Re-read rather than trust what Initialize saw. Rotating a display drops
+    // the duplication session and comes back through here; keeping the old
+    // orientation would leave the monitor sideways until the next restart.
+    DXGI_OUTPUT_DESC outputDesc{};
+    m_output1->GetDesc(&outputDesc);
+    m_width  = static_cast<UINT>(outputDesc.DesktopCoordinates.right - outputDesc.DesktopCoordinates.left);
+    m_height = static_cast<UINT>(outputDesc.DesktopCoordinates.bottom - outputDesc.DesktopCoordinates.top);
+    m_rotation = outputDesc.Rotation;
+
     HRESULT hr = m_output1->DuplicateOutput(m_device, &m_duplication);
     if (FAILED(hr))
     {
@@ -265,7 +295,8 @@ bool DXGICapture::Reinitialize()
     m_needsReinit = false;
     m_errorCount  = 0;
 
-    LOG_INFO("DXGICapture recovered ({}x{})", m_width, m_height);
+    LOG_INFO("DXGICapture recovered ({}x{} desktop, rotation {})",
+        m_width, m_height, RotationName(m_rotation));
     return true;
 }
 
