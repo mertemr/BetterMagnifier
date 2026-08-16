@@ -5,6 +5,9 @@
 #include "Logger.h"
 
 #include <winhttp.h>
+#include <bcrypt.h>
+#include <wintrust.h>
+#include <softpub.h>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -131,14 +134,23 @@ public:
     operator HINTERNET() const { return m_h; }
     explicit operator bool() const { return m_h != nullptr; }
 
+    void Reset(HINTERNET h)
+    {
+        if (m_h)
+            WinHttpCloseHandle(m_h);
+        m_h = h;
+    }
+
 private:
     HINTERNET m_h = nullptr;
 };
 
-// GET the URL and append the body to `out`. Quiet about why it failed: every
-// caller treats every failure alike, and the log line is for us.
-bool HttpGet(std::wstring_view url, std::wstring_view extraHeaders,
-             std::string& out, uint64_t maxBytes)
+// Opens a GET and reads the response headers, leaving the handles with the
+// caller so the body can be accumulated or streamed. The download needs the
+// same setup as the feed fetch but must not build the body in memory.
+bool OpenGetRequest(std::wstring_view url, std::wstring_view extraHeaders,
+                    WinHttpHandle& session, WinHttpHandle& connect,
+                    WinHttpHandle& request)
 {
     const std::wstring urlCopy(url);
 
@@ -146,11 +158,11 @@ bool HttpGet(std::wstring_view url, std::wstring_view extraHeaders,
     wchar_t path[2048]{};
 
     URL_COMPONENTS parts{};
-    parts.dwStructSize      = sizeof(parts);
-    parts.lpszHostName      = host;
-    parts.dwHostNameLength  = ARRAYSIZE(host);
-    parts.lpszUrlPath       = path;
-    parts.dwUrlPathLength   = ARRAYSIZE(path);
+    parts.dwStructSize     = sizeof(parts);
+    parts.lpszHostName     = host;
+    parts.dwHostNameLength = ARRAYSIZE(host);
+    parts.lpszUrlPath      = path;
+    parts.dwUrlPathLength  = ARRAYSIZE(path);
 
     if (!WinHttpCrackUrl(urlCopy.c_str(), 0, 0, &parts))
     {
@@ -158,10 +170,8 @@ bool HttpGet(std::wstring_view url, std::wstring_view extraHeaders,
         return false;
     }
 
-    WinHttpHandle session{ WinHttpOpen(kUserAgent,
-                                       WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                                       WINHTTP_NO_PROXY_NAME,
-                                       WINHTTP_NO_PROXY_BYPASS, 0) };
+    session.Reset(WinHttpOpen(kUserAgent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session)
     {
         LOG_WARN("Update: WinHttpOpen failed, error {}", GetLastError());
@@ -174,16 +184,17 @@ bool HttpGet(std::wstring_view url, std::wstring_view extraHeaders,
                        static_cast<int>(kTotalTimeoutMs),
                        static_cast<int>(kTotalTimeoutMs));
 
-    WinHttpHandle connect{ WinHttpConnect(session, host, parts.nPort, 0) };
+    connect.Reset(WinHttpConnect(session, host, parts.nPort, 0));
     if (!connect)
     {
         LOG_WARN("Update: WinHttpConnect failed, error {}", GetLastError());
         return false;
     }
 
-    WinHttpHandle request{ WinHttpOpenRequest(
-        connect, L"GET", path, nullptr, WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) };
+    request.Reset(WinHttpOpenRequest(connect, L"GET", path, nullptr,
+                                     WINHTTP_NO_REFERER,
+                                     WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                     WINHTTP_FLAG_SECURE));
     if (!request)
     {
         LOG_WARN("Update: WinHttpOpenRequest failed, error {}", GetLastError());
@@ -223,6 +234,18 @@ bool HttpGet(std::wstring_view url, std::wstring_view extraHeaders,
         return false;
     }
 
+    return true;
+}
+
+// GET the URL and append the body to `out`. Quiet about why it failed: every
+// caller treats every failure alike, and the log line is for us.
+bool HttpGet(std::wstring_view url, std::wstring_view extraHeaders,
+             std::string& out, uint64_t maxBytes)
+{
+    WinHttpHandle session, connect, request;
+    if (!OpenGetRequest(url, extraHeaders, session, connect, request))
+        return false;
+
     for (;;)
     {
         DWORD available = 0;
@@ -256,6 +279,245 @@ bool HttpGet(std::wstring_view url, std::wstring_view extraHeaders,
     }
 
     return true;
+}
+
+// Streams a URL to a file, reporting progress as a percentage. Writes to
+// <dest>.part and renames on success: the rename is the only thing that makes
+// the file exist under the name the installer is launched from, so an
+// interrupted download cannot be mistaken for a finished one.
+bool DownloadToFile(std::wstring_view url, const std::filesystem::path& dest,
+                    uint64_t expectedSize,
+                    const std::function<void(int)>& onProgress,
+                    const std::atomic<bool>& cancel)
+{
+    if (expectedSize == 0)
+    {
+        LOG_ERROR("Update: the release does not state the installer's size, refusing");
+        return false;
+    }
+
+    WinHttpHandle session, connect, request;
+    if (!OpenGetRequest(url, {}, session, connect, request))
+        return false;
+
+    std::filesystem::path partPath = dest;
+    partPath += L".part";
+
+    std::error_code ec;
+    std::filesystem::remove(partPath, ec);
+
+    {
+        std::ofstream out(partPath, std::ios::binary | std::ios::trunc);
+        if (!out)
+        {
+            LOG_ERROR("Update: could not open {} for writing", ToUtf8(partPath.wstring()));
+            return false;
+        }
+
+        std::vector<char> buffer(64 * 1024);
+        uint64_t written    = 0;
+        int      lastPct    = -1;
+
+        for (;;)
+        {
+            if (cancel.load(std::memory_order_acquire))
+            {
+                LOG_WARN("Update: download cancelled");
+                return false;
+            }
+
+            DWORD available = 0;
+            if (!WinHttpQueryDataAvailable(request, &available))
+            {
+                LOG_ERROR("Update: read failed, error {}", GetLastError());
+                return false;
+            }
+            if (available == 0)
+                break;
+
+            while (available > 0)
+            {
+                const DWORD want =
+                    (available < buffer.size()) ? available : static_cast<DWORD>(buffer.size());
+
+                DWORD read = 0;
+                if (!WinHttpReadData(request, buffer.data(), want, &read))
+                {
+                    LOG_ERROR("Update: read failed, error {}", GetLastError());
+                    return false;
+                }
+                if (read == 0)
+                    break;
+
+                // Checked as it arrives: a response that runs past the size
+                // the release states is not the file we asked for, and there
+                // is no reason to spool the rest of it to disk first.
+                written += read;
+                if (written > expectedSize)
+                {
+                    LOG_ERROR("Update: the download is larger than the {} bytes "
+                              "the release states, refusing", expectedSize);
+                    return false;
+                }
+
+                out.write(buffer.data(), static_cast<std::streamsize>(read));
+                if (!out)
+                {
+                    LOG_ERROR("Update: write failed - is the disk full?");
+                    return false;
+                }
+
+                available -= read;
+
+                const int pct = static_cast<int>((written * 100) / expectedSize);
+                if (pct != lastPct)
+                {
+                    lastPct = pct;
+                    if (onProgress)
+                        onProgress(pct);
+                }
+            }
+        }
+
+        if (written != expectedSize)
+        {
+            LOG_ERROR("Update: got {} bytes, the release states {}",
+                      written, expectedSize);
+            return false;
+        }
+    }
+
+    std::filesystem::remove(dest, ec);
+    std::filesystem::rename(partPath, dest, ec);
+    if (ec)
+    {
+        LOG_ERROR("Update: could not rename the download into place");
+        return false;
+    }
+
+    return true;
+}
+
+// SHA-256 of a file. Empty vector on any failure, which every caller reads as
+// "do not run this".
+std::vector<unsigned char> Sha256File(const std::filesystem::path& path)
+{
+    BCRYPT_ALG_HANDLE  alg  = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+
+    const auto cleanup = [&]() {
+        if (hash) BCryptDestroyHash(hash);
+        if (alg)  BCryptCloseAlgorithmProvider(alg, 0);
+    };
+
+    if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(
+            &alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0)))
+        return {};
+
+    DWORD objectLen = 0;
+    DWORD hashLen   = 0;
+    DWORD written   = 0;
+
+    if (!BCRYPT_SUCCESS(BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH,
+            reinterpret_cast<PUCHAR>(&objectLen), sizeof(objectLen), &written, 0)) ||
+        !BCRYPT_SUCCESS(BCryptGetProperty(alg, BCRYPT_HASH_LENGTH,
+            reinterpret_cast<PUCHAR>(&hashLen), sizeof(hashLen), &written, 0)))
+    {
+        cleanup();
+        return {};
+    }
+
+    std::vector<unsigned char> object(objectLen);
+    std::vector<unsigned char> digest(hashLen);
+
+    if (!BCRYPT_SUCCESS(BCryptCreateHash(alg, &hash, object.data(), objectLen,
+                                         nullptr, 0, 0)))
+    {
+        cleanup();
+        return {};
+    }
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+    {
+        cleanup();
+        return {};
+    }
+
+    std::vector<char> buffer(64 * 1024);
+    while (in)
+    {
+        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize got = in.gcount();
+        if (got <= 0)
+            break;
+
+        if (!BCRYPT_SUCCESS(BCryptHashData(hash,
+                reinterpret_cast<PUCHAR>(buffer.data()),
+                static_cast<ULONG>(got), 0)))
+        {
+            cleanup();
+            return {};
+        }
+    }
+
+    if (!BCRYPT_SUCCESS(BCryptFinishHash(hash, digest.data(), hashLen, 0)))
+    {
+        cleanup();
+        return {};
+    }
+
+    cleanup();
+    return digest;
+}
+
+// True when the file is unsigned, or is signed and the signature is trusted.
+//
+// Unsigned passes on purpose: releases are not signed yet, and refusing them
+// would ship an updater that can never update anything. A signature that IS
+// present and does NOT verify is refused — that is the case an attacker
+// produces — and a certificate turns the rest on with no code change.
+bool VerifySignatureIfPresent(const std::filesystem::path& path)
+{
+    const std::wstring pathStr = path.wstring();
+
+    WINTRUST_FILE_INFO file{};
+    file.cbStruct      = sizeof(file);
+    file.pcwszFilePath = pathStr.c_str();
+
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+
+    WINTRUST_DATA data{};
+    data.cbStruct            = sizeof(data);
+    data.dwUIChoice          = WTD_UI_NONE;
+    data.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;
+    data.dwUnionChoice       = WTD_CHOICE_FILE;
+    data.pFile               = &file;
+    data.dwStateAction       = WTD_STATEACTION_VERIFY;
+    data.dwProvFlags         = WTD_SAFER_FLAG;
+
+    const LONG result = WinVerifyTrust(
+        static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &action, &data);
+
+    if (result == ERROR_SUCCESS)
+    {
+        LOG_INFO("Update: the installer's signature verified");
+        return true;
+    }
+
+    if (result == TRUST_E_NOSIGNATURE)
+    {
+        LOG_WARN("Update: the installer is unsigned - accepted, because releases "
+                 "are not signed yet; SHA-256 is the only integrity check here");
+        return true;
+    }
+
+    LOG_ERROR("Update: signature verification FAILED (0x{:08X}), refusing",
+              static_cast<unsigned>(result));
+    return false;
 }
 
 } // namespace
@@ -521,6 +783,11 @@ bool IsInstalledCopy()
 // Staging
 // =============================================================================
 
+std::string Sha256FileHex(const std::filesystem::path& path)
+{
+    return HexEncodeLower(Sha256File(path));
+}
+
 std::filesystem::path UpdateStagingDir()
 {
     wchar_t temp[MAX_PATH]{};
@@ -649,11 +916,21 @@ void UpdateChecker::RequestCheck(bool force)
 
 void UpdateChecker::RequestInstall()
 {
-    // Filled in by the download-and-verify work. Declared and reachable now so
-    // the message route from the panel and the tray can be built and exercised
-    // before the thing at the end of it exists.
-    LOG_WARN("Update: install requested, but the installer path is not built yet");
-    PublishState(UpdateState::Failed);
+    if (!m_wake)
+        return;
+
+    if (!IsInstalledCopy())
+    {
+        // A portable copy has no installed location for a setup to replace, so
+        // there is nothing sensible for this to do. The notification is still
+        // worth showing — the user can download the new release by hand.
+        LOG_WARN("Update: not an installed copy, refusing to self-install");
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    m_installRequested.store(true, std::memory_order_release);
+    SetEvent(m_wake);
 }
 
 bool UpdateChecker::LatestRelease(ReleaseInfo& out) const
@@ -689,6 +966,13 @@ void UpdateChecker::ThreadMain()
 
         if (m_stopping.load(std::memory_order_acquire))
             break;
+
+        // A button press outranks a timer.
+        if (m_installRequested.exchange(false, std::memory_order_acq_rel))
+        {
+            RunInstall();
+            continue;
+        }
 
         if (m_checkRequested.exchange(false, std::memory_order_acq_rel))
             RunCheck();
@@ -730,6 +1014,138 @@ void UpdateChecker::RunCheck()
              newer ? "update available" : "up to date");
 
     PublishState(newer ? UpdateState::Available : UpdateState::UpToDate);
+}
+
+void UpdateChecker::RunInstall()
+{
+    ReleaseInfo info;
+    if (!LatestRelease(info))
+    {
+        LOG_ERROR("Update: asked to install with no release in hand");
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    // Re-checked here as well as at parse: this is the call that decides where
+    // we connect and what we execute.
+    if (!IsTrustedDownloadUrl(info.setup.url))
+    {
+        LOG_ERROR("Update: the setup URL is not on a GitHub host, refusing");
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    // Without a digest there is nothing to verify against, and the whole
+    // integrity story rests on it.
+    if (info.sums.url.empty() || !IsTrustedDownloadUrl(info.sums.url))
+    {
+        LOG_ERROR("Update: the release has no usable SHA256SUMS.txt, refusing");
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    const std::filesystem::path dir = UpdateStagingDir();
+    if (dir.empty())
+    {
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+
+    const std::filesystem::path setupPath = dir / info.setup.name;
+
+    PublishState(UpdateState::Downloading);
+
+    const bool downloaded = DownloadToFile(
+        info.setup.url, setupPath, info.setup.size,
+        [this](int pct)
+        {
+            if (m_status)
+                m_status->updateProgressPct.store(pct, std::memory_order_release);
+        },
+        m_stopping);
+
+    if (!downloaded)
+    {
+        std::filesystem::remove(setupPath, ec);
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    PublishState(UpdateState::Verifying);
+
+    std::string sums;
+    if (!HttpGet(info.sums.url, {}, sums, 64u * 1024u))
+    {
+        LOG_ERROR("Update: could not fetch SHA256SUMS.txt");
+        std::filesystem::remove(setupPath, ec);
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    std::string expected;
+    if (!ParseSha256Sums(sums, info.setup.name, expected))
+    {
+        LOG_ERROR("Update: SHA256SUMS.txt has no entry for {}",
+                  ToUtf8(info.setup.name));
+        std::filesystem::remove(setupPath, ec);
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    const std::string actual = Sha256FileHex(setupPath);
+
+    if (actual.empty() || actual != expected)
+    {
+        LOG_ERROR("Update: digest mismatch - expected {}, got {}",
+                  expected, actual.empty() ? std::string("<hash failed>") : actual);
+        std::filesystem::remove(setupPath, ec);
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    LOG_INFO("Update: digest verified");
+
+    if (!VerifySignatureIfPresent(setupPath))
+    {
+        std::filesystem::remove(setupPath, ec);
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    PublishState(UpdateState::Ready);
+
+    // /S is the silent install; /RELAUNCH starts the new build once it is in
+    // place. No UAC prompt: this process is already elevated, so the child
+    // inherits it.
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask  = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"open";
+
+    const std::wstring setupStr = setupPath.wstring();
+    sei.lpFile       = setupStr.c_str();
+    sei.lpParameters = L"/S /RELAUNCH";
+    sei.nShow        = SW_SHOWNORMAL;
+
+    if (!ShellExecuteExW(&sei))
+    {
+        LOG_ERROR("Update: could not launch the installer, error {}", GetLastError());
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    if (sei.hProcess)
+        CloseHandle(sei.hProcess);
+
+    LOG_INFO("Update: installer launched, exiting so it can replace our files");
+
+    // The installer cannot overwrite a running exe. WM_CLOSE is answered with
+    // PostQuitMessage, so this is the ordinary shutdown path.
+    if (m_engineHwnd)
+        PostMessageW(m_engineHwnd, WM_CLOSE, 0, 0);
 }
 
 #ifdef _DEBUG
@@ -941,6 +1357,43 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(!PathsNameSameDirectory(L"", L"C:\\x"));
         BM_SELFCHECK(!PathsNameSameDirectory(L"C:\\x", L""));
         BM_SELFCHECK(!PathsNameSameDirectory(L"", L""));
+    }
+
+    // ── 11. Sha256FileHex against the NIST vectors ──
+    //
+    // Asserts the BCrypt wiring rather than any logic of ours. That is the
+    // point: this digest decides whether a downloaded installer gets executed,
+    // and "the crypto is hooked up" is a bad thing to learn from a failed
+    // update on someone's machine.
+    {
+        std::error_code ec;
+        const auto tmp = std::filesystem::temp_directory_path(ec)
+                       / L"BetterMagnifier-selfcheck-sha256.bin";
+
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            BM_SELFCHECK(static_cast<bool>(out));
+            out << "abc";
+        }
+
+        BM_SELFCHECK(Sha256FileHex(tmp) ==
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+        // Also a known constant, and it catches a chunked read that skips the
+        // final block.
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            BM_SELFCHECK(static_cast<bool>(out));
+        }
+
+        BM_SELFCHECK(Sha256FileHex(tmp) ==
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+
+        std::filesystem::remove(tmp, ec);
+
+        // A path that does not exist hashes to nothing, never to a digest that
+        // might accidentally match.
+        BM_SELFCHECK(Sha256FileHex(tmp).empty());
     }
 
     LOG_INFO("UpdateChecker self-check passed");

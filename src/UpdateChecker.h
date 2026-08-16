@@ -66,6 +66,11 @@ bool IsTrustedDownloadUrl(std::wstring_view url);
 // Lowercase hex, no separators — the form SHA256SUMS.txt uses.
 std::string HexEncodeLower(const std::vector<unsigned char>& bytes);
 
+// SHA-256 of a file as lowercase hex; empty on failure, which callers read as
+// "do not run this". Public only so the self-check can assert it against a
+// known vector — this decides whether a downloaded binary gets executed.
+std::string Sha256FileHex(const std::filesystem::path& path);
+
 // Same directory, compared the way Windows compares paths: case-insensitively,
 // ignoring a trailing separator. Split out of IsInstalledCopy so the decision
 // can be asserted without a registry.
@@ -124,10 +129,12 @@ private:
     void ThreadMain();
     void PublishState(UpdateState state);
     void RunCheck();
+    void RunInstall();
 
     std::thread       m_thread;
     std::atomic<bool> m_stopping{false};
     std::atomic<bool> m_checkRequested{false};
+    std::atomic<bool> m_installRequested{false};
 
     // Signalled by RequestCheck and by Stop, so the worker never polls.
     HANDLE m_wake = nullptr;
