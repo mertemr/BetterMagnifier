@@ -12,6 +12,7 @@
 #include "CursorRenderer.h"
 #include "OsdRenderer.h"
 #include "UpdateChecker.h"
+#include "Version.h"
 #include "Logger.h"
 
 #include <cwchar>
@@ -83,7 +84,8 @@ int WINAPI wWinMain(
     const bool diagnosticRun =
         std::wcsstr(GetCommandLineW(), L"--self-check")   != nullptr ||
         std::wcsstr(GetCommandLineW(), L"--dump-cursors") != nullptr ||
-        std::wcsstr(GetCommandLineW(), L"--dump-osd")     != nullptr;
+        std::wcsstr(GetCommandLineW(), L"--dump-osd")     != nullptr ||
+        std::wcsstr(GetCommandLineW(), L"--check-update") != nullptr;
 
     HANDLE singleInstance = nullptr;
     if (!diagnosticRun)
@@ -286,6 +288,38 @@ int WINAPI wWinMain(
         return failures == 0 ? 0 : 3;
     }
 #endif
+
+    // Outside the #ifdef _DEBUG above, unlike the other three: the binary worth
+    // asking about its update state is the one that ships, and that is Release.
+    // It opens no window and installs no hook, so the mutex exemption costs
+    // nothing.
+    //
+    //   0  up to date        2  update available        3  the check failed
+    if (std::wcsstr(GetCommandLineW(), L"--check-update") != nullptr)
+    {
+        const std::wstring feed = BetterMagnifier::UpdateFeedUrl();
+        LOG_INFO("Update check against {}", ToUtf8(feed));
+
+        BetterMagnifier::ReleaseInfo info;
+        if (!BetterMagnifier::FetchLatestRelease(feed, info))
+        {
+            LOG_ERROR("Update check FAILED");
+            return 3;
+        }
+
+        LOG_INFO("Update check: running {}, latest {}, setup {} ({} bytes)",
+                 BM_VERSION_STRING, ToUtf8(info.version),
+                 ToUtf8(info.setup.name), info.setup.size);
+
+        if (BetterMagnifier::CompareVersion(info.version, BM_VERSION_STRING_W) > 0)
+        {
+            LOG_INFO("Update check: UPDATE AVAILABLE");
+            return 2;
+        }
+
+        LOG_INFO("Update check: up to date");
+        return 0;
+    }
 
     // App owns everything past this point. The extra scope is load-bearing: its
     // destructor releases D3D and DXGI interfaces, and those must go while COM

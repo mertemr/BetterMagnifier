@@ -1,7 +1,10 @@
 #include "pch.h"
 #include "UpdateChecker.h"
+#include "AppMessages.h"
 #include "Version.h"
 #include "Logger.h"
+
+#include <winhttp.h>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -75,6 +78,164 @@ void ParseTriple(std::wstring_view v, int out[3])
     }
 
     out[index] = seen ? acc : 0;
+}
+
+// ── HTTP ─────────────────────────────────────────────────────────────────────
+
+constexpr wchar_t kDefaultFeed[] =
+    L"https://api.github.com/repos/mertemr/BetterMagnifier/releases/latest";
+
+// GitHub answers 403 without a User-Agent. Not a nicety — it is documented API
+// policy, and from the outside the failure looks like nothing at all.
+constexpr wchar_t kUserAgent[] = L"BetterMagnifier/" BM_VERSION_STRING_W;
+
+constexpr DWORD kConnectTimeoutMs = 10000;
+constexpr DWORD kTotalTimeoutMs   = 30000;
+
+// 4 MB. A release feed is a few kilobytes; anything approaching this is not a
+// response we should be assembling in memory.
+constexpr uint64_t kMaxFeedBytes = 4ull * 1024 * 1024;
+
+// RAII for HINTERNET. WinHTTP hands out four of these per request and every
+// early return below would otherwise have to remember all of them.
+class WinHttpHandle
+{
+public:
+    WinHttpHandle() = default;
+    explicit WinHttpHandle(HINTERNET h) : m_h(h) {}
+    ~WinHttpHandle() { if (m_h) WinHttpCloseHandle(m_h); }
+
+    WinHttpHandle(const WinHttpHandle&)            = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+
+    operator HINTERNET() const { return m_h; }
+    explicit operator bool() const { return m_h != nullptr; }
+
+private:
+    HINTERNET m_h = nullptr;
+};
+
+// GET the URL and append the body to `out`. Quiet about why it failed: every
+// caller treats every failure alike, and the log line is for us.
+bool HttpGet(std::wstring_view url, std::wstring_view extraHeaders,
+             std::string& out, uint64_t maxBytes)
+{
+    const std::wstring urlCopy(url);
+
+    wchar_t host[256]{};
+    wchar_t path[2048]{};
+
+    URL_COMPONENTS parts{};
+    parts.dwStructSize      = sizeof(parts);
+    parts.lpszHostName      = host;
+    parts.dwHostNameLength  = ARRAYSIZE(host);
+    parts.lpszUrlPath       = path;
+    parts.dwUrlPathLength   = ARRAYSIZE(path);
+
+    if (!WinHttpCrackUrl(urlCopy.c_str(), 0, 0, &parts))
+    {
+        LOG_WARN("Update: could not parse the URL");
+        return false;
+    }
+
+    WinHttpHandle session{ WinHttpOpen(kUserAgent,
+                                       WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                       WINHTTP_NO_PROXY_NAME,
+                                       WINHTTP_NO_PROXY_BYPASS, 0) };
+    if (!session)
+    {
+        LOG_WARN("Update: WinHttpOpen failed, error {}", GetLastError());
+        return false;
+    }
+
+    WinHttpSetTimeouts(session,
+                       static_cast<int>(kConnectTimeoutMs),
+                       static_cast<int>(kConnectTimeoutMs),
+                       static_cast<int>(kTotalTimeoutMs),
+                       static_cast<int>(kTotalTimeoutMs));
+
+    WinHttpHandle connect{ WinHttpConnect(session, host, parts.nPort, 0) };
+    if (!connect)
+    {
+        LOG_WARN("Update: WinHttpConnect failed, error {}", GetLastError());
+        return false;
+    }
+
+    WinHttpHandle request{ WinHttpOpenRequest(
+        connect, L"GET", path, nullptr, WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) };
+    if (!request)
+    {
+        LOG_WARN("Update: WinHttpOpenRequest failed, error {}", GetLastError());
+        return false;
+    }
+
+    if (!WinHttpSendRequest(
+            request,
+            extraHeaders.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : extraHeaders.data(),
+            extraHeaders.empty() ? 0 : static_cast<DWORD>(extraHeaders.size()),
+            WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
+    {
+        LOG_WARN("Update: the request failed, error {}", GetLastError());
+        return false;
+    }
+
+    if (!WinHttpReceiveResponse(request, nullptr))
+    {
+        LOG_WARN("Update: no response, error {}", GetLastError());
+        return false;
+    }
+
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    if (!WinHttpQueryHeaders(request,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
+            WINHTTP_NO_HEADER_INDEX))
+    {
+        LOG_WARN("Update: could not read the status code");
+        return false;
+    }
+
+    if (status != 200)
+    {
+        LOG_WARN("Update: HTTP {}", status);
+        return false;
+    }
+
+    for (;;)
+    {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(request, &available))
+        {
+            LOG_WARN("Update: read failed, error {}", GetLastError());
+            return false;
+        }
+        if (available == 0)
+            break;
+
+        const size_t before = out.size();
+        if (before + available > maxBytes)
+        {
+            LOG_WARN("Update: the response exceeded {} bytes, refusing", maxBytes);
+            return false;
+        }
+
+        out.resize(before + available);
+
+        DWORD read = 0;
+        if (!WinHttpReadData(request, out.data() + before, available, &read))
+        {
+            LOG_WARN("Update: read failed, error {}", GetLastError());
+            return false;
+        }
+
+        out.resize(before + read);
+        if (read == 0)
+            break;
+    }
+
+    return true;
 }
 
 } // namespace
@@ -322,6 +483,189 @@ bool IsInstalledCopy()
     return PathsNameSameDirectory(exeDir.wstring(), installDir);
 }
 
+// =============================================================================
+// The feed
+// =============================================================================
+
+std::wstring UpdateFeedUrl()
+{
+    wchar_t buf[512]{};
+    if (GetEnvironmentVariableW(L"BM_UPDATE_FEED", buf, ARRAYSIZE(buf)) > 0)
+        return buf;
+
+    return kDefaultFeed;
+}
+
+bool FetchLatestRelease(std::wstring_view feedUrl, ReleaseInfo& out)
+{
+    std::string body;
+    if (!HttpGet(feedUrl, L"Accept: application/vnd.github+json\r\n",
+                 body, kMaxFeedBytes))
+        return false;
+
+    ReleaseInfo info;
+    if (!ParseRelease(body, info))
+    {
+        LOG_WARN("Update: the feed did not parse as a release with an installer");
+        return false;
+    }
+
+    // Checked here as well as at the point of download. The URL comes out of a
+    // document we do not control, and this is the earliest place we can refuse
+    // it.
+    if (!IsTrustedDownloadUrl(info.setup.url))
+    {
+        LOG_ERROR("Update: the setup URL is not on a GitHub host, refusing");
+        return false;
+    }
+
+    out = std::move(info);
+    return true;
+}
+
+// =============================================================================
+// UpdateChecker — the worker thread
+// =============================================================================
+
+UpdateChecker::~UpdateChecker()
+{
+    Stop();
+}
+
+void UpdateChecker::Start(HWND engineHwnd, StatusSnapshot* status)
+{
+    if (m_thread.joinable())
+        return;
+
+    m_engineHwnd = engineHwnd;
+    m_status     = status;
+
+    m_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!m_wake)
+    {
+        // Not fatal. Magnification is the product; update checking is not.
+        LOG_WARN("Update: could not create the wake event, checks are off");
+        return;
+    }
+
+    m_thread = std::thread(&UpdateChecker::ThreadMain, this);
+    LOG_INFO("Update: checker thread started");
+}
+
+void UpdateChecker::Stop()
+{
+    if (!m_thread.joinable())
+    {
+        if (m_wake)
+        {
+            CloseHandle(m_wake);
+            m_wake = nullptr;
+        }
+        return;
+    }
+
+    m_stopping.store(true, std::memory_order_release);
+    SetEvent(m_wake);
+
+    // Joined flat, unlike ControlPanel::Stop: the worst this thread can be
+    // doing is sitting in WinHTTP, bounded by the timeouts above.
+    m_thread.join();
+
+    CloseHandle(m_wake);
+    m_wake = nullptr;
+
+    LOG_INFO("Update: checker thread stopped");
+}
+
+void UpdateChecker::RequestCheck(bool force)
+{
+    if (!m_wake)
+        return;
+
+    // The 24-hour floor lives in App, next to the settings that describe it;
+    // `force` is accepted so callers read the same either way.
+    (void)force;
+
+    m_checkRequested.store(true, std::memory_order_release);
+    SetEvent(m_wake);
+}
+
+bool UpdateChecker::LatestRelease(ReleaseInfo& out) const
+{
+    std::scoped_lock lock(m_resultLock);
+
+    if (!m_haveLatest)
+        return false;
+
+    out = m_latest;
+    return true;
+}
+
+void UpdateChecker::PublishState(UpdateState state)
+{
+    if (m_status)
+        m_status->updateState.store(static_cast<int>(state), std::memory_order_release);
+
+    if (m_engineHwnd)
+        PostMessageW(m_engineHwnd, WM_APP_UPDATE_STATE,
+                     static_cast<WPARAM>(state), 0);
+}
+
+void UpdateChecker::ThreadMain()
+{
+    // Windows.Data.Json is a WinRT type and needs an apartment. MTA, matching
+    // the main thread: an STA would want a message pump this loop has not got.
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+
+    while (!m_stopping.load(std::memory_order_acquire))
+    {
+        WaitForSingleObject(m_wake, INFINITE);
+
+        if (m_stopping.load(std::memory_order_acquire))
+            break;
+
+        if (m_checkRequested.exchange(false, std::memory_order_acq_rel))
+            RunCheck();
+    }
+
+    winrt::uninit_apartment();
+}
+
+void UpdateChecker::RunCheck()
+{
+    PublishState(UpdateState::Checking);
+
+    ReleaseInfo info;
+    if (!FetchLatestRelease(UpdateFeedUrl(), info))
+    {
+        // Silent beyond the log: a magnifier that opens a network-error
+        // dialog on a low-vision user's screen has failed at its job.
+        PublishState(UpdateState::Failed);
+        return;
+    }
+
+    {
+        std::scoped_lock lock(m_resultLock);
+        m_latest     = info;
+        m_haveLatest = true;
+    }
+
+    if (m_status)
+    {
+        wcsncpy_s(m_status->updateVersion,
+                  StatusSnapshot::kUpdateVersionCapacity,
+                  info.version.c_str(), _TRUNCATE);
+    }
+
+    const bool newer = CompareVersion(info.version, BM_VERSION_STRING_W) > 0;
+
+    LOG_INFO("Update: feed says {}, running {} -> {}",
+             ToUtf8(info.version), BM_VERSION_STRING,
+             newer ? "update available" : "up to date");
+
+    PublishState(newer ? UpdateState::Available : UpdateState::UpToDate);
+}
+
 #ifdef _DEBUG
 
 // =============================================================================
@@ -441,7 +785,33 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(!info.sums.url.empty());
     }
 
-    // ── 8. ParseRelease: a release with nothing to install is a failure ──
+    // ── 8. ParseRelease: the setup asset is matched strictly ──
+    //
+    // "-setup.exe", not "contains setup" and not "any .exe". This is the rule
+    // that picks which binary we later execute, so it is deliberately narrow:
+    // our own release workflow builds the name, and nothing else in a release
+    // should be able to present itself as our installer.
+    //
+    // The example is real. ShareX ships "ShareX-21.0.0-setup-x64.exe", which is
+    // plainly an installer and which this correctly refuses — the check was run
+    // against their live feed while building this, and the refusal is the
+    // wanted behaviour rather than a gap.
+    {
+        const std::string otherConvention = R"JSON({
+            "tag_name": "v21.0.0",
+            "assets": [
+                { "name": "Thing-21.0.0-setup-x64.exe", "size": 1,
+                  "browser_download_url": "https://github.com/o/r/releases/download/v21.0.0/Thing-21.0.0-setup-x64.exe" },
+                { "name": "Thing-21.0.0.exe", "size": 1,
+                  "browser_download_url": "https://github.com/o/r/releases/download/v21.0.0/Thing-21.0.0.exe" }
+            ]
+        })JSON";
+
+        ReleaseInfo info;
+        BM_SELFCHECK(!ParseRelease(otherConvention, info));
+    }
+
+    // ── 9. ParseRelease: a release with nothing to install is a failure ──
     {
         const std::string noSetup = R"JSON({
             "tag_name": "v0.2.0",

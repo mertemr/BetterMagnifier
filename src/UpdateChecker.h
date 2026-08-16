@@ -13,11 +13,16 @@
 #ifndef BETTER_MAGNIFIER_UPDATE_CHECKER_H
 #define BETTER_MAGNIFIER_UPDATE_CHECKER_H
 
+#include "StatusSnapshot.h"   // UpdateState
+
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace BetterMagnifier {
@@ -70,9 +75,64 @@ bool PathsNameSameDirectory(std::wstring_view a, std::wstring_view b);
 // to an installed copy — a portable one has nothing for a setup to replace.
 bool IsInstalledCopy();
 
+// ── The parts that touch the network ──────────────────────────────────────
+
+// The API endpoint, or whatever BM_UPDATE_FEED names — the override lets a
+// test release be checked against without publishing one.
+std::wstring UpdateFeedUrl();
+
+// Blocking. Fetches and parses the feed, rejecting a setup URL that is not on a
+// GitHub host. Any failure returns false with one WARN line and nothing else
+// said. Called on the update thread and by --check-update.
+bool FetchLatestRelease(std::wstring_view feedUrl, ReleaseInfo& out);
+
+class UpdateChecker
+{
+public:
+    UpdateChecker() = default;
+    ~UpdateChecker();
+
+    UpdateChecker(const UpdateChecker&) = delete;
+    UpdateChecker& operator=(const UpdateChecker&) = delete;
+
+    // Starts the worker. engineHwnd receives WM_APP_UPDATE_STATE; status is
+    // written but never read back for a decision.
+    void Start(HWND engineHwnd, StatusSnapshot* status);
+
+    // Signals the worker and joins it. Idempotent.
+    void Stop();
+
+    // The 24-hour floor is enforced in App, next to the settings that describe
+    // it; `force` is only a marker for the caller.
+    void RequestCheck(bool force);
+
+    // The last successful result. False when there has not been one.
+    bool LatestRelease(ReleaseInfo& out) const;
+
+private:
+    void ThreadMain();
+    void PublishState(UpdateState state);
+    void RunCheck();
+
+    std::thread       m_thread;
+    std::atomic<bool> m_stopping{false};
+    std::atomic<bool> m_checkRequested{false};
+
+    // Signalled by RequestCheck and by Stop, so the worker never polls.
+    HANDLE m_wake = nullptr;
+
+    HWND            m_engineHwnd = nullptr;
+    StatusSnapshot* m_status     = nullptr;
+
+    // The one lock here, nowhere near the render path: it guards a wstring,
+    // which cannot be an atomic, and is held for the length of a copy.
+    mutable std::mutex m_resultLock;
+    ReleaseInfo        m_latest;
+    bool               m_haveLatest = false;
+};
+
 #ifdef _DEBUG
-// Assert-based self-check for the functions above, run from main on Debug
-// startup and by --self-check.
+// Assertions for the pure functions above; run by --self-check.
 void UpdateCheckerSelfCheck();
 #endif
 
