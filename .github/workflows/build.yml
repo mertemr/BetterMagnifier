@@ -57,16 +57,24 @@ jobs:
         shell: pwsh
         run: .\tools\check-version.ps1 -Configuration ${{ matrix.configuration }}
 
+      - name: Install the Windows App Runtime
+        if: matrix.configuration == 'Debug'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'WindowsAppRuntimeInstall-x64.exe'
+          Invoke-WebRequest -MaximumRedirection 10 -OutFile $exe `
+              -Uri 'https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe'
+
+          $p = Start-Process $exe -ArgumentList '--quiet' -Wait -PassThru
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 0x80073D06) {
+              throw "the Windows App Runtime installer returned 0x$('{0:X8}' -f $p.ExitCode)"
+          }
+
       - name: Self-check
         if: matrix.configuration == 'Debug'
         shell: pwsh
         timeout-minutes: 5
         run: |
-          # Bounded wait, and the log either way. A /SUBSYSTEM:WINDOWS binary
-          # that stops on something the runner cannot answer - a message box
-          # with nobody to click it, say - would otherwise sit here until the
-          # job's own timeout. The logger flushes every line, so the tail of
-          # the log says how far it actually got.
           $psi = [System.Diagnostics.ProcessStartInfo]::new()
           $psi.FileName        = (Resolve-Path ".\bin\Debug-x64\BetterMagnifier.exe").Path
           $psi.Arguments       = '--self-check'
