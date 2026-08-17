@@ -668,15 +668,22 @@ void App::Update()
         // change at all and says nothing.
         UpdateOsd(i, *mon);
 
+        const size_t slot = (i < StatusSnapshot::kMaxMonitors)
+                          ? i : StatusSnapshot::kMaxMonitors - 1;
+
+        // A blocked Win+Plus queues a "Disabled" readout (see OnZoomStep) —
+        // that still needs a frame drawn to actually show it, so it is the
+        // one thing that keeps an inactive monitor out of the early-out below.
+        const bool osdPending = !m_osd[slot].text.empty()
+                              && std::chrono::steady_clock::now() < m_osd[slot].until;
+
         // ── Zoom off: hide the overlay, leave the capture alone ──
-        if (!mon->zoom.isActive)
+        if (!mon->zoom.isActive && !osdPending)
         {
             if (m_overlays[i].IsVisible())
                 m_overlays[i].Hide();
 
             // FPS is meaningless with zoom off; zero it so the panel shows a dash.
-            const size_t slot = (i < StatusSnapshot::kMaxMonitors)
-                              ? i : StatusSnapshot::kMaxMonitors - 1;
             st.fps.store(0.0f, std::memory_order_relaxed);
             m_lastFrameTime[slot] = {};
 
@@ -688,12 +695,15 @@ void App::Update()
             continue;
         }
 
-        anyActive = true;
-        ++activeCount;
-        singleZoom = mon->zoom.zoomLevel;
+        if (mon->zoom.isActive)
+        {
+            anyActive = true;
+            ++activeCount;
+            singleZoom = mon->zoom.zoomLevel;
 
-        if (PtInRect(&mon->bounds, cursor))
-            pointerOnMagnified = true;
+            if (PtInRect(&mon->bounds, cursor))
+                pointerOnMagnified = true;
+        }
 
         if (!m_overlays[i].IsVisible())
             m_overlays[i].Show();
@@ -906,7 +916,7 @@ void App::RenderMonitor(size_t monitorIndex)
                 // same apparent size on a 4K display as on a 1080p one. Not
                 // scaled by zoom: this is our own UI drawn on top of the
                 // magnified content, not part of it.
-                const int fontPx = std::clamp(static_cast<int>(mon->Height() / 20), 22, 80);
+                const int fontPx = std::clamp(static_cast<int>(mon->Height() / 26), 18, 64);
 
                 if (m_osdCache.Acquire(osd.text, fontPx, osdLabel))
                     osdShape = osdLabel.srv;
@@ -1265,11 +1275,21 @@ void App::OnZoomStep(int direction)
 
         // ── Asking to zoom in while off means "turn on" ──
         // ...unless the user explicitly disabled this monitor (Ctrl+Alt+Z or
-        // the panel switch); that toggle is the only way back on.
+        // the panel switch); that toggle is the only way back on. Raise the
+        // readout anyway, or the keypress reads as having done nothing.
         if (!mon->zoom.isActive)
         {
-            if (direction <= 0 || mon->zoom.userDisabled)
+            if (direction <= 0)
                 return;   // nothing below off
+
+            if (mon->zoom.userDisabled)
+            {
+                const size_t slot = (i < StatusSnapshot::kMaxMonitors)
+                                  ? i : StatusSnapshot::kMaxMonitors - 1;
+                m_osd[slot].text  = L"Disabled";
+                m_osd[slot].until = std::chrono::steady_clock::now() + kOsdDuration;
+                return;
+            }
 
             m_monitorManager.ToggleZoom(i);
 
