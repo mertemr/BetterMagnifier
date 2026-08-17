@@ -381,10 +381,19 @@ setup to replace.
   so SmartScreen warns on every download. Both are stated in the release notes.
 - **Releases are not signed.** The signing path is wired into the workflow and
   skipped while `SIGN_CERT_PFX` is unset; nothing else is conditional on it.
-- **The Release PR gets no build check.** A pull request opened with the default
-  `GITHUB_TOKEN` does not trigger other workflows. What it contains is a version
-  bump and a generated changelog, and the push to main after the merge runs the
-  full gate before anything is packaged.
+- **Nothing gates packaging on the build workflow.** `build.yml` and
+  `release.yml` both fire on the push to main and run in parallel; the packaging
+  job depends on release-please's output, not on the build. v0.2.0 was packaged
+  and published while that same commit's Build run was failing. What stands
+  between a bad commit and a release is the packaging job's own Release build
+  and `check-version.ps1`, neither of which runs the self-check.
+- **A release can end up tagged with no assets.** release-please creates the tag
+  and the GitHub Release before it finishes; if the action then fails — a
+  transient `No server is currently available` did it for v0.3.0 — no
+  `releases_created` output is emitted and the packaging job is skipped. Running
+  the workflow again does not help, because the release now exists and
+  release-please reports nothing created. `workflow_dispatch` with a `tag` input
+  is the way back: it skips release-please and packages that tag.
 
 ## Environment variables
 
