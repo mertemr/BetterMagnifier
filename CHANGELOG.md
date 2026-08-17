@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.0](https://github.com/mertemr/BetterMagnifier/compare/v0.2.0...v0.3.0) (2026-08-17)
+
+
+### Features
+
+* **engine:** show a Disabled readout when Win+Plus is blocked ([141bdd5](https://github.com/mertemr/BetterMagnifier/commit/141bdd561b4ce85a2736c661e4085ba01249633a))
+
+
+### Bug fixes
+
+* **app:** focus existing window instead of second instance ([88eed6a](https://github.com/mertemr/BetterMagnifier/commit/88eed6a2cf8765f2460b76e67566dc410b57688a))
+* **app:** focus existing window instead of second instance on taskbar click ([b2b450c](https://github.com/mertemr/BetterMagnifier/commit/b2b450cb7e142068d9386940d38a68e9add16ac7))
+* **ci:** install the Windows App Runtime before the self-check ([a96d911](https://github.com/mertemr/BetterMagnifier/commit/a96d91153c588391e2af35cde2dd0a4e7269b2ed))
+* **ci:** install the Windows App Runtime before the self-check ([57627f0](https://github.com/mertemr/BetterMagnifier/commit/57627f08b79559afda879ef6b6aff8540b26f9cb))
+* **engine:** stop Win+Plus from re-enabling an explicitly disabled monitor ([b98088e](https://github.com/mertemr/BetterMagnifier/commit/b98088e8014c0560f30bd75913115f67d70bf09f))
+* **engine:** Win+Plus no longer re-enables a disabled monitor ([14503d2](https://github.com/mertemr/BetterMagnifier/commit/14503d2ef705b62c4ed50b5a76521d6d2e8b9d9f))
+
+
+### CI
+
+* cache the NuGet packages and the runtime installer ([c19c0de](https://github.com/mertemr/BetterMagnifier/commit/c19c0defac64d133b362eab44ba131984003e59e))
+
 ## [0.2.0](https://github.com/mertemr/BetterMagnifier/compare/v0.1.1...v0.2.0) (2026-08-16)
 
 

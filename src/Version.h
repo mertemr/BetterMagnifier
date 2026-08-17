@@ -17,10 +17,10 @@
 #define BETTER_MAGNIFIER_VERSION_H
 
 #define BM_VERSION_MAJOR 0 // x-release-please-major
-#define BM_VERSION_MINOR 2 // x-release-please-minor
+#define BM_VERSION_MINOR 3 // x-release-please-minor
 #define BM_VERSION_PATCH 0 // x-release-please-patch
 
-#define BM_VERSION_STRING "0.2.0" // x-release-please-version
+#define BM_VERSION_STRING "0.3.0" // x-release-please-version
 
 // The four-part form Windows shows in file properties. The fourth component is
 // always zero: this project releases on the semantic triple.
