@@ -25,6 +25,12 @@ struct ZoomState
     float targetZoom = 1.0f;      // for future smooth interpolation
     bool  isFrozen   = false;     // anchor pinned, view stops following
 
+    // Set when the user explicitly turns the monitor off (Ctrl+Alt+Z or the
+    // panel switch), separately from isActive. Win+Plus stepping zoom on from
+    // off is meant to mirror Windows Magnifier, but not to override an
+    // explicit disable — see App::OnZoomStep.
+    bool  userDisabled = false;
+
     // There is deliberately no focal point here any more. The anchor moved to
     // ViewportController on the input thread, and a copy kept in this struct
     // was written every frame and read by nobody — which is how it went stale

@@ -1157,9 +1157,15 @@ void App::ToggleZoomOnMonitor(size_t i)
 
     m_monitorManager.ToggleZoom(i);
 
-    const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
+    MonitorInfo* mon = m_monitorManager.GetMonitor(i);
     if (!mon)
         return;
+
+    // This is the explicit enable/disable action (hotkey or panel switch), as
+    // opposed to Win+Plus/Win+Minus stepping zoom on or down to off. Only this
+    // path sets or clears userDisabled, so a stepped-off monitor still comes
+    // back with Win+Plus while a disabled one does not.
+    mon->zoom.userDisabled = !mon->zoom.isActive;
 
     const auto ms = m_settings.Monitor(mon->deviceName);
 
@@ -1258,9 +1264,11 @@ void App::OnZoomStep(int direction)
         const auto ms = m_settings.Monitor(mon->deviceName);
 
         // ── Asking to zoom in while off means "turn on" ──
+        // ...unless the user explicitly disabled this monitor (Ctrl+Alt+Z or
+        // the panel switch); that toggle is the only way back on.
         if (!mon->zoom.isActive)
         {
-            if (direction <= 0)
+            if (direction <= 0 || mon->zoom.userDisabled)
                 return;   // nothing below off
 
             m_monitorManager.ToggleZoom(i);
