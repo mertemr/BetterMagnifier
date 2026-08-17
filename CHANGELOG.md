@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.1](https://github.com/mertemr/BetterMagnifier/compare/v0.3.0...v0.3.1) (2026-08-17)
+
+
+### Bug fixes
+
+* **ci:** let the release workflow package an already-tagged release ([f7b6afc](https://github.com/mertemr/BetterMagnifier/commit/f7b6afcbe5e580da6048a16aac2dcf2f1a0b58a2))
+* **ci:** let the release workflow package an already-tagged release ([bb37069](https://github.com/mertemr/BetterMagnifier/commit/bb370697bf6d9529a2d4bc625ece0a16c6290cb3))
+
+
+### Documentation
+
+* correct what the release workflow actually gates ([2ce991b](https://github.com/mertemr/BetterMagnifier/commit/2ce991b40f05f68815cf6a20b2b07e5b705382fa))
+
 ## [0.3.0](https://github.com/mertemr/BetterMagnifier/compare/v0.2.0...v0.3.0) (2026-08-17)
 
 
