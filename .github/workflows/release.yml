@@ -4,10 +4,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Package this existing tag instead of running release-please
+        default: ''
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -17,6 +20,10 @@ jobs:
   release-please:
     name: Release PR / tag
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' || inputs.tag == ''
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       releases_created: ${{ steps.rp.outputs.releases_created }}
     steps:
@@ -29,17 +36,19 @@ jobs:
   package:
     name: Build and attach the installer
     needs: release-please
-    if: needs.release-please.outputs.releases_created == 'true'
+    if: always() && (needs.release-please.outputs.releases_created == 'true' || (github.event_name == 'workflow_dispatch' && inputs.tag != ''))
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ inputs.tag || 'main' }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Read the version release-please just wrote
+      - name: Resolve the version being released
         shell: pwsh
         run: |
           $header = Get-Content src\Version.h -Raw
@@ -55,6 +64,7 @@ jobs:
               Write-Host "::error::src/Version.h says $version but there is no tag $tag"
               exit 1
           }
+          git checkout --quiet --detach "refs/tags/$tag"
 
           Write-Host "Releasing $version ($tag)"
           "VERSION=$version" >> $env:GITHUB_ENV
@@ -62,6 +72,13 @@ jobs:
 
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
+
+      - name: Cache NuGet packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('BetterMagnifier.vcxproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
 
       - name: Build Release x64
         shell: pwsh
@@ -207,7 +224,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $existing = gh release view $env:TAG --json body --jq .body
+          $existing = (gh release view $env:TAG --json body --jq .body) -join "`n"
+          if ($existing -match '(?m)^## Install\s*$') { exit 0 }
 
           $notes = @"
           ## Install
