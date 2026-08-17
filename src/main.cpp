@@ -4,6 +4,7 @@
 
 #include "pch.h"
 #include "App.h"
+#include "AppMessages.h"
 #include "SettingsStore.h"
 #include "ViewportController.h"
 #include "PointerInput.h"
@@ -95,6 +96,13 @@ int WINAPI wWinMain(
         {
             if (singleInstance)
                 CloseHandle(singleInstance);
+
+            HWND existing = FindWindowW(L"BetterMagnifierMsg", nullptr);
+            if (existing)
+            {
+                PostMessageW(existing, BetterMagnifier::WM_APP_SHOW_PANEL, 0, 0);
+                return 0;
+            }
 
             MessageBoxW(nullptr,
                 L"BetterMagnifier is already running.\n\n"
