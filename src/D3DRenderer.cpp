@@ -997,6 +997,9 @@ bool D3DRenderer::RenderSprite(size_t targetIndex, ID3D11ShaderResourceView* srv
     m_context->VSSetConstantBuffers(0, 1, m_spriteBuffer.GetAddressOf());
 
     m_context->PSSetShader(m_spritePS.Get(), nullptr, 0);
+    // The pixel shader reads spriteFade out of the same buffer. Bound to the VS
+    // alone it reads zeros there, and every sprite comes out fully transparent.
+    m_context->PSSetConstantBuffers(0, 1, m_spriteBuffer.GetAddressOf());
     m_context->PSSetShaderResources(0, 1, &srv);
     m_context->PSSetSamplers(0, 1, m_samplerPoint.GetAddressOf());
 
