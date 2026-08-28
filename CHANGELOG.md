@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0](https://github.com/mertemr/BetterMagnifier/compare/v0.3.1...v0.4.0) (2026-08-28)
+
+
+### Features
+
+* logon-task startup, OSD fade, pointer and render fixes ([0d4e2a0](https://github.com/mertemr/BetterMagnifier/commit/0d4e2a0d67e5869e7cabc4f7175455f94011f46a))
+* **osd:** shrink the readout and fade it out ([722634c](https://github.com/mertemr/BetterMagnifier/commit/722634c9efd0053e77727a5493dea0082cc5be45))
+
+
+### Bug fixes
+
+* **input:** widen echo buffer and dedupe repeat SetCursorPos targets ([c217044](https://github.com/mertemr/BetterMagnifier/commit/c217044de48e7a33c6b9ff1eb5e89dccb5e7e171))
+* **osd:** fade the frozen readout, say Off, and stop the disabled flicker ([6fe41d5](https://github.com/mertemr/BetterMagnifier/commit/6fe41d55704be21c3c4040072a0d2e68ec867ca6))
+* **render:** bind the sprite constant buffer to the pixel shader ([8d6f350](https://github.com/mertemr/BetterMagnifier/commit/8d6f350c1b67551609de80b46279f45ec809ee08))
+* **startup:** register a logon task and boot at 1.00x ([ab16431](https://github.com/mertemr/BetterMagnifier/commit/ab164313ce70324cd992386daaf3727051955fb0))
+
+
+### Documentation
+
+* **architecture:** record the readout's fade, Off state and 1:1 inactive render ([aff314a](https://github.com/mertemr/BetterMagnifier/commit/aff314a36cb5bed8e1150b20fa74dbb4308d8790))
+
 ## [0.3.1](https://github.com/mertemr/BetterMagnifier/compare/v0.3.0...v0.3.1) (2026-08-17)
 
 
