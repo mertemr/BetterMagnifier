@@ -587,9 +587,10 @@ void App::UpdateOsd(size_t monitorIndex, const MonitorInfo& mon)
     const bool first = !osd.seen;
     osd.seen = true;
 
-    const bool becameActive = active && !osd.lastActive;
-    const bool zoomMoved    = active && osd.lastActive && (shown != osd.lastZoom);
-    const bool freezeMoved  = active && osd.lastActive && (frozen != osd.lastFrozen);
+    const bool becameActive   = active && !osd.lastActive;
+    const bool becameInactive = !active && osd.lastActive;
+    const bool zoomMoved      = active && osd.lastActive && (shown != osd.lastZoom);
+    const bool freezeMoved    = active && osd.lastActive && (frozen != osd.lastFrozen);
 
     osd.lastActive = active;
     osd.lastZoom   = shown;
@@ -600,17 +601,37 @@ void App::UpdateOsd(size_t monitorIndex, const MonitorInfo& mon)
     if (first)
         return;
 
-    if (!becameActive && !zoomMoved && !freezeMoved)
+    if (!becameActive && !becameInactive && !zoomMoved && !freezeMoved)
         return;
+
+    osd.persistent = false;
+
+    // Stepping down past minZoom closes magnification, and the readout has to
+    // say so. Left to itself the last level raised — "1.25x", the step above the
+    // floor — simply stayed up for its remaining duration with the view already
+    // back to normal size, which reads as a magnifier that has stopped working
+    // rather than one that has been switched off.
+    if (becameInactive)
+    {
+        osd.text  = L"Off";
+        osd.until = std::chrono::steady_clock::now() + kOsdDuration;
+        return;
+    }
 
     // Frozen is a state, not an event, and it is treated as one: the readout
     // stays up for as long as the freeze lasts. A view that has quietly stopped
     // following the pointer looks identical to one that is broken, and this is
     // the difference between the two.
+    //
+    // It fades rather than holding full strength, though. Persistent and opaque,
+    // it is a permanent pill over the bottom of a screen the user is trying to
+    // read; faded, it still answers "why has this stopped moving" without
+    // occupying the display to do it.
     if (frozen)
     {
-        osd.text  = L"Frozen";
-        osd.until = std::chrono::steady_clock::time_point::max();
+        osd.text       = L"Frozen";
+        osd.until      = std::chrono::steady_clock::now() + kOsdDuration;
+        osd.persistent = true;
         return;
     }
 
@@ -674,6 +695,9 @@ void App::Update()
         // A blocked Win+Plus queues a "Disabled" readout (see OnZoomStep) —
         // that still needs a frame drawn to actually show it, so it is the
         // one thing that keeps an inactive monitor out of the early-out below.
+        // A persistent readout does not expire, but it only belongs to an active
+        // monitor — freeze is the only thing that sets it — so it is not part of
+        // this test.
         const bool osdPending = !m_osd[slot].text.empty()
                               && std::chrono::steady_clock::now() < m_osd[slot].until;
 
@@ -788,9 +812,25 @@ void App::RenderMonitor(size_t monitorIndex)
         // late, which is invisible; an inconsistent rect was not.
         const MonitorViewportAtomic& vp = m_viewportSnapshot.Monitor(monitorIndex);
 
-        const float zoom = (std::max)(
-            static_cast<float>(vp.zoom.load(std::memory_order_relaxed)),
-            ZoomState::kMinZoom);
+        // ── An inactive monitor renders 1:1, whatever the snapshot still says ──
+        //
+        // This monitor is only being drawn at all because a readout is up on it
+        // ("Disabled", "Off"), and the overlay under that readout has to be an
+        // exact copy of the desktop or it announces itself.
+        //
+        // The snapshot is not that. It carries the LAST APPLIED viewport, and
+        // the input thread only revisits it when it next syncs — so between zoom
+        // being switched off here and that sync happening over there, vp still
+        // holds the old zoom and the old origin. Rendering those put a magnified,
+        // offset copy of the desktop on screen for the frame or two before the
+        // input thread caught up: the flick of zoom seen when Win+Plus is pressed
+        // on a monitor the user has disabled.
+        const bool live = mon->zoom.isActive;
+
+        const float zoom = live
+            ? (std::max)(static_cast<float>(vp.zoom.load(std::memory_order_relaxed)),
+                         ZoomState::kMinZoom)
+            : 1.0f;
 
         // With no new frame the width and height come back zero; fall back to
         // the monitor size, which is what the capture was opened at anyway.
@@ -823,8 +863,8 @@ void App::RenderMonitor(size_t monitorIndex)
         // event, so the pan stays proportional to mouse motion rather than to
         // frame rate.
         RECT srcRect{};
-        srcRect.left = static_cast<long>(vp.srcOriginX.load(std::memory_order_relaxed));
-        srcRect.top  = static_cast<long>(vp.srcOriginY.load(std::memory_order_relaxed));
+        srcRect.left = live ? static_cast<long>(vp.srcOriginX.load(std::memory_order_relaxed)) : 0L;
+        srcRect.top  = live ? static_cast<long>(vp.srcOriginY.load(std::memory_order_relaxed)) : 0L;
 
         // The snapshot can be one tick behind a resolution change, and a source
         // rect outside the texture is a device removal, not a glitch.
@@ -910,7 +950,9 @@ void App::RenderMonitor(size_t monitorIndex)
         {
             const OsdState& osd = m_osd[rectSlot];
 
-            if (!osd.text.empty() && std::chrono::steady_clock::now() < osd.until)
+            const bool full = std::chrono::steady_clock::now() < osd.until;
+
+            if (!osd.text.empty() && (full || osd.persistent))
             {
                 // Sized from the monitor rather than fixed, so it stays the
                 // same apparent size on a 4K display as on a 1080p one. Not
@@ -918,7 +960,8 @@ void App::RenderMonitor(size_t monitorIndex)
                 // magnified content, not part of it.
                 const int fontPx = std::clamp(static_cast<int>(mon->Height() / 26), 18, 64);
 
-                if (m_osdCache.Acquire(osd.text, fontPx, osdLabel))
+                if (m_osdCache.Acquire(osd.text, fontPx,
+                                       full ? 1.0f : kOsdFadedOpacity, osdLabel))
                     osdShape = osdLabel.srv;
             }
         }

@@ -53,7 +53,11 @@ public:
 
     // False when the text could not be rendered or uploaded. A missing OSD is
     // cosmetic: the caller draws nothing and carries on.
-    bool Acquire(const std::wstring& text, int fontHeightPx, Label& out);
+    //
+    // opacity is baked into the bitmap and forms part of the cache key. Scaling
+    // the sprite in the shader would be the other way to do it, and would mean a
+    // second constant buffer register and an HLSL change for one faded label.
+    bool Acquire(const std::wstring& text, int fontHeightPx, float opacity, Label& out);
 
     void Clear();
 
@@ -86,7 +90,10 @@ struct OsdBitmap
     int height = 0;
 };
 
-bool RenderOsdText(const std::wstring& text, int fontHeightPx, OsdBitmap& out);
+// opacity scales every channel of the premultiplied result, which is the whole
+// of what fading a premultiplied bitmap means.
+bool RenderOsdText(const std::wstring& text, int fontHeightPx, OsdBitmap& out,
+                   float opacity = 1.0f);
 
 } // namespace BetterMagnifier
 
