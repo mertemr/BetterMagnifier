@@ -163,6 +163,12 @@ private:
         std::wstring text;
         std::chrono::steady_clock::time_point until{};
 
+        // Outlives `until` instead of disappearing at it, drawn faded once the
+        // full-strength window has passed. Freeze is the only user of this: it
+        // is a state rather than an event and has to stay visible, but a solid
+        // pill sitting over the content forever is its own problem.
+        bool persistent = false;
+
         // Last observed engine state, so a change can be detected. Tracked even
         // while the monitor is idle: without that, turning zoom on would look
         // like "no change" whenever the level happened to match the last one.
@@ -179,6 +185,10 @@ private:
     void UpdateOsd(size_t monitorIndex, const MonitorInfo& mon);
 
     static constexpr std::chrono::milliseconds kOsdDuration{1400};
+
+    // What a persistent readout drops to once kOsdDuration is up: still there to
+    // be found, no longer competing with the content it sits on.
+    static constexpr float kOsdFadedOpacity = 0.12f;
 
     // Sprite size relative to the content scale. Cached rather than read from
     // SettingsStore in the draw call: the panel thread writes that struct and

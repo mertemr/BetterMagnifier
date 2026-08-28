@@ -210,7 +210,27 @@ Two things in it are easy to get wrong:
 
 Freeze is treated as a state rather than an event: the readout stays up for
 as long as the freeze lasts, because a view that has silently stopped
-following the pointer looks exactly like one that is broken.
+following the pointer looks exactly like one that is broken. It does not stay
+up at full strength, though — after the usual duration it drops to 12% opacity,
+which still answers "why has this stopped moving" without parking a solid pill
+over the bottom of a screen the user is trying to read. The opacity is baked
+into the bitmap and is part of the cache key, rather than a shader constant:
+one extra cached entry against a second constant-buffer register and an HLSL
+change, for one faded label.
+
+Every other readout expires. Reaching the bottom of the zoom range closes
+magnification, and that raises `Off` — otherwise the last level shown, the step
+above the floor, stayed up describing a view that was already back to normal
+size.
+
+A monitor with zoom off is normally not drawn at all, and the exception is a
+readout that still needs a frame to appear on: `Disabled` when a disabled
+monitor is asked to zoom, `Off` on the way out. Such a monitor renders 1:1 from
+the origin **regardless of the viewport snapshot**, which holds the last
+*applied* zoom and origin and stays stale until the input thread next syncs.
+Drawing from it put a magnified, offset copy of the desktop on screen for the
+frame or two before that sync — the flick of zoom seen on a monitor the user
+had explicitly disabled.
 
 ## Control panel
 
