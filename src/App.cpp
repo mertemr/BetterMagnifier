@@ -58,63 +58,111 @@ bool OpenPanelAtStartup()
 }
 
 // =============================================================================
-// ApplyStartWithWindows — the HKCU Run entry
+// LaunchedAtStartup — did the logon task start us?
 // =============================================================================
-// HKCU rather than HKLM: HKLM needs administrator rights and writes for every
-// user on the machine. The entry goes stale if the exe moves, but it is
-// rewritten on every settings change.
-//
-// Caveat worth knowing: if the binary requires elevation, Windows may silently
-// skip a Run entry at logon. The reliable route in that case is a scheduled
-// task with highest privileges, which is not built. The panel says so.
+// The scheduled task passes --startup, and logon is the one moment a
+// remembered zoom is wrong: the machine comes back magnified at whatever level
+// the last session happened to leave, before anyone has asked for it. At logon
+// every monitor stays at 1.00x and the remembered level is ignored for the
+// whole session, so nothing carries a level across a boot either.
 // =============================================================================
-bool ApplyStartWithWindows(bool enable)
+bool LaunchedAtStartup()
 {
-    constexpr wchar_t kRunKey[]    = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-    constexpr wchar_t kValueName[] = L"BetterMagnifier";
+    static const bool enabled =
+        std::wcsstr(GetCommandLineW(), L"--startup") != nullptr;
+    return enabled;
+}
 
-    HKEY key = nullptr;
-    LSTATUS st = RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key);
-    if (st != ERROR_SUCCESS)
+// =============================================================================
+// ApplyStartWithWindows — a scheduled task, not a Run entry
+// =============================================================================
+// The HKCU Run entry this used to write never actually launched anything: the
+// binary is RequireAdministrator, and Windows drops an elevated Run entry at
+// logon rather than prompting for UAC. A logon-triggered task with RL HIGHEST
+// is the documented way round it, and schtasks.exe ships with Windows, so
+// there is no Task Scheduler COM plumbing to own.
+//
+// The stale Run value is deleted on every call, so upgrading from the version
+// that wrote one does not leave it behind.
+// =============================================================================
+constexpr wchar_t kTaskName[] = L"BetterMagnifier";
+
+bool RunSchtasks(const std::wstring& args)
+{
+    wchar_t sysDir[MAX_PATH]{};
+    if (GetSystemDirectoryW(sysDir, MAX_PATH) == 0)
     {
-        LOG_ERROR("Could not open the Run key: {}", st);
+        LOG_ERROR("GetSystemDirectoryW failed: {}", GetLastError());
         return false;
     }
 
-    bool ok = false;
+    // CreateProcessW rather than system(): CREATE_NO_WINDOW keeps a console
+    // from flashing over the desktop every time a setting changes.
+    std::wstring cmd = L"\"" + std::wstring(sysDir) + L"\\schtasks.exe\" " + args;
 
-    if (enable)
+    STARTUPINFOW        si{};
+    PROCESS_INFORMATION pi{};
+    si.cb = sizeof(si);
+
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
     {
-        wchar_t exePath[MAX_PATH]{};
-        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0)
-        {
-            LOG_ERROR("GetModuleFileNameW failed: {}", GetLastError());
-            RegCloseKey(key);
-            return false;
-        }
-
-        // The path may contain spaces, and Windows cuts an unquoted Run entry at the first one.
-        const std::wstring quoted = L"\"" + std::wstring(exePath) + L"\"";
-
-        st = RegSetValueExW(key, kValueName, 0, REG_SZ,
-                reinterpret_cast<const BYTE*>(quoted.c_str()),
-                static_cast<DWORD>((quoted.size() + 1) * sizeof(wchar_t)));
-        ok = (st == ERROR_SUCCESS);
-
-        if (!ok)
-            LOG_ERROR("Could not write the Run value: {}", st);
-    }
-    else
-    {
-        st = RegDeleteValueW(key, kValueName);
-        // Already absent counts as success: the requested end state holds.
-        ok = (st == ERROR_SUCCESS || st == ERROR_FILE_NOT_FOUND);
-
-        if (!ok)
-            LOG_ERROR("Could not delete the Run value: {}", st);
+        LOG_ERROR("Could not launch schtasks: {}", GetLastError());
+        return false;
     }
 
-    RegCloseKey(key);
+    WaitForSingleObject(pi.hProcess, 10000);
+
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    return code == 0;
+}
+
+void RemoveLegacyRunEntry()
+{
+    constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &key) == ERROR_SUCCESS)
+    {
+        RegDeleteValueW(key, kTaskName);
+        RegCloseKey(key);
+    }
+}
+
+bool ApplyStartWithWindows(bool enable)
+{
+    RemoveLegacyRunEntry();
+
+    if (!enable)
+    {
+        // schtasks returns non-zero for "no such task" as well as for a real
+        // failure, and the requested end state holds either way.
+        RunSchtasks(L"/Delete /TN \"" + std::wstring(kTaskName) + L"\" /F");
+        return true;
+    }
+
+    wchar_t exePath[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0)
+    {
+        LOG_ERROR("GetModuleFileNameW failed: {}", GetLastError());
+        return false;
+    }
+
+    // /TR takes the whole command as one argument, and a path with spaces needs
+    // its own quotes inside that argument — hence the escaped pair.
+    const std::wstring args =
+        L"/Create /TN \"" + std::wstring(kTaskName) + L"\""
+        L" /TR \"\\\"" + std::wstring(exePath) + L"\\\" --startup\""
+        L" /SC ONLOGON /RL HIGHEST /F";
+
+    const bool ok = RunSchtasks(args);
+    if (!ok)
+        LOG_ERROR("Could not register the logon task");
+
     return ok;
 }
 
@@ -362,6 +410,17 @@ bool App::InitializeComponents()
     // and edge-push settings sat unread until the user changed one.
     ApplyPointerSettings();
 
+    // Same reason, plus a migration: a copy that had this on was carrying a Run
+    // entry Windows never honoured, and only a settings change would have
+    // replaced it with the logon task.
+    // Only when it is on: the off case would spawn schtasks on every launch to
+    // delete a task that is not there. Turning it off goes through the panel,
+    // which calls ApplySettings.
+    if (m_settings.General().startWithWindows)
+        ApplyStartWithWindows(true);
+    else
+        RemoveLegacyRunEntry();
+
     // Nothing can be mid-download here, so an abandoned update leaves nothing
     // behind.
     ClearUpdateStagingDir();
@@ -587,9 +646,10 @@ void App::UpdateOsd(size_t monitorIndex, const MonitorInfo& mon)
     const bool first = !osd.seen;
     osd.seen = true;
 
-    const bool becameActive = active && !osd.lastActive;
-    const bool zoomMoved    = active && osd.lastActive && (shown != osd.lastZoom);
-    const bool freezeMoved  = active && osd.lastActive && (frozen != osd.lastFrozen);
+    const bool becameActive   = active && !osd.lastActive;
+    const bool becameInactive = !active && osd.lastActive;
+    const bool zoomMoved      = active && osd.lastActive && (shown != osd.lastZoom);
+    const bool freezeMoved    = active && osd.lastActive && (frozen != osd.lastFrozen);
 
     osd.lastActive = active;
     osd.lastZoom   = shown;
@@ -600,17 +660,37 @@ void App::UpdateOsd(size_t monitorIndex, const MonitorInfo& mon)
     if (first)
         return;
 
-    if (!becameActive && !zoomMoved && !freezeMoved)
+    if (!becameActive && !becameInactive && !zoomMoved && !freezeMoved)
         return;
+
+    osd.persistent = false;
+
+    // Stepping down past minZoom closes magnification, and the readout has to
+    // say so. Left to itself the last level raised — "1.25x", the step above the
+    // floor — simply stayed up for its remaining duration with the view already
+    // back to normal size, which reads as a magnifier that has stopped working
+    // rather than one that has been switched off.
+    if (becameInactive)
+    {
+        osd.text  = L"Off";
+        osd.until = std::chrono::steady_clock::now() + kOsdDuration;
+        return;
+    }
 
     // Frozen is a state, not an event, and it is treated as one: the readout
     // stays up for as long as the freeze lasts. A view that has quietly stopped
     // following the pointer looks identical to one that is broken, and this is
     // the difference between the two.
+    //
+    // It fades rather than holding full strength, though. Persistent and opaque,
+    // it is a permanent pill over the bottom of a screen the user is trying to
+    // read; faded, it still answers "why has this stopped moving" without
+    // occupying the display to do it.
     if (frozen)
     {
-        osd.text  = L"Frozen";
-        osd.until = std::chrono::steady_clock::time_point::max();
+        osd.text       = L"Frozen";
+        osd.until      = std::chrono::steady_clock::now() + kOsdDuration;
+        osd.persistent = true;
         return;
     }
 
@@ -674,6 +754,9 @@ void App::Update()
         // A blocked Win+Plus queues a "Disabled" readout (see OnZoomStep) —
         // that still needs a frame drawn to actually show it, so it is the
         // one thing that keeps an inactive monitor out of the early-out below.
+        // A persistent readout does not expire, but it only belongs to an active
+        // monitor — freeze is the only thing that sets it — so it is not part of
+        // this test.
         const bool osdPending = !m_osd[slot].text.empty()
                               && std::chrono::steady_clock::now() < m_osd[slot].until;
 
@@ -788,9 +871,25 @@ void App::RenderMonitor(size_t monitorIndex)
         // late, which is invisible; an inconsistent rect was not.
         const MonitorViewportAtomic& vp = m_viewportSnapshot.Monitor(monitorIndex);
 
-        const float zoom = (std::max)(
-            static_cast<float>(vp.zoom.load(std::memory_order_relaxed)),
-            ZoomState::kMinZoom);
+        // ── An inactive monitor renders 1:1, whatever the snapshot still says ──
+        //
+        // This monitor is only being drawn at all because a readout is up on it
+        // ("Disabled", "Off"), and the overlay under that readout has to be an
+        // exact copy of the desktop or it announces itself.
+        //
+        // The snapshot is not that. It carries the LAST APPLIED viewport, and
+        // the input thread only revisits it when it next syncs — so between zoom
+        // being switched off here and that sync happening over there, vp still
+        // holds the old zoom and the old origin. Rendering those put a magnified,
+        // offset copy of the desktop on screen for the frame or two before the
+        // input thread caught up: the flick of zoom seen when Win+Plus is pressed
+        // on a monitor the user has disabled.
+        const bool live = mon->zoom.isActive;
+
+        const float zoom = live
+            ? (std::max)(static_cast<float>(vp.zoom.load(std::memory_order_relaxed)),
+                         ZoomState::kMinZoom)
+            : 1.0f;
 
         // With no new frame the width and height come back zero; fall back to
         // the monitor size, which is what the capture was opened at anyway.
@@ -823,8 +922,8 @@ void App::RenderMonitor(size_t monitorIndex)
         // event, so the pan stays proportional to mouse motion rather than to
         // frame rate.
         RECT srcRect{};
-        srcRect.left = static_cast<long>(vp.srcOriginX.load(std::memory_order_relaxed));
-        srcRect.top  = static_cast<long>(vp.srcOriginY.load(std::memory_order_relaxed));
+        srcRect.left = live ? static_cast<long>(vp.srcOriginX.load(std::memory_order_relaxed)) : 0L;
+        srcRect.top  = live ? static_cast<long>(vp.srcOriginY.load(std::memory_order_relaxed)) : 0L;
 
         // The snapshot can be one tick behind a resolution change, and a source
         // rect outside the texture is a device removal, not a glitch.
@@ -905,23 +1004,53 @@ void App::RenderMonitor(size_t monitorIndex)
         // anything change" it either never gets drawn or, worse, gets drawn and
         // then stays up forever on a still screen.
         OsdCache::Label osdLabel;
-        const void* osdShape = nullptr;
+        const void* osdShape  = nullptr;
+        float       osdAlpha  = 0.0f;
 
         {
             const OsdState& osd = m_osd[rectSlot];
+            const auto      now = std::chrono::steady_clock::now();
 
-            if (!osd.text.empty() && std::chrono::steady_clock::now() < osd.until)
+            if (!osd.text.empty() && (now < osd.until || osd.persistent))
             {
                 // Sized from the monitor rather than fixed, so it stays the
                 // same apparent size on a 4K display as on a 1080p one. Not
                 // scaled by zoom: this is our own UI drawn on top of the
                 // magnified content, not part of it.
-                const int fontPx = std::clamp(static_cast<int>(mon->Height() / 26), 18, 64);
+                const int fontPx = std::clamp(static_cast<int>(mon->Height() / 38), 14, 44);
 
-                if (m_osdCache.Acquire(osd.text, fontPx, osdLabel))
+                // Smootherstep across the last kOsdFade, down to zero or, for a
+                // persistent readout, to kOsdFadedOpacity. Zero slope at both
+                // ends, so it neither snaps off nor crawls.
+                const float target = osd.persistent ? kOsdFadedOpacity : 0.0f;
+
+                float t = 0.0f;
+                if (now < osd.until)
+                {
+                    const auto left = osd.until - now;
+                    t = (left >= kOsdFade)
+                      ? 1.0f
+                      : std::chrono::duration<float>(left).count()
+                          / std::chrono::duration<float>(kOsdFade).count();
+                }
+                t = std::clamp(t, 0.0f, 1.0f);
+
+                const float ease = t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+                osdAlpha = target + (1.0f - target) * ease;
+
+                // Applied by the sprite shader rather than baked into the
+                // bitmap: an animated fade through the cache would upload a
+                // texture per step.
+                if (osdAlpha > 0.004f && m_osdCache.Acquire(osd.text, fontPx, 1.0f, osdLabel))
                     osdShape = osdLabel.srv;
+                else
+                    osdAlpha = 0.0f;
             }
         }
+
+        // Quantised so a fading readout redraws while it fades, without asking
+        // for a frame per imperceptible step.
+        const int osdAlphaStep = static_cast<int>(osdAlpha * 64.0f);
 
         // Nothing new: no frame, no source movement, no cursor movement.
         // Presenting anyway would only block on vSync and burn GPU time.
@@ -936,7 +1065,8 @@ void App::RenderMonitor(size_t monitorIndex)
                              && (m_lastSpritePos[rectSlot].y == spritePos.y)
                              && (m_lastSpriteShape[rectSlot] == spriteShape);
 
-        const bool osdSame = (m_lastOsdShape[rectSlot] == osdShape);
+        const bool osdSame = (m_lastOsdShape[rectSlot] == osdShape)
+                          && (m_lastOsdAlpha[rectSlot] == osdAlphaStep);
 
         if (!frame.isNewFrame && rectSame && spriteSame && osdSame)
         {
@@ -948,6 +1078,7 @@ void App::RenderMonitor(size_t monitorIndex)
         m_lastSpritePos[rectSlot]   = spritePos;
         m_lastSpriteShape[rectSlot] = spriteShape;
         m_lastOsdShape[rectSlot]    = osdShape;
+        m_lastOsdAlpha[rectSlot]    = osdAlphaStep;
 
         // nullptr means "re-use the last frame".
         ID3D11Texture2D* newFrame = (frame.isNewFrame && frame.texture)
@@ -1012,7 +1143,8 @@ void App::RenderMonitor(size_t monitorIndex)
 
             m_renderer.RenderSprite(monitorIndex, osdLabel.srv, x, y,
                 static_cast<float>(osdLabel.width),
-                static_cast<float>(osdLabel.height));
+                static_cast<float>(osdLabel.height),
+                osdAlpha);
         }
 
         // vSync only in flip mode.
@@ -1154,6 +1286,17 @@ void App::OnToggleZoom()
     ToggleZoomOnMonitor(index);
 }
 
+// =============================================================================
+// RememberZoom — rememberZoomLevel, minus the logon case
+// =============================================================================
+// Every read of the setting goes through here, so a session started by the
+// logon task neither restores a remembered level nor writes one back.
+// =============================================================================
+bool App::RememberZoom() const
+{
+    return m_settings.General().rememberZoomLevel && !LaunchedAtStartup();
+}
+
 void App::ToggleZoomOnMonitor(size_t i)
 {
     const MonitorInfo* before = m_monitorManager.GetMonitor(i);
@@ -1183,7 +1326,7 @@ void App::ToggleZoomOnMonitor(size_t i)
     {
         // Which level does zoom come on at? The last one used when
         // rememberZoomLevel is set, otherwise twice the minimum.
-        float startZoom = m_settings.General().rememberZoomLevel
+        float startZoom = RememberZoom()
             ? std::clamp(ms.lastZoom, ms.minZoom, ms.maxZoom)
             : std::clamp(ms.minZoom * 2.0f, ms.minZoom, ms.maxZoom);
 
@@ -1200,7 +1343,7 @@ void App::ToggleZoomOnMonitor(size_t i)
         // Save the level in use now, not at shutdown. By then zoomLevel has
         // already been reset to 1.0 and LastZoom=1 is what reaches the disk.
         if (wasActive
-            && m_settings.General().rememberZoomLevel
+            && RememberZoom()
             && levelInUse > ms.minZoom)
         {
             auto updated = ms;
@@ -1293,7 +1436,7 @@ void App::OnZoomStep(int direction)
 
             m_monitorManager.ToggleZoom(i);
 
-            const float startZoom = m_settings.General().rememberZoomLevel
+            const float startZoom = RememberZoom()
                 ? std::clamp(ms.lastZoom, ms.minZoom, ms.maxZoom)
                 : std::clamp(ms.minZoom + ms.zoomStep, ms.minZoom, ms.maxZoom);
 
@@ -1315,7 +1458,7 @@ void App::OnZoomStep(int direction)
         {
             // Store the level in use BEFORE closing: ToggleZoom resets
             // zoomLevel to minZoom.
-            if (m_settings.General().rememberZoomLevel)
+            if (RememberZoom())
             {
                 auto updated = ms;
                 updated.lastZoom = std::clamp(ms.minZoom + ms.zoomStep,
@@ -1986,7 +2129,7 @@ void App::Shutdown()
     UnregisterClassW(kMsgWindowClass, m_hInstance);
 
     // 7. Save the settings, last zoom levels included
-    if (m_settings.General().rememberZoomLevel)
+    if (RememberZoom())
     {
         for (size_t i = 0; i < m_monitorManager.GetMonitorCount(); ++i)
         {

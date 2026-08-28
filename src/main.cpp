@@ -249,11 +249,16 @@ int WINAPI wWinMain(
     // which is precisely the failure the hand-built alpha channel invites.
     if (std::wcsstr(GetCommandLineW(), L"--dump-osd") != nullptr)
     {
-        const struct { const wchar_t* text; int px; } kLabels[] = {
-            { L"2.50x",  54 },
-            { L"12.00x", 54 },
-            { L"Frozen", 54 },
-            { L"Live",   22 },
+        // The faded "Frozen" is here for the same reason the others are: whether
+        // 12% opacity is "still findable" or "invisible" is a question about the
+        // picture, and no assertion answers it.
+        const struct { const wchar_t* text; int px; float opacity; } kLabels[] = {
+            { L"2.50x",  54, 1.00f },
+            { L"12.00x", 54, 1.00f },
+            { L"Frozen", 54, 1.00f },
+            { L"Frozen", 54, 0.12f },
+            { L"Off",    54, 1.00f },
+            { L"Live",   22, 1.00f },
         };
 
         wchar_t dir[MAX_PATH]{};
@@ -264,7 +269,7 @@ int WINAPI wWinMain(
         for (const auto& l : kLabels)
         {
             BetterMagnifier::OsdBitmap osd;
-            if (!BetterMagnifier::RenderOsdText(l.text, l.px, osd))
+            if (!BetterMagnifier::RenderOsdText(l.text, l.px, osd, l.opacity))
             {
                 LOG_ERROR("RenderOsdText failed for {}", ToUtf8(l.text));
                 ++failures;
@@ -279,7 +284,8 @@ int WINAPI wWinMain(
             as.height = osd.height;
 
             wchar_t path[MAX_PATH]{};
-            swprintf_s(path, L"%ls\\bm-osd-%ls-%d.bmp", dir, l.text, l.px);
+            swprintf_s(path, L"%ls\\bm-osd-%ls-%d-a%d.bmp", dir, l.text, l.px,
+                       static_cast<int>(l.opacity * 100.0f));
 
             if (!BetterMagnifier::WriteCursorBitmapFile(as, path))
             {

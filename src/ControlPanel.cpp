@@ -1139,15 +1139,18 @@ void ControlPanel::BuildSettingsTab()
     panel.Children().Append(m_impl->startWithWindowsBox);
 
     panel.Children().Append(MakeHint(
-        L"Writes an HKCU Run entry. This app requires administrator rights, so Windows "
-        L"may refuse to launch it from Run at logon; a Task Scheduler task with highest "
-        L"privileges is the reliable route."));
+        L"Registers a logon task with highest privileges. A plain Run entry cannot start "
+        L"this app, because Windows drops one that requires administrator rights instead "
+        L"of prompting."));
 
     m_impl->rememberZoomBox = WUXC::CheckBox{};
     m_impl->rememberZoomBox.Content(winrt::box_value(L"Remember the zoom level"));
     m_impl->rememberZoomBox.IsChecked(
         winrt::Windows::Foundation::IReference<bool>{ g.rememberZoomLevel });
     panel.Children().Append(m_impl->rememberZoomBox);
+
+    panel.Children().Append(MakeHint(
+        L"Ignored for a session started at logon: after a boot every monitor is at 1.00x."));
 
     // ── Settings file ──
     panel.Children().Append(MakeHeader(L"Settings file"));
