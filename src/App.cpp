@@ -1004,26 +1004,53 @@ void App::RenderMonitor(size_t monitorIndex)
         // anything change" it either never gets drawn or, worse, gets drawn and
         // then stays up forever on a still screen.
         OsdCache::Label osdLabel;
-        const void* osdShape = nullptr;
+        const void* osdShape  = nullptr;
+        float       osdAlpha  = 0.0f;
 
         {
             const OsdState& osd = m_osd[rectSlot];
+            const auto      now = std::chrono::steady_clock::now();
 
-            const bool full = std::chrono::steady_clock::now() < osd.until;
-
-            if (!osd.text.empty() && (full || osd.persistent))
+            if (!osd.text.empty() && (now < osd.until || osd.persistent))
             {
                 // Sized from the monitor rather than fixed, so it stays the
                 // same apparent size on a 4K display as on a 1080p one. Not
                 // scaled by zoom: this is our own UI drawn on top of the
                 // magnified content, not part of it.
-                const int fontPx = std::clamp(static_cast<int>(mon->Height() / 26), 18, 64);
+                const int fontPx = std::clamp(static_cast<int>(mon->Height() / 38), 14, 44);
 
-                if (m_osdCache.Acquire(osd.text, fontPx,
-                                       full ? 1.0f : kOsdFadedOpacity, osdLabel))
+                // Smootherstep across the last kOsdFade, down to zero or, for a
+                // persistent readout, to kOsdFadedOpacity. Zero slope at both
+                // ends, so it neither snaps off nor crawls.
+                const float target = osd.persistent ? kOsdFadedOpacity : 0.0f;
+
+                float t = 0.0f;
+                if (now < osd.until)
+                {
+                    const auto left = osd.until - now;
+                    t = (left >= kOsdFade)
+                      ? 1.0f
+                      : std::chrono::duration<float>(left).count()
+                          / std::chrono::duration<float>(kOsdFade).count();
+                }
+                t = std::clamp(t, 0.0f, 1.0f);
+
+                const float ease = t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+                osdAlpha = target + (1.0f - target) * ease;
+
+                // Applied by the sprite shader rather than baked into the
+                // bitmap: an animated fade through the cache would upload a
+                // texture per step.
+                if (osdAlpha > 0.004f && m_osdCache.Acquire(osd.text, fontPx, 1.0f, osdLabel))
                     osdShape = osdLabel.srv;
+                else
+                    osdAlpha = 0.0f;
             }
         }
+
+        // Quantised so a fading readout redraws while it fades, without asking
+        // for a frame per imperceptible step.
+        const int osdAlphaStep = static_cast<int>(osdAlpha * 64.0f);
 
         // Nothing new: no frame, no source movement, no cursor movement.
         // Presenting anyway would only block on vSync and burn GPU time.
@@ -1038,7 +1065,8 @@ void App::RenderMonitor(size_t monitorIndex)
                              && (m_lastSpritePos[rectSlot].y == spritePos.y)
                              && (m_lastSpriteShape[rectSlot] == spriteShape);
 
-        const bool osdSame = (m_lastOsdShape[rectSlot] == osdShape);
+        const bool osdSame = (m_lastOsdShape[rectSlot] == osdShape)
+                          && (m_lastOsdAlpha[rectSlot] == osdAlphaStep);
 
         if (!frame.isNewFrame && rectSame && spriteSame && osdSame)
         {
@@ -1050,6 +1078,7 @@ void App::RenderMonitor(size_t monitorIndex)
         m_lastSpritePos[rectSlot]   = spritePos;
         m_lastSpriteShape[rectSlot] = spriteShape;
         m_lastOsdShape[rectSlot]    = osdShape;
+        m_lastOsdAlpha[rectSlot]    = osdAlphaStep;
 
         // nullptr means "re-use the last frame".
         ID3D11Texture2D* newFrame = (frame.isNewFrame && frame.texture)
@@ -1114,7 +1143,8 @@ void App::RenderMonitor(size_t monitorIndex)
 
             m_renderer.RenderSprite(monitorIndex, osdLabel.srv, x, y,
                 static_cast<float>(osdLabel.width),
-                static_cast<float>(osdLabel.height));
+                static_cast<float>(osdLabel.height),
+                osdAlpha);
         }
 
         // vSync only in flip mode.

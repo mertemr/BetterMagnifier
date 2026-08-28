@@ -189,9 +189,12 @@ private:
 
     static constexpr std::chrono::milliseconds kOsdDuration{1400};
 
-    // What a persistent readout drops to once kOsdDuration is up: still there to
-    // be found, no longer competing with the content it sits on.
+    // What a persistent readout settles at once kOsdDuration is up: still there
+    // to be found, no longer competing with the content it sits on.
     static constexpr float kOsdFadedOpacity = 0.12f;
+
+    // Tail of kOsdDuration spent fading rather than switching.
+    static constexpr std::chrono::milliseconds kOsdFade{450};
 
     // Sprite size relative to the content scale. Cached rather than read from
     // SettingsStore in the draw call: the panel thread writes that struct and
@@ -230,6 +233,7 @@ private:
     // screen and then never be cleared, because its expiry changes nothing else
     // the skip test can see.
     std::array<const void*, StatusSnapshot::kMaxMonitors> m_lastOsdShape{};
+    std::array<int, StatusSnapshot::kMaxMonitors>        m_lastOsdAlpha{};
 
     // Nothing presented this tick means vSync did not pace the loop, so it
     // needs an explicit sleep.

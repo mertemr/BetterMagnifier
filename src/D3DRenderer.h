@@ -112,7 +112,8 @@ public:
     // Coordinates are target pixels; the top-left corner, hotspot already
     // subtracted by the caller. Call between RenderFrame and Present.
     bool RenderSprite(size_t targetIndex, ID3D11ShaderResourceView* srv,
-                      float x, float y, float width, float height);
+                      float x, float y, float width, float height,
+                      float opacity = 1.0f);
 
     void Present(size_t targetIndex, bool vSync = true);
 

@@ -83,6 +83,8 @@ cbuffer SpriteParams : register(b0)
 {
     // Hedef dikdortgen, NDC: xy = sol-ust, zw = sag-alt
     float4 spriteRect;
+    // x = opacity, kalani hizalama dolgusu
+    float4 spriteFade;
 };
 
 VSOut SpriteVS(uint vid : SV_VertexID)
@@ -98,8 +100,9 @@ VSOut SpriteVS(uint vid : SV_VertexID)
 
 float4 SpritePS(VSOut input) : SV_TARGET
 {
-    // Premultiplied: blend ONE / INV_SRC_ALPHA ile eslesiyor.
-    return srcTex.Sample(srcSmp, input.uv);
+    // Premultiplied: blend ONE / INV_SRC_ALPHA ile eslesiyor. Opacity hem rgb
+    // hem alpha'yi olcekler, premultiplied'da dogru olan bu.
+    return srcTex.Sample(srcSmp, input.uv) * spriteFade.x;
 }
 )HLSL";
 
@@ -560,7 +563,7 @@ bool D3DRenderer::CreateShaders()
     }
 
     D3D11_BUFFER_DESC spriteCb{};
-    spriteCb.ByteWidth      = sizeof(float) * 4;
+    spriteCb.ByteWidth      = sizeof(float) * 8;
     spriteCb.Usage          = D3D11_USAGE_DEFAULT;
     spriteCb.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
     spriteCb.CPUAccessFlags = 0;
@@ -948,9 +951,13 @@ bool D3DRenderer::EnsureSourceTexture(RenderTarget& rt, const D3D11_TEXTURE2D_DE
 // is already there rather than clearing it.
 // =============================================================================
 bool D3DRenderer::RenderSprite(size_t targetIndex, ID3D11ShaderResourceView* srv,
-                               float x, float y, float width, float height)
+                               float x, float y, float width, float height,
+                               float opacity)
 {
     if (targetIndex >= m_renderTargets.size() || !srv || !m_spriteVS || !m_spritePS)
+        return false;
+
+    if (opacity <= 0.0f)
         return false;
 
     RenderTarget& rt = m_renderTargets[targetIndex];
@@ -968,14 +975,15 @@ bool D3DRenderer::RenderSprite(size_t targetIndex, ID3D11ShaderResourceView* srv
     const float fw = static_cast<float>(rt.width);
     const float fh = static_cast<float>(rt.height);
 
-    const float rect[4] = {
+    const float params[8] = {
         (x / fw) * 2.0f - 1.0f,
         1.0f - (y / fh) * 2.0f,
         ((x + width)  / fw) * 2.0f - 1.0f,
         1.0f - ((y + height) / fh) * 2.0f,
+        std::min(opacity, 1.0f), 0.0f, 0.0f, 0.0f,
     };
 
-    m_context->UpdateSubresource(m_spriteBuffer.Get(), 0, nullptr, rect, 0, 0);
+    m_context->UpdateSubresource(m_spriteBuffer.Get(), 0, nullptr, params, 0, 0);
 
     m_context->OMSetRenderTargets(1, rt.rtv.GetAddressOf(), nullptr);
 
