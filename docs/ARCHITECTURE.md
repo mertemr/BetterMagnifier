@@ -427,6 +427,24 @@ the one that ships. It performs a real feed check and reports through the exit
 code — `0` up to date, `2` an update is available, `3` the check failed — so a
 script can gate on it. `.\bm.ps1 check-update` wraps it.
 
+`--startup` is passed only by the logon task the *Start with Windows* setting
+registers, and it does one thing: it turns remember-zoom off for that session,
+so a machine that has just booted comes up at 1.00x on every monitor rather
+than at whatever level the last session left behind. Nothing else reads it.
+
+## Starting with Windows
+
+A **logon scheduled task**, not an `HKCU\...\Run` entry. The Run entry written
+until 0.3.1 never launched anything: the binary is `RequireAdministrator`, and
+Windows drops such an entry at logon rather than prompting for UAC — which is
+exactly the "it doesn't start at startup" report. `schtasks /Create /SC ONLOGON
+/RL HIGHEST` is the documented way round it, and `schtasks.exe` is on every
+machine, so there is no Task Scheduler COM plumbing to own.
+
+The stale Run value is deleted on every call, and the task is registered at
+startup as well as on a settings change, so a copy that already had the setting
+on migrates without the user touching the checkbox.
+
 **Environment variables have to be set persistently.** Elevation breaks the
 obvious way of using them: a process elevated through UAC gets a fresh
 environment built from the user's registry, not the launching process'

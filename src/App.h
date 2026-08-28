@@ -70,6 +70,9 @@ private:
     // Same, on a named monitor: the control panel drives one card at a time.
     void ToggleZoomOnMonitor(size_t monitorIndex);
 
+    // rememberZoomLevel, off for a session the logon task started.
+    bool RememberZoom() const;
+
     void OnShowPanel();
 
     // ── Updates ──
