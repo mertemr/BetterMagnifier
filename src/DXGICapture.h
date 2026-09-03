@@ -18,6 +18,8 @@
 #include <dxgi1_5.h>
 #include <wrl/client.h>
 #include <chrono>
+#include <cstdint>
+#include <vector>
 
 namespace BetterMagnifier {
 
@@ -25,7 +27,16 @@ struct CapturedFrame
 {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     DXGI_OUTDUPL_FRAME_INFO                 frameInfo{};
+
+    // A new DESKTOP IMAGE — not merely a new acquire.
+    //
+    // AcquireNextFrame also succeeds when nothing but the pointer moved, and
+    // says so by leaving LastPresentTime at zero. Counting those as new frames
+    // meant a full-screen CopyResource, a full shader pass and a layered-window
+    // Present on every single mouse move over a completely static desktop,
+    // which for a magnifier is most of the frames it ever draws.
     bool                                    isNewFrame = false;
+
     UINT                                    width  = 0;
     UINT                                    height = 0;
 };
@@ -49,6 +60,24 @@ public:
     // isNewFrame false means the screen did not change; keep using the
     // previous frame.
     CapturedFrame AcquireFrame(UINT timeoutMs = 16);
+
+    // ── What changed in the last acquired frame ──
+    //
+    // Desktop Duplication reports the regions it repainted, and a magnifier
+    // showing one corner of the screen does not care about a video playing in
+    // another. Skipping the draw when the change misses the magnified region
+    // is worth far more here than it would be in a full-screen capture tool:
+    // the overlay is a layered window, so every Present is a DWM surface
+    // update over the whole monitor.
+    //
+    // Coordinates are the TEXTURE's, which on a rotated output is not desktop
+    // space — see GetRotation. Use DesktopRectToTextureRect to compare.
+    //
+    // DirtyKnown() false means the metadata was unavailable or incomplete and
+    // the caller must assume everything changed. That is the safe reading and
+    // the one the first frame after a (re)initialisation always gets.
+    bool DirtyKnown() const { return m_dirtyKnown; }
+    bool DirtyIntersects(const RECT& textureRect) const;
 
     // MUST be called after AcquireFrame or the next acquire fails.
     void ReleaseFrame();
@@ -82,6 +111,11 @@ private:
     // locking the workstation permanently kill capture.
     void ReleaseDuplication();
 
+    // Fills m_dirtyRects / m_dirtyKnown from the frame's move and dirty rect
+    // metadata. Any failure leaves m_dirtyKnown false, which reads as "assume
+    // the whole texture changed".
+    void ReadDirtyMetadata(const DXGI_OUTDUPL_FRAME_INFO& frameInfo);
+
     Microsoft::WRL::ComPtr<IDXGIOutputDuplication> m_duplication;
     Microsoft::WRL::ComPtr<IDXGIOutput1>           m_output1;
 
@@ -101,6 +135,19 @@ private:
 
     uint64_t m_frameCount = 0;
     uint64_t m_errorCount = 0;
+
+    // The first frame after DuplicateOutput carries the whole desktop whether
+    // or not the metadata says so, and its LastPresentTime cannot be trusted
+    // to be non-zero. Forced through as a full update exactly once, or a
+    // session that starts on a perfectly static screen would never get an
+    // image at all.
+    bool m_firstFrame = true;
+
+    // Reused across frames: the metadata is a few kilobytes and allocating it
+    // per frame would put the render thread on the heap at display rate.
+    std::vector<uint8_t> m_metadata;
+    std::vector<RECT>    m_dirtyRects;
+    bool                 m_dirtyKnown = false;
 
     // Throttles recovery attempts. While the workstation is locked every
     // attempt fails, and retrying per frame is pure log spam.

@@ -48,6 +48,10 @@ DXGICapture::DXGICapture(DXGICapture&& other) noexcept
     , m_rotation(other.m_rotation)
     , m_frameCount(other.m_frameCount)
     , m_errorCount(other.m_errorCount)
+    , m_firstFrame(other.m_firstFrame)
+    , m_metadata(std::move(other.m_metadata))
+    , m_dirtyRects(std::move(other.m_dirtyRects))
+    , m_dirtyKnown(other.m_dirtyKnown)
     , m_lastReinitAttempt(other.m_lastReinitAttempt)
 {
     other.m_device = nullptr;
@@ -73,6 +77,10 @@ DXGICapture& DXGICapture::operator=(DXGICapture&& other) noexcept
         m_rotation          = other.m_rotation;
         m_frameCount        = other.m_frameCount;
         m_errorCount        = other.m_errorCount;
+        m_firstFrame        = other.m_firstFrame;
+        m_metadata          = std::move(other.m_metadata);
+        m_dirtyRects        = std::move(other.m_dirtyRects);
+        m_dirtyKnown        = other.m_dirtyKnown;
         m_lastReinitAttempt = other.m_lastReinitAttempt;
 
         other.m_device = nullptr;
@@ -145,6 +153,9 @@ bool DXGICapture::Initialize(ID3D11Device* device, IDXGIOutput* output)
     m_needsReinit = false;
     m_frameCount  = 0;
     m_errorCount  = 0;
+    m_firstFrame  = true;
+    m_dirtyKnown  = false;
+    m_dirtyRects.clear();
 
     LOG_INFO("DXGICapture started: {}x{} desktop, rotation {}",
         m_width, m_height, RotationName(m_rotation));
@@ -176,8 +187,13 @@ CapturedFrame DXGICapture::AcquireFrame(UINT timeoutMs)
 
     if (hr == DXGI_ERROR_WAIT_TIMEOUT)
     {
-        // Normal: the screen did not change.
+        // Normal: the screen did not change. Which also means "what changed"
+        // is known and empty, rather than left over from the last frame that
+        // did arrive — callers guard on isNewFrame first, but a stale answer
+        // sitting in an accessor is a trap for the next one that does not.
         result.isNewFrame = false;
+        m_dirtyKnown = true;
+        m_dirtyRects.clear();
         return result;
     }
 
@@ -215,13 +231,148 @@ CapturedFrame DXGICapture::AcquireFrame(UINT timeoutMs)
         return result;
     }
 
+    // ── Was the desktop image actually updated? ──
+    //
+    // AcquireNextFrame succeeds for a pointer-only update too, and says so by
+    // leaving LastPresentTime at zero: the texture handed back is the previous
+    // desktop image, unchanged. Treating that as a new frame cost a
+    // full-screen copy, a full shader pass and a layered-window Present on
+    // every mouse move over a static screen — which, for a magnifier, is the
+    // single most common thing that happens.
+    //
+    // The first frame after DuplicateOutput is forced through regardless. It
+    // carries the whole desktop, and on a screen that is not changing there
+    // may never be another one; without this the magnifier would come up
+    // showing nothing at all until something moved.
+    const bool desktopUpdated = (frameInfo.LastPresentTime.QuadPart != 0) || m_firstFrame;
+
+    if (desktopUpdated)
+    {
+        if (m_firstFrame)
+        {
+            // No metadata is trustworthy for a frame we are forcing through.
+            m_firstFrame = false;
+            m_dirtyKnown = false;
+            m_dirtyRects.clear();
+        }
+        else
+        {
+            ReadDirtyMetadata(frameInfo);
+        }
+    }
+    else
+    {
+        // Nothing repainted, so "what changed" is the empty set — not unknown.
+        m_dirtyKnown = true;
+        m_dirtyRects.clear();
+    }
+
     result.frameInfo  = frameInfo;
-    result.isNewFrame = true;
+    result.isNewFrame = desktopUpdated;
     result.width      = m_width;
     result.height     = m_height;
-    m_frameCount++;
+
+    if (desktopUpdated)
+        m_frameCount++;
 
     return result;
+}
+
+// =============================================================================
+// ReadDirtyMetadata — which parts of the texture this frame repainted
+// =============================================================================
+//
+// Move rects have to be read before dirty rects: they share one metadata
+// buffer and the dirty rects follow the move rects in it.
+//
+// A move is a scroll — a region copied from one place on screen to another.
+// Both ends are treated as changed: the destination obviously, and the source
+// because whatever was uncovered behind it is now something else. Being
+// conservative here costs a skipped optimisation; being wrong costs a stale
+// region on screen with nothing to make it repaint.
+//
+// Any failure — no metadata, a short buffer, an error — leaves m_dirtyKnown
+// false, which the caller reads as "assume everything changed". There is no
+// path here that can make the renderer skip a region that really did move.
+// =============================================================================
+void DXGICapture::ReadDirtyMetadata(const DXGI_OUTDUPL_FRAME_INFO& frameInfo)
+{
+    m_dirtyKnown = false;
+    m_dirtyRects.clear();
+
+    if (!m_duplication || frameInfo.TotalMetadataBufferSize == 0)
+        return;
+
+    if (m_metadata.size() < frameInfo.TotalMetadataBufferSize)
+        m_metadata.resize(frameInfo.TotalMetadataBufferSize);
+
+    const UINT bufferSize = static_cast<UINT>(m_metadata.size());
+    UINT used = 0;
+
+    // ── Move rects ──
+    UINT moveBytes = 0;
+    HRESULT hr = m_duplication->GetFrameMoveRects(
+        bufferSize, reinterpret_cast<DXGI_OUTDUPL_MOVE_RECT*>(m_metadata.data()), &moveBytes);
+
+    if (FAILED(hr))
+        return;
+
+    const auto* moves = reinterpret_cast<const DXGI_OUTDUPL_MOVE_RECT*>(m_metadata.data());
+    const size_t moveCount = moveBytes / sizeof(DXGI_OUTDUPL_MOVE_RECT);
+
+    for (size_t i = 0; i < moveCount; ++i)
+    {
+        const RECT& dst = moves[i].DestinationRect;
+        m_dirtyRects.push_back(dst);
+
+        // The source region, which is the destination rectangle's size taken
+        // from wherever it was copied.
+        RECT src{};
+        src.left   = moves[i].SourcePoint.x;
+        src.top    = moves[i].SourcePoint.y;
+        src.right  = src.left + (dst.right  - dst.left);
+        src.bottom = src.top  + (dst.bottom - dst.top);
+        m_dirtyRects.push_back(src);
+    }
+
+    used = moveBytes;
+
+    // ── Dirty rects, written after the move rects in the same buffer ──
+    UINT dirtyBytes = 0;
+    hr = m_duplication->GetFrameDirtyRects(
+        bufferSize - used, reinterpret_cast<RECT*>(m_metadata.data() + used), &dirtyBytes);
+
+    if (FAILED(hr))
+    {
+        m_dirtyRects.clear();
+        return;
+    }
+
+    const auto* dirty = reinterpret_cast<const RECT*>(m_metadata.data() + used);
+    const size_t dirtyCount = dirtyBytes / sizeof(RECT);
+
+    for (size_t i = 0; i < dirtyCount; ++i)
+        m_dirtyRects.push_back(dirty[i]);
+
+    m_dirtyKnown = true;
+}
+
+// Empty and known means nothing repainted. Empty and unknown never reaches
+// here — the caller checks DirtyKnown() first — but returning true for it
+// would still be the safe answer, so it does.
+bool DXGICapture::DirtyIntersects(const RECT& textureRect) const
+{
+    if (!m_dirtyKnown)
+        return true;
+
+    for (const RECT& r : m_dirtyRects)
+    {
+        RECT out{};
+        if (IntersectRect(&out, &r, &textureRect))
+            return true;
+    }
+
+    return false;
 }
 
 void DXGICapture::ReleaseFrame()
@@ -294,6 +445,9 @@ bool DXGICapture::Reinitialize()
     m_initialized = true;
     m_needsReinit = false;
     m_errorCount  = 0;
+    m_firstFrame  = true;
+    m_dirtyKnown  = false;
+    m_dirtyRects.clear();
 
     LOG_INFO("DXGICapture recovered ({}x{} desktop, rotation {})",
         m_width, m_height, RotationName(m_rotation));

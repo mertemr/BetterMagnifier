@@ -201,6 +201,71 @@ SourceUvMapping ComputeSourceUv(DXGI_MODE_ROTATION rotation,
 }
 
 // =============================================================================
+// DesktopRectToTextureRect
+// =============================================================================
+// The pixel-space twin of ComputeSourceUv, and it has to stay its twin: the
+// self-check drives both with the same inputs and asserts they land on the
+// same rectangle, so a sign error cannot be introduced in one without the
+// other catching it.
+//
+// Same continuous mapping, read forwards:
+//   IDENTITY   u = x,      v = y
+//   ROTATE90   u = y,      v = th - x
+//   ROTATE180  u = tw - x, v = th - y
+//   ROTATE270  u = tw - y, v = x
+//
+// A negating axis swaps which desktop edge becomes which texture edge, which
+// is why each case names both ends rather than adding an offset to a width.
+// =============================================================================
+RECT DesktopRectToTextureRect(DXGI_MODE_ROTATION rotation,
+                              UINT texW, UINT texH, RECT desktopRect)
+{
+    const long tw = static_cast<long>(texW);
+    const long th = static_cast<long>(texH);
+
+    const long L = desktopRect.left;
+    const long T = desktopRect.top;
+    const long R = desktopRect.right;
+    const long B = desktopRect.bottom;
+
+    RECT out{};
+
+    switch (rotation)
+    {
+    case DXGI_MODE_ROTATION_ROTATE90:
+        // y runs along u, x runs backwards along v.
+        out.left   = T;
+        out.top    = th - R;
+        out.right  = B;
+        out.bottom = th - L;
+        break;
+
+    case DXGI_MODE_ROTATION_ROTATE180:
+        out.left   = tw - R;
+        out.top    = th - B;
+        out.right  = tw - L;
+        out.bottom = th - T;
+        break;
+
+    case DXGI_MODE_ROTATION_ROTATE270:
+        out.left   = tw - B;
+        out.top    = L;
+        out.right  = tw - T;
+        out.bottom = R;
+        break;
+
+    default:
+        out.left   = L;
+        out.top    = T;
+        out.right  = R;
+        out.bottom = B;
+        break;
+    }
+
+    return out;
+}
+
+// =============================================================================
 // Destructor
 // =============================================================================
 D3DRenderer::~D3DRenderer()
@@ -726,21 +791,8 @@ bool D3DRenderer::RenderFrame(
         return false;
 
     // ── Yeni frame geldiyse kendi texture'imiza al ──
-    if (srcTexture)
-    {
-        D3D11_TEXTURE2D_DESC srcDesc{};
-        srcTexture->GetDesc(&srcDesc);
-
-        if (!EnsureSourceTexture(rt, srcDesc))
-            return false;
-
-        // Unbind the SRV before copying. The same resource cannot be a shader
-        // hem kopya hedefi olamaz — D3D11 debug layer uyarir ve islem duser.
-        ID3D11ShaderResourceView* const noSrv[1] = { nullptr };
-        m_context->PSSetShaderResources(0, 1, noSrv);
-
-        m_context->CopyResource(rt.sourceTex.Get(), srcTexture);
-    }
+    if (srcTexture && !UpdateSourceTexture(targetIndex, srcTexture))
+        return false;
 
     // No frame has arrived yet, so there is nothing to draw. Normal at startup.
     if (!rt.sourceTex || !rt.sourceSrv)
@@ -797,6 +849,31 @@ bool D3DRenderer::RenderFrame(
     // Three vertices: the single triangle that covers the screen.
     m_context->Draw(3, 0);
 
+    return true;
+}
+
+// =============================================================================
+// UpdateSourceTexture — copy a captured frame in without drawing it
+// =============================================================================
+bool D3DRenderer::UpdateSourceTexture(size_t targetIndex, ID3D11Texture2D* srcTexture)
+{
+    if (targetIndex >= m_renderTargets.size() || !srcTexture || !m_context)
+        return false;
+
+    auto& rt = m_renderTargets[targetIndex];
+
+    D3D11_TEXTURE2D_DESC srcDesc{};
+    srcTexture->GetDesc(&srcDesc);
+
+    if (!EnsureSourceTexture(rt, srcDesc))
+        return false;
+
+    // Unbind the SRV before copying. The same resource cannot be a shader
+    // hem kopya hedefi olamaz — D3D11 debug layer uyarir ve islem duser.
+    ID3D11ShaderResourceView* const noSrv[1] = { nullptr };
+    m_context->PSSetShaderResources(0, 1, noSrv);
+
+    m_context->CopyResource(rt.sourceTex.Get(), srcTexture);
     return true;
 }
 
@@ -1318,6 +1395,93 @@ void D3DRendererSelfCheck()
         const SourceUvMapping m = ComputeSourceUv(
             DXGI_MODE_ROTATION_IDENTITY, 0, 0, RECT{ 0, 0, 100, 100 });
         BM_SELFCHECK(approx(m.uAxisX, 0.0f) && approx(m.vAxisY, 0.0f));
+    }
+
+    // ── DesktopRectToTextureRect agrees with ComputeSourceUv ──
+    //
+    // The two are the same transform written twice, once in UV and once in
+    // pixels, and they are used for different things: the shader samples with
+    // one, the dirty-region test compares rectangles with the other. If they
+    // ever disagree, a portrait monitor magnifies correctly and then quietly
+    // stops repainting, because the region Desktop Duplication said had
+    // changed was compared against a rectangle in the wrong space.
+    //
+    // Driving both from the same inputs and asserting the same answer is what
+    // makes that impossible to introduce in one of them alone.
+    {
+        const DXGI_MODE_ROTATION kRotations[] = {
+            DXGI_MODE_ROTATION_UNSPECIFIED, DXGI_MODE_ROTATION_IDENTITY,
+            DXGI_MODE_ROTATION_ROTATE90,    DXGI_MODE_ROTATION_ROTATE180,
+            DXGI_MODE_ROTATION_ROTATE270,
+        };
+
+        constexpr UINT texW = 1920, texH = 1080;
+
+        for (DXGI_MODE_ROTATION rot : kRotations)
+        {
+            long deskW = 0, deskH = 0;
+            DesktopExtentForRotation(rot, texW, texH, deskW, deskH);
+
+            const RECT kRects[] = {
+                RECT{ 0, 0, deskW, deskH },                       // everything
+                RECT{ 0, 0, deskW / 2, deskH / 2 },               // top-left
+                RECT{ deskW / 2, deskH / 2, deskW, deskH },       // bottom-right
+                RECT{ deskW / 4, deskH / 8, deskW / 2, deskH },   // deliberately lopsided
+            };
+
+            for (const RECT& r : kRects)
+            {
+                const RECT t = DesktopRectToTextureRect(rot, texW, texH, r);
+
+                // Still a well-formed rectangle, and still inside the texture.
+                BM_SELFCHECK(t.left < t.right && t.top < t.bottom);
+                BM_SELFCHECK(t.left >= 0 && t.top >= 0);
+                BM_SELFCHECK(t.right <= static_cast<long>(texW));
+                BM_SELFCHECK(t.bottom <= static_cast<long>(texH));
+
+                // Area is preserved: a rotation moves a rectangle, it does not
+                // resize one.
+                BM_SELFCHECK((t.right - t.left) * (t.bottom - t.top)
+                          == (r.right - r.left) * (r.bottom - r.top));
+
+                // And it is the same rectangle the shader would sample. The UV
+                // mapping's four corners span exactly this box.
+                const SourceUvMapping m = ComputeSourceUv(rot, texW, texH, r);
+
+                float minU = 2.0f, maxU = -1.0f, minV = 2.0f, maxV = -1.0f;
+                for (float cx : { 0.0f, 1.0f })
+                {
+                    for (float cy : { 0.0f, 1.0f })
+                    {
+                        minU = (std::min)(minU, uvX(m, cx, cy));
+                        maxU = (std::max)(maxU, uvX(m, cx, cy));
+                        minV = (std::min)(minV, uvY(m, cx, cy));
+                        maxV = (std::max)(maxV, uvY(m, cx, cy));
+                    }
+                }
+
+                const auto pixels = [](float uv, UINT extent) {
+                    return std::lround(uv * static_cast<float>(extent));
+                };
+
+                BM_SELFCHECK(pixels(minU, texW) == t.left);
+                BM_SELFCHECK(pixels(maxU, texW) == t.right);
+                BM_SELFCHECK(pixels(minV, texH) == t.top);
+                BM_SELFCHECK(pixels(maxV, texH) == t.bottom);
+            }
+        }
+
+        // A rectangle wholly outside the desktop must come back wholly outside
+        // the texture rather than clamped onto its edge. Clamping would invent
+        // an intersection with the dirty region that does not exist, and the
+        // renderer would draw frames nothing asked for — the mirror image of
+        // the bug this whole path is here to avoid.
+        {
+            const RECT away{ -400, -300, -100, -50 };
+            const RECT t = DesktopRectToTextureRect(
+                DXGI_MODE_ROTATION_IDENTITY, texW, texH, away);
+            BM_SELFCHECK(t.right <= 0 && t.bottom <= 0);
+        }
     }
 
     LOG_INFO("D3DRenderer self-check passed");

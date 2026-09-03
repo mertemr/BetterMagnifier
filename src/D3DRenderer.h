@@ -76,6 +76,20 @@ void DesktopExtentForRotation(DXGI_MODE_ROTATION rotation, UINT texW, UINT texH,
 SourceUvMapping ComputeSourceUv(DXGI_MODE_ROTATION rotation,
                                 UINT texW, UINT texH, RECT srcRect);
 
+// The same transform as ComputeSourceUv, in whole pixels instead of UV.
+//
+// It exists because Desktop Duplication reports which regions it repainted in
+// the TEXTURE's coordinates, and the source rect this application reasons about
+// is in DESKTOP coordinates. Comparing the two without a transform is the
+// rotated-output bug all over again — it would simply be invisible this time,
+// showing up as a magnified region that stops repainting on a portrait monitor.
+//
+// Not clamped: the caller is intersecting rectangles, and clamping a rectangle
+// that is entirely outside the texture would move it to the edge and invent an
+// intersection that does not exist.
+RECT DesktopRectToTextureRect(DXGI_MODE_ROTATION rotation,
+                              UINT texW, UINT texH, RECT desktopRect);
+
 #ifdef _DEBUG
 // Assert-based self-check, run from main. Mirrors ViewportControllerSelfCheck.
 void D3DRendererSelfCheck();
@@ -107,6 +121,19 @@ public:
     // Returns false when there is nothing to draw; do not Present then.
     bool RenderFrame(ID3D11Texture2D* srcTexture, size_t targetIndex, const RECT& srcRect,
                      DXGI_MODE_ROTATION rotation);
+
+    // Take a copy of a freshly captured frame WITHOUT drawing anything.
+    //
+    // Split out of RenderFrame so a frame whose changes miss the magnified
+    // region can be absorbed without paying for the draw and the Present.
+    // Skipping the copy as well is what it looks like it should do and is
+    // wrong: the intermediate texture is also the last-frame store the anchor
+    // pans across, so a region left uncopied goes stale with nothing left to
+    // repaint it. Copying always, drawing sometimes, is the correct split —
+    // and on a layered window the Present is the expensive half anyway.
+    //
+    // Returns false when the texture could not be prepared.
+    bool UpdateSourceTexture(size_t targetIndex, ID3D11Texture2D* srcTexture);
 
     // Draws a premultiplied-BGRA sprite over whatever RenderFrame just drew.
     // Coordinates are target pixels; the top-left corner, hotspot already

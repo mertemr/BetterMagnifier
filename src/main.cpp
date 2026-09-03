@@ -10,6 +10,7 @@
 #include "PointerInput.h"
 #include "SystemCursor.h"
 #include "D3DRenderer.h"
+#include "FramePacer.h"
 #include "CursorRenderer.h"
 #include "OsdRenderer.h"
 #include "UpdateChecker.h"
@@ -180,6 +181,7 @@ int WINAPI wWinMain(
     BetterMagnifier::ViewportControllerSelfCheck();
     BetterMagnifier::PointerInputSelfCheck();
     BetterMagnifier::D3DRendererSelfCheck();
+    BetterMagnifier::FramePacerSelfCheck();
     BetterMagnifier::UpdateCheckerSelfCheck();
 
     // --self-check runs the pure-logic assertions and exits, so the suite is

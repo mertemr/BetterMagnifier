@@ -264,6 +264,7 @@
     <ClCompile Include="src\App.cpp" />
     <ClCompile Include="src\MonitorManager.cpp" />
     <ClCompile Include="src\D3DRenderer.cpp" />
+    <ClCompile Include="src\FramePacer.cpp" />
     <ClCompile Include="src\DXGICapture.cpp" />
     <ClCompile Include="src\OverlayWindow.cpp" />
     <ClCompile Include="src\HotkeyManager.cpp" />
@@ -331,6 +332,7 @@
     <ClInclude Include="src\App.h" />
     <ClInclude Include="src\MonitorManager.h" />
     <ClInclude Include="src\D3DRenderer.h" />
+    <ClInclude Include="src\FramePacer.h" />
     <ClInclude Include="src\DXGICapture.h" />
     <ClInclude Include="src\OverlayWindow.h" />
     <ClInclude Include="src\HotkeyManager.h" />
