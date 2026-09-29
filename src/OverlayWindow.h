@@ -38,6 +38,13 @@ public:
     // topmost keeps us above them.
     void EnsureTopmost();
 
+    // Is a visible, uncloaked window above us in the z-order overlapping this
+    // monitor? The periodic backstop asks this first: SetWindowPos on a window
+    // already at the top is a round trip through the window manager 25 times a
+    // second, paid mostly while a fullscreen game has the foreground and
+    // nothing is covering us at all.
+    bool IsCovered() const;
+
     HWND GetHwnd() const { return m_hwnd; }
     size_t GetMonitorIndex() const { return m_monitorIndex; }
 

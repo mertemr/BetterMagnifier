@@ -60,6 +60,22 @@ public:
 
     void SetViewportConfig(const ViewportConfig& cfg);
 
+    // Pull the render thread's latest viewport request through NOW instead of
+    // waiting for the sync timer.
+    //
+    // The timer is a backstop for "zoom changed with the mouse perfectly
+    // still", and at 16 ms it is a cheap one — but it sat in the middle of the
+    // zoom path, which is a round trip: wheel event, hook, post to the render
+    // thread, render thread updates zoom and publishes the request, THIS
+    // thread applies it and publishes the resulting source origin, render
+    // thread reads it back and draws. Two of those hops used to wait on the
+    // timer, so a zoom step could take longer than the frame it was asking
+    // for. That is the lag the user feels while zooming, and it is entirely
+    // avoidable: the render thread knows the moment the request changes.
+    //
+    // Safe to call from any thread, and a no-op before Start or after Stop.
+    void RequestSync();
+
     // Arm the keyboard hook to report the next key combination instead of
     // acting on it, then disarm itself. The captured event is swallowed, so the
     // key the user pressed does not also reach whatever has focus.
@@ -143,6 +159,15 @@ private:
     // covers that; 16 ms keeps the lag under one frame.
     static constexpr UINT_PTR kSyncTimerId = 1;
     static constexpr UINT     kSyncTimerMs = 16;
+
+    // The nudge RequestSync posts. A thread message rather than a window
+    // message: this thread owns no window, which is also why the timer is a
+    // thread timer.
+    //
+    // WM_APP + 1 rather than WM_USER: WM_USER is per-window-class and this is
+    // not going to a window at all, and the AppMessages.h range belongs to the
+    // render thread's message window.
+    static constexpr UINT kMsgSyncNow = WM_APP + 1;
 
     HWND          m_target       = nullptr;
     HHOOK         m_mouseHook    = nullptr;

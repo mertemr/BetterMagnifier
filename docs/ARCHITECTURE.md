@@ -291,6 +291,57 @@ three-second deadline instead of joining flat, and abandons the thread if
 that expires. A stuck XAML loop then costs a three-second delay on exit rather
 than a hang.
 
+## What capture costs the application being magnified
+
+Desktop Duplication is not free for the thing on screen, and the most common
+thing on screen while this app runs is something else working hard — a game,
+a video. Four rules keep that cost down.
+
+**An idle monitor holds no duplication session.** An open session costs the OS
+a copy of every desktop update into the duplication surface whether or not
+anyone ever acquires from it, so a game on a monitor that is not being
+magnified used to pay for a magnifier that was not magnifying it.
+`DXGICapture::Suspend` drops the session (keeping device and output, like
+recovery does) and `D3DRenderer::ReleaseSourceTexture` drops the last-frame
+store with it — minutes stale by the time zoom returns, and a monitor of VRAM
+held for nothing. `Resume` reopens immediately, bypassing the recovery
+throttle, and the first acquire after it may block up to 100 ms
+(`kFirstFrameTimeoutMs`) because until that frame arrives there is nothing to
+draw. In practice it arrives in 2–5 ms. The panel reports the state as
+"Capture: idle", checked before `captureOk` so a suspended monitor does not
+read as broken.
+
+**A frame is held until the next acquire, not released after drawing.**
+`AcquireFrame` releases the previous frame itself before asking for a new one,
+which is the order `IDXGIOutputDuplication::ReleaseFrame`'s documentation
+recommends: while the client owns a frame the OS accumulates updates rather
+than copying each one into the surface, so a game presenting faster than we
+acquire stops paying for copies nobody reads. Suspend, recovery and teardown
+release on their own way out. The copy out of the surface itself cannot go —
+the acquired texture belongs to the duplication session, and reading it after
+release is outside the API contract.
+
+**Only dirty regions are copied into the last-frame store.** Correct only
+because the store is updated on *every* new frame, before any early return in
+`RenderMonitor`: a frame absorbed without being copied would leave its regions
+stale with nothing to repaint them. `PlanDirtyCopy` is pure and asserted in the
+self-check; it falls back to one `CopyResource` when the metadata is unknown,
+there are more than 64 rects, or they cover three quarters of the texture —
+which a fullscreen game does every frame, so the saving is for desktop work. If
+stale regions ever show up while zoomed, this is the first suspect, and passing
+`nullptr` for the rects restores the full copy.
+
+**The periodic topmost backstop only acts when something covers us.**
+`OverlayWindow::IsCovered` walks the z-order above the overlay, skipping
+invisible and DWM-cloaked windows (the shell keeps several of each above
+everything), and `SetWindowPos` is issued only on overlap. The event path for
+menus and popups still asserts unconditionally.
+
+Scheduling rounds it off: the D3D device asks for GPU thread priority 7 so our
+one copy and one draw are not queued behind a game's frames, and while any
+monitor is magnified the process opts out of EcoQoS, which Windows 11 applies
+to background processes and which on a hybrid CPU means efficiency cores.
+
 ## Lock and unlock recovery
 
 Locking the workstation switches to the secure desktop, where Desktop

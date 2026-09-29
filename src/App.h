@@ -22,6 +22,7 @@
 #include "OsdRenderer.h"
 #include "ControlPanel.h"
 #include "UpdateChecker.h"
+#include "FramePacer.h"
 
 #include <windows.h>
 #include <vector>
@@ -58,10 +59,30 @@ private:
 
     // Rate-limited: EVENT_OBJECT_SHOW fires constantly and calling
     // SetWindowPos on every one of them is z-order noise.
-    void AssertOverlaysTopmost();
+    //
+    // onlyIfCovered is the periodic backstop: it re-asserts only an overlay
+    // that something visible is actually on top of. The event path passes
+    // false and asserts unconditionally, as it always has.
+    void AssertOverlaysTopmost(bool onlyIfCovered = false);
 
     void Update();
     void RenderMonitor(size_t monitorIndex);
+
+    // Push the settings' frame-rate ceiling into every monitor's pacer.
+    // Called from Initialize, ApplySettings and OnDisplayChange, because the
+    // answer depends on both the setting and the monitor's refresh rate and
+    // either can move without the other.
+    void ApplyFrameRateCaps();
+
+    // How long the loop may idle before the next monitor is due a frame.
+    // Zero when something is due now.
+    std::chrono::steady_clock::duration TimeUntilNextFrame(
+        std::chrono::steady_clock::time_point now) const;
+
+    // Above normal while any monitor is magnified, normal otherwise.
+    // A magnifier that stutters under load is not doing its job, and the load
+    // it competes with is usually the thing being magnified.
+    void ApplyRenderThreadPriority(bool anyActive);
 
     // Act on whichever monitor holds the cursor.
     void OnToggleZoom();
@@ -235,11 +256,39 @@ private:
     std::array<const void*, StatusSnapshot::kMaxMonitors> m_lastOsdShape{};
     std::array<int, StatusSnapshot::kMaxMonitors>        m_lastOsdAlpha{};
 
+    // ── Frame pacing ──
+    //
+    // One pacer per monitor, because the refresh rates differ and pacing a
+    // 144 Hz panel to a 60 Hz one's cadence throws away most of what this
+    // work was for.
+    //
+    // This replaces vSync, which the layered overlay cannot have: its swap
+    // chain is blt, and a vblank wait on top of the DWM surface update
+    // blocked the render thread long enough to stop it pumping messages.
+    // With no brake at all the loop presented as fast as DWM would take it —
+    // every one of those an expensive full-monitor update, most of them
+    // between two refreshes where nothing could ever see them, all of them
+    // out of the GPU budget of the application being magnified.
+    std::array<FramePacer, StatusSnapshot::kMaxMonitors> m_pacers{};
+
+    FrameWaiter m_frameWaiter;
+
+    // Set when a suspended capture is resumed: the next acquire on that
+    // monitor may block briefly for the new session's first frame, because
+    // until it arrives there is nothing at all to draw. See RenderMonitor.
+    std::array<bool, StatusSnapshot::kMaxMonitors> m_awaitFirstFrame{};
+    static constexpr UINT kFirstFrameTimeoutMs = 100;
+
+    // Latched so SetThreadPriority is called on the transition rather than
+    // every tick.
+    bool m_renderPriorityRaised = false;
+
     // Nothing presented this tick means vSync did not pace the loop, so it
     // needs an explicit sleep.
     bool m_presentedThisTick = false;
 
     std::chrono::steady_clock::time_point m_lastTopmostAssert{};
+    std::chrono::steady_clock::time_point m_lastCoverCheck{};
 
     bool m_running     = false;
     bool m_initialized = false;

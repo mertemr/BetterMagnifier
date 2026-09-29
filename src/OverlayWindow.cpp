@@ -7,6 +7,8 @@
 #include "MonitorManager.h"
 #include "Logger.h"
 
+#include <dwmapi.h>   // DWMWA_CLOAKED, for IsCovered
+
 namespace BetterMagnifier {
 
 bool OverlayWindow::s_classRegistered = false;
@@ -243,6 +245,40 @@ void OverlayWindow::EnsureTopmost()
     // focus where the user put it.
     SetWindowPos(m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+// Walks up from us, so the cost is the number of windows ABOVE the overlay —
+// a handful at most, since it is topmost. Invisible and cloaked windows are
+// skipped: the shell keeps several of each above everything, and counting them
+// would make the answer "covered" permanently and the check pointless.
+bool OverlayWindow::IsCovered() const
+{
+    if (!m_hwnd || !m_visible)
+        return false;
+
+    RECT self{};
+    if (!GetWindowRect(m_hwnd, &self))
+        return true;   // cannot tell: the safe answer is the old behaviour
+
+    for (HWND above = GetWindow(m_hwnd, GW_HWNDPREV); above;
+         above = GetWindow(above, GW_HWNDPREV))
+    {
+        if (!IsWindowVisible(above))
+            continue;
+
+        DWORD cloaked = 0;
+        if (SUCCEEDED(DwmGetWindowAttribute(above, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))
+            && cloaked != 0)
+        {
+            continue;
+        }
+
+        RECT r{}, overlap{};
+        if (GetWindowRect(above, &r) && IntersectRect(&overlap, &r, &self))
+            return true;
+    }
+
+    return false;
 }
 
 // =============================================================================

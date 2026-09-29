@@ -108,6 +108,11 @@ float4 SpritePS(VSOut input) : SV_TARGET
 
 // Constant buffer duzeni. D3D11 sabit tampon boyutunu 16'nin kati istiyor —
 // two float4s are exactly 32 bytes.
+// IDXGIDevice::SetGPUThreadPriority takes -7..7. The top of the range: the
+// magnifier's work is tiny, and what it buys is not being queued behind a
+// game's frames. See CreateDevice.
+constexpr INT kGpuThreadPriority = 7;
+
 struct UvParams
 {
     float originX, originY;
@@ -201,6 +206,124 @@ SourceUvMapping ComputeSourceUv(DXGI_MODE_ROTATION rotation,
     }
 
     return m;
+}
+
+// =============================================================================
+// DesktopRectToTextureRect
+// =============================================================================
+// The pixel-space twin of ComputeSourceUv, and it has to stay its twin: the
+// self-check drives both with the same inputs and asserts they land on the
+// same rectangle, so a sign error cannot be introduced in one without the
+// other catching it.
+//
+// Same continuous mapping, read forwards:
+//   IDENTITY   u = x,      v = y
+//   ROTATE90   u = y,      v = th - x
+//   ROTATE180  u = tw - x, v = th - y
+//   ROTATE270  u = tw - y, v = x
+//
+// A negating axis swaps which desktop edge becomes which texture edge, which
+// is why each case names both ends rather than adding an offset to a width.
+// =============================================================================
+RECT DesktopRectToTextureRect(DXGI_MODE_ROTATION rotation,
+                              UINT texW, UINT texH, RECT desktopRect)
+{
+    const long tw = static_cast<long>(texW);
+    const long th = static_cast<long>(texH);
+
+    const long L = desktopRect.left;
+    const long T = desktopRect.top;
+    const long R = desktopRect.right;
+    const long B = desktopRect.bottom;
+
+    RECT out{};
+
+    switch (rotation)
+    {
+    case DXGI_MODE_ROTATION_ROTATE90:
+        // y runs along u, x runs backwards along v.
+        out.left   = T;
+        out.top    = th - R;
+        out.right  = B;
+        out.bottom = th - L;
+        break;
+
+    case DXGI_MODE_ROTATION_ROTATE180:
+        out.left   = tw - R;
+        out.top    = th - B;
+        out.right  = tw - L;
+        out.bottom = th - T;
+        break;
+
+    case DXGI_MODE_ROTATION_ROTATE270:
+        out.left   = tw - B;
+        out.top    = L;
+        out.right  = tw - T;
+        out.bottom = R;
+        break;
+
+    default:
+        out.left   = L;
+        out.top    = T;
+        out.right  = R;
+        out.bottom = B;
+        break;
+    }
+
+    return out;
+}
+
+// =============================================================================
+// PlanDirtyCopy
+// =============================================================================
+// The thresholds are a judgement, not a measurement: each region is a separate
+// copy call with its own overhead, and past most of the texture the pieces
+// cost more than the whole. Overlapping rects are counted twice towards the
+// area, which errs towards the full copy — the side that is never wrong.
+// =============================================================================
+bool PlanDirtyCopy(UINT texW, UINT texH, const RECT* rects, size_t count,
+                   std::vector<D3D11_BOX>& out)
+{
+    constexpr size_t kMaxRegions = 64;
+
+    out.clear();
+
+    if (!rects || texW == 0 || texH == 0 || count > kMaxRegions)
+        return false;
+
+    const long tw = static_cast<long>(texW);
+    const long th = static_cast<long>(texH);
+    const uint64_t textureArea = static_cast<uint64_t>(texW) * texH;
+    uint64_t area = 0;
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        const long l = std::clamp(rects[i].left,   0L, tw);
+        const long t = std::clamp(rects[i].top,    0L, th);
+        const long r = std::clamp(rects[i].right,  0L, tw);
+        const long b = std::clamp(rects[i].bottom, 0L, th);
+
+        if (r <= l || b <= t)
+            continue;
+
+        area += static_cast<uint64_t>(r - l) * static_cast<uint64_t>(b - t);
+        if (area * 4 >= textureArea * 3)
+        {
+            out.clear();
+            return false;
+        }
+
+        D3D11_BOX box{};
+        box.left   = static_cast<UINT>(l);
+        box.top    = static_cast<UINT>(t);
+        box.right  = static_cast<UINT>(r);
+        box.bottom = static_cast<UINT>(b);
+        box.front  = 0;
+        box.back   = 1;
+        out.push_back(box);
+    }
+
+    return true;
 }
 
 // =============================================================================
@@ -374,6 +497,22 @@ bool D3DRenderer::CreateDevice()
         LOG_WARN("SetMaximumFrameLatency(1) failed: 0x{:08X}", static_cast<unsigned long>(hr));
     else
         LOG_INFO("Frame latency = 1 (the default is 3)");
+
+    // A game running flat out keeps the GPU queue full, and at the default
+    // priority our fullscreen triangle waits behind whole frames of it — the
+    // magnified view stutters precisely when the thing being magnified is
+    // busiest. Raising the thread priority on the CPU side does nothing about
+    // that; the queue is the GPU scheduler's. Our work is a copy and one draw
+    // per frame, so going to the front costs the game next to nothing.
+    //
+    // Best effort: a driver or scheduler that ignores it, or a refusal, leaves
+    // things exactly as they were before, so a failure is a log line.
+    hr = dxgiDevice->SetGPUThreadPriority(kGpuThreadPriority);
+    if (FAILED(hr))
+        LOG_WARN("SetGPUThreadPriority({}) failed: 0x{:08X}",
+                 kGpuThreadPriority, static_cast<unsigned long>(hr));
+    else
+        LOG_INFO("GPU thread priority = {}", kGpuThreadPriority);
 
     ComPtr<IDXGIAdapter> adapter;
     hr = dxgiDevice->GetAdapter(&adapter);
@@ -729,21 +868,8 @@ bool D3DRenderer::RenderFrame(
         return false;
 
     // ── Yeni frame geldiyse kendi texture'imiza al ──
-    if (srcTexture)
-    {
-        D3D11_TEXTURE2D_DESC srcDesc{};
-        srcTexture->GetDesc(&srcDesc);
-
-        if (!EnsureSourceTexture(rt, srcDesc))
-            return false;
-
-        // Unbind the SRV before copying. The same resource cannot be a shader
-        // hem kopya hedefi olamaz — D3D11 debug layer uyarir ve islem duser.
-        ID3D11ShaderResourceView* const noSrv[1] = { nullptr };
-        m_context->PSSetShaderResources(0, 1, noSrv);
-
-        m_context->CopyResource(rt.sourceTex.Get(), srcTexture);
-    }
+    if (srcTexture && !UpdateSourceTexture(targetIndex, srcTexture))
+        return false;
 
     // No frame has arrived yet, so there is nothing to draw. Normal at startup.
     if (!rt.sourceTex || !rt.sourceSrv)
@@ -801,6 +927,66 @@ bool D3DRenderer::RenderFrame(
     m_context->Draw(3, 0);
 
     return true;
+}
+
+// =============================================================================
+// UpdateSourceTexture — copy a captured frame in without drawing it
+// =============================================================================
+bool D3DRenderer::UpdateSourceTexture(size_t targetIndex, ID3D11Texture2D* srcTexture,
+                                      const RECT* dirty, size_t dirtyCount)
+{
+    if (targetIndex >= m_renderTargets.size() || !srcTexture || !m_context)
+        return false;
+
+    auto& rt = m_renderTargets[targetIndex];
+
+    D3D11_TEXTURE2D_DESC srcDesc{};
+    srcTexture->GetDesc(&srcDesc);
+
+    // A store that is about to be (re)created holds nothing, so there is no
+    // previous frame for a partial copy to build on.
+    const bool storeHoldsPrevious = rt.sourceTex && rt.sourceSrv
+                                 && rt.sourceWidth  == srcDesc.Width
+                                 && rt.sourceHeight == srcDesc.Height
+                                 && rt.sourceFormat == srcDesc.Format;
+
+    if (!EnsureSourceTexture(rt, srcDesc))
+        return false;
+
+    // Unbind the SRV before copying. The same resource cannot be a shader
+    // hem kopya hedefi olamaz — D3D11 debug layer uyarir ve islem duser.
+    ID3D11ShaderResourceView* const noSrv[1] = { nullptr };
+    m_context->PSSetShaderResources(0, 1, noSrv);
+
+    // Only what changed, when that is known and cheaper. Correct because the
+    // store is updated on every new frame (see RenderMonitor: copy always,
+    // draw sometimes), so everything outside these regions already matches.
+    if (storeHoldsPrevious && dirty
+        && PlanDirtyCopy(srcDesc.Width, srcDesc.Height, dirty, dirtyCount, m_copyBoxes))
+    {
+        for (const D3D11_BOX& box : m_copyBoxes)
+        {
+            m_context->CopySubresourceRegion(rt.sourceTex.Get(), 0, box.left, box.top, 0,
+                                             srcTexture, 0, &box);
+        }
+        return true;
+    }
+
+    m_context->CopyResource(rt.sourceTex.Get(), srcTexture);
+    return true;
+}
+
+void D3DRenderer::ReleaseSourceTexture(size_t targetIndex)
+{
+    if (targetIndex >= m_renderTargets.size())
+        return;
+
+    auto& rt = m_renderTargets[targetIndex];
+    rt.sourceSrv.Reset();
+    rt.sourceTex.Reset();
+    rt.sourceWidth  = 0;
+    rt.sourceHeight = 0;
+    rt.sourceFormat = DXGI_FORMAT_UNKNOWN;
 }
 
 #ifdef _DEBUG
@@ -1045,12 +1231,9 @@ void D3DRenderer::RemoveRenderTarget(size_t index)
 {
     if (index < m_renderTargets.size())
     {
+        ReleaseSourceTexture(index);
+
         auto& rt = m_renderTargets[index];
-        rt.sourceSrv.Reset();
-        rt.sourceTex.Reset();
-        rt.sourceWidth  = 0;
-        rt.sourceHeight = 0;
-        rt.sourceFormat = DXGI_FORMAT_UNKNOWN;
         rt.rtv.Reset();
         rt.swapChain.Reset();
         rt.targetWindow = nullptr;
@@ -1329,6 +1512,147 @@ void D3DRendererSelfCheck()
         const SourceUvMapping m = ComputeSourceUv(
             DXGI_MODE_ROTATION_IDENTITY, 0, 0, RECT{ 0, 0, 100, 100 });
         BM_SELFCHECK(approx(m.uAxisX, 0.0f) && approx(m.vAxisY, 0.0f));
+    }
+
+    // ── DesktopRectToTextureRect agrees with ComputeSourceUv ──
+    //
+    // The two are the same transform written twice, once in UV and once in
+    // pixels, and they are used for different things: the shader samples with
+    // one, the dirty-region test compares rectangles with the other. If they
+    // ever disagree, a portrait monitor magnifies correctly and then quietly
+    // stops repainting, because the region Desktop Duplication said had
+    // changed was compared against a rectangle in the wrong space.
+    //
+    // Driving both from the same inputs and asserting the same answer is what
+    // makes that impossible to introduce in one of them alone.
+    {
+        const DXGI_MODE_ROTATION kRotations[] = {
+            DXGI_MODE_ROTATION_UNSPECIFIED, DXGI_MODE_ROTATION_IDENTITY,
+            DXGI_MODE_ROTATION_ROTATE90,    DXGI_MODE_ROTATION_ROTATE180,
+            DXGI_MODE_ROTATION_ROTATE270,
+        };
+
+        constexpr UINT texW = 1920, texH = 1080;
+
+        for (DXGI_MODE_ROTATION rot : kRotations)
+        {
+            long deskW = 0, deskH = 0;
+            DesktopExtentForRotation(rot, texW, texH, deskW, deskH);
+
+            const RECT kRects[] = {
+                RECT{ 0, 0, deskW, deskH },                       // everything
+                RECT{ 0, 0, deskW / 2, deskH / 2 },               // top-left
+                RECT{ deskW / 2, deskH / 2, deskW, deskH },       // bottom-right
+                RECT{ deskW / 4, deskH / 8, deskW / 2, deskH },   // deliberately lopsided
+            };
+
+            for (const RECT& r : kRects)
+            {
+                const RECT t = DesktopRectToTextureRect(rot, texW, texH, r);
+
+                // Still a well-formed rectangle, and still inside the texture.
+                BM_SELFCHECK(t.left < t.right && t.top < t.bottom);
+                BM_SELFCHECK(t.left >= 0 && t.top >= 0);
+                BM_SELFCHECK(t.right <= static_cast<long>(texW));
+                BM_SELFCHECK(t.bottom <= static_cast<long>(texH));
+
+                // Area is preserved: a rotation moves a rectangle, it does not
+                // resize one.
+                BM_SELFCHECK((t.right - t.left) * (t.bottom - t.top)
+                          == (r.right - r.left) * (r.bottom - r.top));
+
+                // And it is the same rectangle the shader would sample. The UV
+                // mapping's four corners span exactly this box.
+                const SourceUvMapping m = ComputeSourceUv(rot, texW, texH, r);
+
+                float minU = 2.0f, maxU = -1.0f, minV = 2.0f, maxV = -1.0f;
+                for (float cx : { 0.0f, 1.0f })
+                {
+                    for (float cy : { 0.0f, 1.0f })
+                    {
+                        minU = (std::min)(minU, uvX(m, cx, cy));
+                        maxU = (std::max)(maxU, uvX(m, cx, cy));
+                        minV = (std::min)(minV, uvY(m, cx, cy));
+                        maxV = (std::max)(maxV, uvY(m, cx, cy));
+                    }
+                }
+
+                const auto pixels = [](float uv, UINT extent) {
+                    return std::lround(uv * static_cast<float>(extent));
+                };
+
+                BM_SELFCHECK(pixels(minU, texW) == t.left);
+                BM_SELFCHECK(pixels(maxU, texW) == t.right);
+                BM_SELFCHECK(pixels(minV, texH) == t.top);
+                BM_SELFCHECK(pixels(maxV, texH) == t.bottom);
+            }
+        }
+
+        // A rectangle wholly outside the desktop must come back wholly outside
+        // the texture rather than clamped onto its edge. Clamping would invent
+        // an intersection with the dirty region that does not exist, and the
+        // renderer would draw frames nothing asked for — the mirror image of
+        // the bug this whole path is here to avoid.
+        {
+            const RECT away{ -400, -300, -100, -50 };
+            const RECT t = DesktopRectToTextureRect(
+                DXGI_MODE_ROTATION_IDENTITY, texW, texH, away);
+            BM_SELFCHECK(t.right <= 0 && t.bottom <= 0);
+        }
+    }
+
+    // ── PlanDirtyCopy: when a partial copy is taken, and what it copies ──
+    //
+    // The failure worth guarding is a partial copy that misses a region: the
+    // store then shows that region stale until something repaints it, which on
+    // a static screen is never. So every case asserts either "whole texture"
+    // or exactly the boxes expected.
+    {
+        std::vector<D3D11_BOX> boxes;
+
+        // Unknown metadata: always the whole texture.
+        BM_SELFCHECK(!PlanDirtyCopy(1920, 1080, nullptr, 0, boxes));
+
+        // Known and empty: nothing to copy.
+        const RECT none[1] = {};
+        BM_SELFCHECK(PlanDirtyCopy(1920, 1080, none, 0, boxes) && boxes.empty());
+
+        // One small region: copied as exactly that box.
+        const RECT one[] = { RECT{ 100, 200, 300, 260 } };
+        BM_SELFCHECK(PlanDirtyCopy(1920, 1080, one, 1, boxes));
+        BM_SELFCHECK(boxes.size() == 1);
+        BM_SELFCHECK(boxes[0].left == 100 && boxes[0].top == 200
+                  && boxes[0].right == 300 && boxes[0].bottom == 260
+                  && boxes[0].front == 0 && boxes[0].back == 1);
+
+        // Out of bounds is clamped, and wholly outside is dropped rather than
+        // turned into a degenerate box the copy would reject.
+        const RECT edges[] = {
+            RECT{ -50, -50, 10, 10 },
+            RECT{ 1900, 1070, 2000, 1200 },
+            RECT{ -300, -300, -100, -100 },
+        };
+        BM_SELFCHECK(PlanDirtyCopy(1920, 1080, edges, 3, boxes));
+        BM_SELFCHECK(boxes.size() == 2);
+        BM_SELFCHECK(boxes[0].left == 0 && boxes[0].top == 0
+                  && boxes[0].right == 10 && boxes[0].bottom == 10);
+        BM_SELFCHECK(boxes[1].left == 1900 && boxes[1].top == 1070
+                  && boxes[1].right == 1920 && boxes[1].bottom == 1080);
+
+        // A fullscreen game: the whole texture dirty is one CopyResource.
+        const RECT all[] = { RECT{ 0, 0, 1920, 1080 } };
+        BM_SELFCHECK(!PlanDirtyCopy(1920, 1080, all, 1, boxes));
+
+        // Most of it, in pieces, likewise.
+        const RECT most[] = { RECT{ 0, 0, 1920, 540 }, RECT{ 0, 540, 1920, 900 } };
+        BM_SELFCHECK(!PlanDirtyCopy(1920, 1080, most, 2, boxes));
+
+        // Too many regions: the per-call overhead wins, so the whole texture.
+        std::vector<RECT> many(65, RECT{ 0, 0, 4, 4 });
+        BM_SELFCHECK(!PlanDirtyCopy(1920, 1080, many.data(), many.size(), boxes));
+
+        // A zero-sized texture must not be planned against.
+        BM_SELFCHECK(!PlanDirtyCopy(0, 0, one, 1, boxes));
     }
 
     LOG_INFO("D3DRenderer self-check passed");

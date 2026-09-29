@@ -82,6 +82,23 @@ struct GeneralSettings
     // content scale, which low-vision users generally want.
     float cursorScale = 1.0f;
 
+    // ── Frame rate ──
+    // The ceiling the render loop paces itself to.
+    //
+    //   0   follow each monitor's own refresh rate, which is the fastest rate
+    //       at which a present can ever be seen. The default, and the reason
+    //       a 144 Hz panel now gets 144 rather than whatever the system timer
+    //       granularity happened to allow.
+    //   >0  an explicit override, clamped to [10, 1000]. Deliberately NOT
+    //       capped to the refresh rate: a display that misreports its mode is
+    //       exactly the case an override exists for. Lower is also a valid
+    //       choice — a magnifier that costs a game less matters more to some
+    //       people than a smooth one.
+    //
+    // Ignored under BM_OVERLAY_FLIP=1, where Present(1) blocks on vblank and
+    // is already the brake.
+    unsigned maxFps = 0;
+
     // Keep the pointer on the monitor it is magnifying. On by default, and not
     // an accident: with a zoomed edge the pointer used to slip onto the next
     // display exactly when the user was reaching for the edge of the magnified
