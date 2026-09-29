@@ -41,12 +41,6 @@ namespace {
 // administrator rights, so a script in an ordinary shell cannot click the tray
 // or post the window a message (UIPI drops both), and asking the app to open
 // its own panel is the only way to reach it from outside.
-//
-// The two crashes that kept the whole panel switched off are fixed: the blank
-// island needed WindowsXamlManager::InitializeForCurrentThread, and any control
-// embedding a TextBox takes the process down with a stowed exception, so there
-// are none. Hotkeys are captured through the keyboard hook instead of typed.
-// Details in docs/PANEL-BLANK.md.
 bool OpenPanelAtStartup()
 {
     static const bool enabled = []() {
@@ -167,7 +161,7 @@ bool ApplyStartWithWindows(bool enable)
 }
 
 // =============================================================================
-// OsMagnifierRunning — Windows Magnifier ayakta mi?
+// OsMagnifierRunning — is the Windows Magnifier up?
 // =============================================================================
 //
 // Two magnifiers at once is a genuinely confusing state, and it is easy to end
@@ -189,17 +183,11 @@ bool OsMagnifierRunning()
 
 } // anonymous namespace
 
-// =============================================================================
-// Destructor
-// =============================================================================
 App::~App()
 {
     Shutdown();
 }
 
-// =============================================================================
-// Initialize — bring every component up, in order
-// =============================================================================
 bool App::Initialize(HINSTANCE hInstance)
 {
     if (m_initialized)
@@ -304,9 +292,6 @@ void App::OnSessionUnlock()
     m_status.hotkeyFailedMask.store(failedMask, std::memory_order_release);
 }
 
-// =============================================================================
-// InitializeComponents
-// =============================================================================
 bool App::InitializeComponents()
 {
     // Settings first; everything below can depend on them. A missing file is
@@ -319,7 +304,7 @@ bool App::InitializeComponents()
         return false;
     }
 
-    // ── 2. GPU device ──
+    // ── GPU device ──
     if (!m_renderer.Initialize())
     {
         LOG_ERROR("D3DRenderer initialisation failed");
@@ -329,7 +314,7 @@ bool App::InitializeComponents()
     m_cursorCache.Initialize(m_renderer.GetDevice());
     m_osdCache.Initialize(m_renderer.GetDevice());
 
-    // ── 3. Per-monitor: overlay + swap chain + capture ──
+    // ── Per-monitor: overlay + swap chain + capture ──
     const size_t monitorCount = m_monitorManager.GetMonitorCount();
 
     // reserve matters: growing the vector moves its elements, and these own
@@ -344,7 +329,6 @@ bool App::InitializeComponents()
         if (!mon)
             continue;
 
-        // Overlay window
         OverlayWindow overlay;
         if (!overlay.Create(m_hInstance, *mon, i))
         {
@@ -470,9 +454,8 @@ void App::SetupCallbacks()
 // arrives, which would stop the render loop dead. Peek returns immediately
 // when the queue is empty and the frame gets rendered in that gap.
 //
-// Pacing comes from Present with vSync while zoom is active, which locks the
-// loop to the refresh rate for free. With zoom off nothing is presented, so
-// there is no such brake and the loop sleeps instead of spinning.
+// Pacing comes from the per-monitor FramePacers and the FrameWaiter at the
+// end of Update, not from Present.
 // =============================================================================
 int App::Run()
 {
@@ -511,9 +494,6 @@ int App::Run()
     return static_cast<int>(msg.wParam);
 }
 
-// =============================================================================
-// Update — Her frame'de bir kez
-// =============================================================================
 // =============================================================================
 // PublishViewportRequests — render -> input thread
 // =============================================================================
@@ -725,6 +705,9 @@ void App::UpdateOsd(size_t monitorIndex, const MonitorInfo& mon)
     osd.until = std::chrono::steady_clock::now() + kOsdDuration;
 }
 
+// =============================================================================
+// Update — once per loop iteration
+// =============================================================================
 void App::Update()
 {
     m_status.monitorCount.store(m_overlays.size(), std::memory_order_relaxed);
@@ -869,18 +852,8 @@ void App::Update()
 
     // -- Idle until the next monitor is due a frame --
     //
-    // This is where the loop's rate is actually decided, and it used to be
-    // decided by accident. Sleep(4) does not sleep 4 ms: the default system
-    // timer granularity is 15.6 ms and Sleep rounds up to it, so the real tick
-    // rate depended on whether some other process on the machine happened to
-    // have called timeBeginPeriod - a browser being open was the difference
-    // between a 64 Hz ceiling and a 250 Hz one. That is most of the answer to
-    // why this never went above 60 on a 144 Hz panel.
-    //
-    // FrameWaiter uses a high-resolution waitable timer, which is accurate
-    // without raising the timer resolution for the whole system, and waits on
-    // the message queue at the same time so a hotkey or a zoom step is not
-    // slept through.
+    // This is where the loop's rate is actually decided. FrameWaiter rather
+    // than Sleep, for the reasons in FramePacer.h.
     auto wait = TimeUntilNextFrame(std::chrono::steady_clock::now());
 
     if (!anyActive)
@@ -1176,16 +1149,10 @@ void App::RenderMonitor(size_t monitorIndex)
 
         // ── Source origin comes from ViewportController ──
         //
-        // This replaces the anchored identity srcOrigin = focal * (1 - 1/zoom).
-        // That formula pinned the source to the cursor, which is what made a
-        // click land on what it appeared to point at — and also what made the
-        // view track the cursor on every single move, leaving no room for
-        // edge-push panning. The identity had to go for the view to hold still.
-        //
-        // Click alignment is not lost, it moves: the real cursor is kept at
-        // round(pointer) and the magnified sprite is drawn where the user sees
-        // it. Until that sprite exists (a later task), clicks are misaligned
-        // while panning, which is expected and temporary.
+        // Not the anchored identity srcOrigin = focal * (1 - 1/zoom), which
+        // would track the cursor on every move and leave no room for edge push.
+        // Click alignment comes from the sprite instead: the real cursor is
+        // kept at round(pointer) and the sprite is drawn where the user sees it.
         //
         // The controller lives on the input thread and advances per mouse
         // event, so the pan stays proportional to mouse motion rather than to
@@ -1204,17 +1171,10 @@ void App::RenderMonitor(size_t monitorIndex)
 
         // ── The cursor sprite's state — BEFORE the skip test ──
         //
-        // This has to be decided before the skip below, and that ordering is
-        // the whole point. The skip used to ask only "new frame, or did the
-        // source rect move?" — which worked while the rect was anchored to the
-        // cursor and therefore changed on every mouse move.
-        //
-        // Under edge-push the rect deliberately holds still: that IS the
-        // feature. So a pointer moving through the middle of the screen changed
-        // nothing the test could see, the frame was skipped, and the magnified
-        // pointer froze in place while the real one moved. The sprite's
-        // position and shape are part of what is on screen, so they belong in
-        // the test.
+        // Decided before the skip below, because under edge push the source
+        // rect deliberately holds still: the sprite's position and shape are
+        // then the only sign that anything on screen moved, and without them
+        // the magnified pointer froze while the real one kept going.
         const size_t rectSlot = (monitorIndex < StatusSnapshot::kMaxMonitors)
                               ? monitorIndex : StatusSnapshot::kMaxMonitors - 1;
 
@@ -1381,7 +1341,7 @@ void App::RenderMonitor(size_t monitorIndex)
         // produced the texture, and it re-reads the orientation on recovery.
         if (!m_renderer.RenderFrame(nullptr, monitorIndex, srcRect, capture.GetRotation()))
         {
-            // Henuz hic frame gelmemis olabilir — bir sonraki turda tekrar denenir.
+            // No frame may have arrived yet; the next tick tries again.
             return;
         }
 
@@ -1436,18 +1396,11 @@ void App::RenderMonitor(size_t monitorIndex)
                 osdAlpha);
         }
 
-        // vSync only in flip mode.
-        //
-        // On a layered window, Present makes DWM update the layered surface,
-        // which at 2560x1440 is expensive on its own. Waiting for vblank on top
-        // of that blocked the render thread for hundreds of milliseconds at a
-        // time, so it stopped pumping messages, WM_HOTKEY went unprocessed and
-        // the application appeared to hang. That was the observed behaviour:
-        // the keys worked for a while and then went silent entirely.
-        //
-        // So layered mode runs without vSync. Tearing is possible; a frozen
-        // application is worse. Frame rate is already bounded by the
-        // nothing-changed check above and the sleep in Update.
+        // vSync only in flip mode. On a layered window, a vblank wait on top of
+        // the DWM surface update blocked the render thread for hundreds of
+        // milliseconds, WM_HOTKEY went unprocessed and the application appeared
+        // to hang. Tearing is possible without it; a frozen application is
+        // worse. FramePacer is the brake instead.
         m_renderer.Present(monitorIndex, UseFlipOverlay());
         m_presentedThisTick = true;
 
@@ -1694,11 +1647,8 @@ void App::OnFreeze()
 //   on  + down  -> one step out, and OFF once it reaches minZoom
 //   off + down  -> nothing; there is nothing below off
 //
-// Stepping up turns zoom ON, which it did not used to. The old behaviour only
-// responded while zoom was already active, because the bare wheel was not
-// swallowed and stealing it would have broken normal scrolling. Now that
-// Ctrl+Alt+wheel is swallowed the combination is ours, and using it to turn
-// zoom on is fair game.
+// Stepping up may turn zoom on because Ctrl+Alt+wheel is swallowed: the
+// combination is ours, and nothing else sees it.
 // =============================================================================
 void App::OnZoomStep(int direction)
 {
@@ -1800,7 +1750,6 @@ void App::OnFocusChanged(HWND focused)
     if (!GetWindowRect(focused, &rc))
         return;
 
-    // Ignore zero-sized windows
     if (rc.right <= rc.left || rc.bottom <= rc.top)
         return;
 
@@ -1840,32 +1789,11 @@ void App::OnFocusChanged(HWND focused)
     m_viewportSnapshot.focusY.store(static_cast<double>(center.y), std::memory_order_relaxed);
     m_viewportSnapshot.focusEpoch.fetch_add(1, std::memory_order_release);
 
-    // SetCursorPos was tried here and reverted.
-    //
-    // The idea was to move the CURSOR rather than the anchor, preserving the
-    // "anchor == cursor" invariant so focus following and click alignment could
-    // both hold at once.
-    //
-    // It was destructive in practice. Moving the pointer triggers hover and
-    // focus in whatever now sits under it, which raises another
-    // EVENT_OBJECT_FOCUS, which moves it again: a feedback loop. Walking down a
-    // context menu sent the pointer flying up and off the screen.
-    //
-    // Guarding with "skip if the cursor is already inside the focused window"
-    // did not save it either — a menu can leave focus on its owner window while
-    // the pointer sits in the menu, so the guard misses and the pointer gets
-    // thrown to the owner's centre.
-    //
-    // The lesson: moving the pointer without the user asking races every piece
-    // of UI that reacts to pointer position. A magnifier has no business doing
-    // it.
-    //
-    // So the view moves and the pointer does not, and the consequence is worth
-    // stating plainly: while focus is driving, the real cursor can end up
-    // outside the source window, and the sprite is then simply not on screen.
-    // That is honest rather than broken — the pointer really is elsewhere in
-    // the magnified content — and one mouse movement re-anchors the view and
-    // brings it back. The panel's hint says so.
+    // The view moves and the pointer does not. Moving the pointer to follow
+    // focus was tried and reverted: it is a feedback loop through hover and
+    // focus (docs/ARCHITECTURE.md, "Lessons learned"). The cost is that while
+    // focus is driving, the sprite can be off screen until the next mouse move
+    // re-anchors the view; the panel's hint says so.
 }
 
 // =============================================================================
@@ -1903,13 +1831,6 @@ bool App::ResolveMonitorIndex(WPARAM wparam, size_t& outIndex) const
     return false;
 }
 
-// =============================================================================
-// ApplySettings — settings changed, push them into the engine
-// =============================================================================
-// The panel writes SettingsStore and only then posts the message, so reading
-// here is safe without synchronisation. That ordering is load-bearing; reverse
-// it and this reads values that have not been written yet.
-// =============================================================================
 // =============================================================================
 // ApplyPointerSettings — push the pointer and edge-push settings to the input thread
 // =============================================================================
@@ -1974,6 +1895,13 @@ void App::ApplyPointerSettings()
     }
 }
 
+// =============================================================================
+// ApplySettings — settings changed, push them into the engine
+// =============================================================================
+// The panel writes SettingsStore and only then posts the message, so reading
+// here is safe without synchronisation. That ordering is load-bearing; reverse
+// it and this reads values that have not been written yet.
+// =============================================================================
 void App::ApplySettings()
 {
     LOG_INFO("Applying settings");
@@ -2069,13 +1997,6 @@ void App::OnHotkeyCaptured(UINT modifiers, UINT packed)
 }
 
 // =============================================================================
-// OnShowPanel — open the control panel
-// =============================================================================
-// The panel lives on its own STA thread; the first call creates it. Without the
-// Windows App Runtime the panel does not open and the magnifier is unaffected.
-// See ControlPanel.h.
-// =============================================================================
-// =============================================================================
 // Updates
 // =============================================================================
 
@@ -2165,6 +2086,13 @@ void App::OnUpdateAction(WPARAM action)
     }
 }
 
+// =============================================================================
+// OnShowPanel — open the control panel
+// =============================================================================
+// The panel lives on its own STA thread; the first call creates it. Without the
+// Windows App Runtime the panel does not open and the magnifier is unaffected.
+// See ControlPanel.h.
+// =============================================================================
 void App::OnShowPanel()
 {
     m_controlPanel.Show(m_messageHwnd, &m_settings, &m_status);

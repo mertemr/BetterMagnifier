@@ -28,12 +28,10 @@
 #include <shellapi.h>        // Shell_NotifyIcon
 #include <shellscalingapi.h> // GetDpiForMonitor (needs Shcore.lib)
 
-// ComPtr: RAII around COM reference counting.
 #include <wrl/client.h>
 
 #include <d3d11_1.h>
 #include <dxgi1_5.h>
-#include <d2d1_1.h>
 #include <d3dcompiler.h>     // D3DCompile for the magnification shaders
 
 #include <string>
@@ -125,9 +123,8 @@ inline bool UseFlipOverlay()
 // Staying above popups: two flawed options, pick one.
 //
 // On, the default: re-assert topmost so the popup is only ever seen magnified.
-// But a fully occluded window stops repainting, so the desktop composition
-// keeps its last painted state and our capture magnifies a FROZEN copy;
-// highlight does not follow the mouse through a menu.
+// The occluded popup keeps being composed live, so the magnified copy is
+// current, not frozen — measured with BM_DUMP_FRAME; see ARCHITECTURE.md.
 //
 // Off (BM_NO_TOPMOST_FIGHT=1): the popup stays above us, live and correct, but
 // unmagnified, and our magnified copy behind it means it appears twice.

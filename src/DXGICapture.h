@@ -28,13 +28,8 @@ struct CapturedFrame
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     DXGI_OUTDUPL_FRAME_INFO                 frameInfo{};
 
-    // A new DESKTOP IMAGE — not merely a new acquire.
-    //
-    // AcquireNextFrame also succeeds when nothing but the pointer moved, and
-    // says so by leaving LastPresentTime at zero. Counting those as new frames
-    // meant a full-screen CopyResource, a full shader pass and a layered-window
-    // Present on every single mouse move over a completely static desktop,
-    // which for a magnifier is most of the frames it ever draws.
+    // A new DESKTOP IMAGE, not merely a new acquire: a pointer-only update
+    // succeeds too, with LastPresentTime at zero. See AcquireFrame.
     bool                                    isNewFrame = false;
 
     UINT                                    width  = 0;
@@ -173,8 +168,7 @@ private:
     std::vector<RECT>    m_dirtyRects;
     bool                 m_dirtyKnown = false;
 
-    // Throttles recovery attempts. While the workstation is locked every
-    // attempt fails, and retrying per frame is pure log spam.
+    // Throttles recovery attempts; see kReinitInterval.
     std::chrono::steady_clock::time_point m_lastReinitAttempt{};
 };
 

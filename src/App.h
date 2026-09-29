@@ -239,8 +239,8 @@ private:
     std::array<std::chrono::steady_clock::time_point, StatusSnapshot::kMaxMonitors> m_lastFrameTime{};
 
     // Last presented source region. If neither the screen nor the anchor
-    // changed there is nothing new to show, and presenting anyway just waits
-    // on vSync and burns GPU.
+    // changed there is nothing new to show, and presenting anyway only burns
+    // GPU time.
     std::array<RECT, StatusSnapshot::kMaxMonitors> m_lastSrcRect{};
 
     // The sprite is part of what is on screen, so it is part of "did anything
@@ -258,17 +258,8 @@ private:
 
     // ── Frame pacing ──
     //
-    // One pacer per monitor, because the refresh rates differ and pacing a
-    // 144 Hz panel to a 60 Hz one's cadence throws away most of what this
-    // work was for.
-    //
-    // This replaces vSync, which the layered overlay cannot have: its swap
-    // chain is blt, and a vblank wait on top of the DWM surface update
-    // blocked the render thread long enough to stop it pumping messages.
-    // With no brake at all the loop presented as fast as DWM would take it —
-    // every one of those an expensive full-monitor update, most of them
-    // between two refreshes where nothing could ever see them, all of them
-    // out of the GPU budget of the application being magnified.
+    // One pacer per monitor, because refresh rates differ. It replaces vSync,
+    // which the layered overlay cannot have; see FramePacer.h.
     std::array<FramePacer, StatusSnapshot::kMaxMonitors> m_pacers{};
 
     FrameWaiter m_frameWaiter;

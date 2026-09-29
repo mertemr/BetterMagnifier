@@ -1,7 +1,3 @@
-// =============================================================================
-// HotkeyManager.cpp — Global Hotkeys Implementation
-// =============================================================================
-
 #include "pch.h"
 #include "HotkeyManager.h"
 #include "Logger.h"
@@ -13,9 +9,6 @@ HotkeyManager::~HotkeyManager()
     Shutdown();
 }
 
-// =============================================================================
-// Initialize
-// =============================================================================
 bool HotkeyManager::Initialize(HWND hwnd, const GeneralSettings& settings)
 {
     if (m_initialized)
@@ -97,9 +90,6 @@ UINT HotkeyManager::Reregister(const GeneralSettings& settings)
     return failed;
 }
 
-// =============================================================================
-// Shutdown
-// =============================================================================
 void HotkeyManager::Shutdown()
 {
     if (!m_initialized)
@@ -115,9 +105,6 @@ void HotkeyManager::Shutdown()
     LOG_INFO("HotkeyManager kapatildi");
 }
 
-// =============================================================================
-// HandleHotkey — WM_HOTKEY mesaji geldiginde
-// =============================================================================
 void HotkeyManager::HandleHotkey(int hotkeyId)
 {
     switch (hotkeyId)

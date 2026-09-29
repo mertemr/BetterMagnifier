@@ -333,9 +333,7 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
         return false;
     }
 
-    // Partial compensation, not full. compensation = 1 puts hand movement 1:1
-    // on the magnified screen, which is correct in principle and too slow in
-    // practice, because the content is zoom times further apart than it looks.
+    // Partial compensation, not full; see SetCompensation.
     const double comp = static_cast<double>(m_compensation.load(std::memory_order_relaxed));
     const double scale =
         static_cast<double>(m_speed.load(std::memory_order_relaxed)) / std::pow(zoom, comp);

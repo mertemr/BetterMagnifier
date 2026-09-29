@@ -1,7 +1,3 @@
-// =============================================================================
-// InputThread.cpp
-// =============================================================================
-
 #include "pch.h"
 #include "InputThread.h"
 #include "AppMessages.h"
@@ -14,7 +10,6 @@ namespace BetterMagnifier {
 
 namespace {
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Events produced by SendInput carry LLKHF_INJECTED / LLMHF_INJECTED. Ignoring
 // them by default, for two reasons.
 //
@@ -428,9 +423,6 @@ void InputThread::PublishViewport()
     }
 }
 
-// =============================================================================
-// Stop
-// =============================================================================
 void InputThread::Stop()
 {
     const DWORD tid = m_threadId.load(std::memory_order_acquire);
@@ -539,9 +531,8 @@ LRESULT CALLBACK InputThread::LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM
     // not a shortcut, and turning shortcut takeover off must not freeze the
     // magnified view in place.
     //
-    // The event is not swallowed. Input scaling arrives in a later task; for
-    // now the OS keeps moving the cursor exactly as it always did, and this
-    // only advances srcOrigin.
+    // Whether the event is swallowed is PointerInput's decision; see
+    // OnMouseMove.
     if (nCode == HC_ACTION && wParam == WM_MOUSEMOVE && lParam &&
         s_instance && s_instance->m_viewport && s_instance->m_snapshot)
     {

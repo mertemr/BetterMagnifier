@@ -177,8 +177,8 @@ public:
     void RemoveRenderTarget(size_t index);
 
 #ifdef _DEBUG
-    // Writes the back buffer to a BMP. Must be called BEFORE Present, since
-    // FLIP_DISCARD leaves the contents undefined afterwards.
+    // Writes the back buffer to a BMP. Must be called BEFORE Present: both
+    // swap effects in use leave the contents undefined afterwards.
     //
     // Why it exists: the overlay is WDA_EXCLUDEFROMCAPTURE, so it does not
     // appear in screenshots and there is no other way to check the render from

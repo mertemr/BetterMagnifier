@@ -2,8 +2,9 @@
 
 // Cross-thread message constants.
 //
-// The input thread talks to the render thread only through these messages.
-// No shared mutable state, no locks: the Win32 message queue is the queue.
+// Events between threads travel through these messages; state that is polled
+// rather than signalled lives in StatusSnapshot and ViewportSnapshot. No locks
+// either way: the Win32 message queue is the queue.
 //
 // PostMessage, never SendMessage. SendMessage waits for the target thread to
 // process the message, and the render thread can be blocked in Present for a
@@ -60,7 +61,7 @@ inline constexpr UINT WM_APP_SHOW_PANEL       = WM_APP + 9;
 //
 // The panel cannot ask the user to TYPE a hotkey: a XAML TextBox on the
 // island's STA thread takes the whole process down with a stowed exception, and
-// NumberBox goes the same way because it embeds one (docs/PANEL-BLANK.md). So
+// NumberBox goes the same way because it embeds one (docs/ARCHITECTURE.md). So
 // the binding is captured from a real key press instead — through the
 // WH_KEYBOARD_LL hook this application already installs for other reasons.
 //

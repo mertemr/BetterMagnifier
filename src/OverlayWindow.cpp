@@ -1,7 +1,3 @@
-// =============================================================================
-// OverlayWindow.cpp — Per-Monitor Transparent Overlay Implementation
-// =============================================================================
-
 #include "pch.h"
 #include "OverlayWindow.h"
 #include "MonitorManager.h"
@@ -13,9 +9,6 @@ namespace BetterMagnifier {
 
 bool OverlayWindow::s_classRegistered = false;
 
-// =============================================================================
-// Destructor
-// =============================================================================
 OverlayWindow::~OverlayWindow()
 {
     if (m_hwnd)
@@ -25,9 +18,6 @@ OverlayWindow::~OverlayWindow()
     }
 }
 
-// =============================================================================
-// Move Semantics
-// =============================================================================
 OverlayWindow::OverlayWindow(OverlayWindow&& other) noexcept
     : m_hwnd(other.m_hwnd)
     , m_monitorIndex(other.m_monitorIndex)
@@ -55,9 +45,6 @@ OverlayWindow& OverlayWindow::operator=(OverlayWindow&& other) noexcept
     return *this;
 }
 
-// =============================================================================
-// RegisterWindowClass — window class for the overlay
-// =============================================================================
 bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
 {
     if (s_classRegistered)
@@ -69,7 +56,7 @@ bool OverlayWindow::RegisterWindowClass(HINSTANCE hInstance)
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;           // no background brush: transparent
+    wc.hbrBackground = nullptr;
     wc.lpszClassName = kClassName;
 
     if (!RegisterClassExW(&wc))
@@ -143,7 +130,7 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
         nullptr,        // no parent
         nullptr,        // no menu
         hInstance,
-        this            // WndProc'a "this" gec (CREATESTRUCT.lpCreateParams)
+        this
     );
 
     if (!m_hwnd)
@@ -178,7 +165,6 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
         }
     }
 
-    // ── FEEDBACK LOOP ONLEME (kritik!) ──
     // Desktop Duplication captures the whole desktop, and the overlay is part of
     // the desktop. Left alone, the overlay captures its own content: an infinite
     // mirror, the way pointing a camera at its own screen behaves.
@@ -203,15 +189,11 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
     return true;
 }
 
-// =============================================================================
-// Show/Hide
-// =============================================================================
 void OverlayWindow::Show()
 {
     if (m_hwnd && !m_visible)
     {
-        // SW_SHOWNOACTIVATE: goster ama focus'u CALMA — altta calisan
-        // uygulamanin klavye odagi bozulmasin.
+        // NOACTIVATE: keyboard focus stays with the application being magnified.
         ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
         m_visible = true;
         LOG_DEBUG("Overlay gorunur: monitor={}", m_monitorIndex);
@@ -233,9 +215,6 @@ bool OverlayWindow::IsVisible() const
     return m_visible;
 }
 
-// =============================================================================
-// EnsureTopmost — menulerin uzerinde kal
-// =============================================================================
 void OverlayWindow::EnsureTopmost()
 {
     if (!m_hwnd || !m_visible)
@@ -281,9 +260,6 @@ bool OverlayWindow::IsCovered() const
     return false;
 }
 
-// =============================================================================
-// Reposition — after a DPI or resolution change
-// =============================================================================
 void OverlayWindow::Reposition(const RECT& bounds)
 {
     if (m_hwnd)
@@ -299,29 +275,16 @@ void OverlayWindow::Reposition(const RECT& bounds)
     }
 }
 
-// =============================================================================
-// WndProc — the overlay window's message handler
-// =============================================================================
-//
-// HTTRANSPARENT: Mouse olaylarini bu pencereye DEG1L, altindaki pencereye ilet.
-// Without this the overlay swallows every mouse click.
-//
-// WM_DPICHANGED arrives when a monitor's DPI changes.
-// Overlay'in boyutunu ve pozisyonunu guncelleriz.
-//
-// =============================================================================
 LRESULT CALLBACK OverlayWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {
     case WM_NCHITTEST:
-        // KRITIK: Mouse olaylari altindaki pencereye gider.
         // Without this the desktop cannot be clicked while zoom is on.
         return HTTRANSPARENT;
 
     case WM_DPICHANGED:
     {
-        // Yeni boyutu al ve pencereyi guncelle
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         if (suggested)
         {
