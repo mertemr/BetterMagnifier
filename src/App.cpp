@@ -722,7 +722,35 @@ void App::Update()
             // skipped — and after a Present the back buffer contents are
             // undefined, so what appears on screen is garbage.
             m_lastSrcRect[slot] = RECT{};
+
+            // And close the duplication session. Left open, it costs the OS a
+            // copy of every desktop update on this monitor whether or not we
+            // ever acquire one — a game here paid for a magnifier that was not
+            // magnifying it. See DXGICapture::Suspend.
+            if (m_captures[i].Suspend())
+                m_renderer.ReleaseSourceTexture(i);
+
+            st.captureIdle.store(true, std::memory_order_relaxed);
             continue;
+        }
+
+        st.captureIdle.store(false, std::memory_order_relaxed);
+
+        // The session was closed while this monitor was idle, so zoom-on now
+        // has to reopen it, and the renderer has no frame to draw until the
+        // new session delivers one. m_awaitFirstFrame lets RenderMonitor wait
+        // briefly for it, so the overlay is shown and presented in the same
+        // tick as before rather than sitting on screen with nothing drawn.
+        if (m_captures[i].Resume())
+        {
+            m_awaitFirstFrame[slot] = true;
+        }
+        else if (m_captures[i].NeedsReinit())
+        {
+            // Duplication is lost on things like a fullscreen game taking the
+            // output. Retrying is free; failure just means trying again next
+            // frame.
+            m_captures[i].Reinitialize();
         }
 
         if (mon->zoom.isActive)
@@ -738,11 +766,6 @@ void App::Update()
         if (!m_overlays[i].IsVisible())
             m_overlays[i].Show();
 
-        // Duplication is lost on things like a fullscreen game taking the
-        // output. Retrying is free; failure just means trying again next frame.
-        if (m_captures[i].NeedsReinit())
-            m_captures[i].Reinitialize();
-
         RenderMonitor(i);
     }
 
@@ -757,7 +780,7 @@ void App::Update()
     // (WM_APP_ASSERT_TOPMOST); this catches whatever slips past it, and is
     // rate-limited inside AssertOverlaysTopmost.
     if (anyActive)
-        AssertOverlaysTopmost();
+        AssertOverlaysTopmost(true);
 
     ApplyRenderThreadPriority(anyActive);
 
@@ -913,6 +936,22 @@ void App::ApplyRenderThreadPriority(bool anyActive)
         LOG_DEBUG("Render thread priority {}", anyActive ? "raised" : "restored");
     }
 
+    // EcoQoS, the other half. With a fullscreen game in the foreground Windows
+    // 11 treats this process as background work and may throttle it — on a
+    // hybrid CPU that means efficiency cores, where a thread priority does not
+    // follow it. Opt out while magnifying; hand the decision back to the
+    // system (ControlMask 0) when idle, where throttling a tray icon is right.
+    PROCESS_POWER_THROTTLING_STATE throttling{};
+    throttling.Version     = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    throttling.ControlMask = anyActive ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0;
+    throttling.StateMask   = 0;   // with the bit controlled: throttling off
+
+    if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
+                               &throttling, sizeof(throttling)))
+    {
+        LOG_WARN("SetProcessInformation(ProcessPowerThrottling) failed: {}", GetLastError());
+    }
+
     m_renderPriorityRaised = anyActive;
 }
 
@@ -962,7 +1001,41 @@ void App::RenderMonitor(size_t monitorIndex)
     // Timeout 0: take a frame if one is ready, otherwise return immediately.
     // Blocking would be wrong — with no new frame we still need to re-present
     // the previous one, or the view would not follow a moving source rect.
-    CapturedFrame frame = capture.AcquireFrame(0);
+    //
+    // The one exception is the first acquire after a resume. There is no
+    // previous frame then, so not waiting means not drawing, and the overlay
+    // that was just shown sits there with whatever it last held. The first
+    // frame of a new session is the current desktop and normally arrives at
+    // once; the bound is only there so a session that never delivers cannot
+    // stall the loop. Spent after one attempt whatever the outcome.
+    UINT acquireTimeout = 0;
+    if (m_awaitFirstFrame[pacerSlot])
+    {
+        m_awaitFirstFrame[pacerSlot] = false;
+        acquireTimeout = kFirstFrameTimeoutMs;
+    }
+
+    CapturedFrame frame = capture.AcquireFrame(acquireTimeout);
+
+    // -- Keep the intermediate texture current, whatever we decide to draw --
+    //
+    // Straight after the acquire, before any path can return: the store is
+    // updated with only the regions that changed, which is correct only if no
+    // new frame is ever absorbed without being copied. A frame skipped here
+    // would leave its regions stale with nothing left to repaint them.
+    //
+    // Deliberately not inside the skip test further down, for the same
+    // reason: the renderer's copy is also the last-frame store the anchor pans
+    // across. Copy always, draw sometimes.
+    const bool haveNewImage = frame.isNewFrame && frame.texture;
+
+    if (haveNewImage)
+    {
+        const auto& dirty = capture.DirtyRects();
+        m_renderer.UpdateSourceTexture(monitorIndex, frame.texture.Get(),
+            capture.DirtyKnown() ? dirty.data() : nullptr,
+            capture.DirtyKnown() ? dirty.size() : 0);
+    }
 
     // Drawn even when no new frame arrived.
     //
@@ -997,10 +1070,7 @@ void App::RenderMonitor(size_t monitorIndex)
         const long monH = (frame.height > 0) ? static_cast<long>(frame.height) : mon->Height();
 
         if (monW <= 0 || monH <= 0)
-        {
-            capture.ReleaseFrame();
             return;
-        }
 
         const long srcW = (std::max)(1L, static_cast<long>(monW / zoom));
         const long srcH = (std::max)(1L, static_cast<long>(monH / zoom));
@@ -1122,21 +1192,6 @@ void App::RenderMonitor(size_t monitorIndex)
             }
         }
 
-        // -- Keep the intermediate texture current, whatever we decide to draw --
-        //
-        // This is deliberately not inside the skip test below. The renderer's
-        // copy of the frame is also the last-frame store the anchor pans
-        // across, so a frame absorbed without being copied leaves that store
-        // stale with nothing left to repaint it. Copy always, draw sometimes.
-        //
-        // On a layered window the draw and the Present are the expensive half
-        // anyway: the copy is one GPU-to-GPU blit, the Present is a DWM update
-        // of the whole monitor.
-        const bool haveNewImage = frame.isNewFrame && frame.texture;
-
-        if (haveNewImage)
-            m_renderer.UpdateSourceTexture(monitorIndex, frame.texture.Get());
-
         // -- Did the change land inside what this monitor is magnifying? --
         //
         // Desktop Duplication reports which regions it repainted. A magnifier
@@ -1177,11 +1232,9 @@ void App::RenderMonitor(size_t monitorIndex)
 
         const bool osdSame = (m_lastOsdShape[rectSlot] == osdShape);
 
+        // Held, not released: see the end of this function.
         if (!contentChanged && rectSame && spriteSame && osdSame)
-        {
-            capture.ReleaseFrame();
             return;
-        }
 
         m_lastSrcRect[rectSlot]     = srcRect;
         m_lastSpritePos[rectSlot]   = spritePos;
@@ -1198,7 +1251,6 @@ void App::RenderMonitor(size_t monitorIndex)
         if (!m_renderer.RenderFrame(nullptr, monitorIndex, srcRect, capture.GetRotation()))
         {
             // Henuz hic frame gelmemis olabilir — bir sonraki turda tekrar denenir.
-            capture.ReleaseFrame();
             return;
         }
 
@@ -1292,9 +1344,12 @@ void App::RenderMonitor(size_t monitorIndex)
         lastTime = now;
     }
 
-    // Unconditional after AcquireFrame: skipping it makes the next
-    // AcquireFrame fail with "frame already acquired".
-    capture.ReleaseFrame();
+    // The frame is NOT released here. It is held until the next AcquireFrame,
+    // which releases it first — the order ReleaseFrame's documentation
+    // recommends. While we own the frame the OS accumulates desktop updates
+    // instead of copying each one into the duplication surface, so a game
+    // presenting faster than we acquire stops paying for copies nobody reads.
+    // Suspend, recovery and teardown all release it on their own way out.
 }
 
 // =============================================================================
@@ -1310,7 +1365,7 @@ void App::RenderMonitor(size_t monitorIndex)
 // frames, so it is invisible to the user, but it stops a SetWindowPos storm
 // and the z-order churn that comes with it.
 // =============================================================================
-void App::AssertOverlaysTopmost()
+void App::AssertOverlaysTopmost(bool onlyIfCovered)
 {
     // BM_NO_TOPMOST_FIGHT=1 disables this: popups stay live but unmagnified
     // and doubled. See FightPopupZOrder in pch.h.
@@ -1325,10 +1380,23 @@ void App::AssertOverlaysTopmost()
         return;
     }
 
+    // The coverage walk has a clock of its own. Stamping m_lastTopmostAssert
+    // for a check that asserted nothing would hold back a popup event arriving
+    // just after it; not stamping anything would run the walk every tick.
+    if (onlyIfCovered)
+    {
+        if (m_lastCoverCheck.time_since_epoch().count() != 0
+            && now - m_lastCoverCheck < std::chrono::milliseconds(40))
+        {
+            return;
+        }
+        m_lastCoverCheck = now;
+    }
+
     bool any = false;
     for (auto& overlay : m_overlays)
     {
-        if (overlay.IsVisible())
+        if (overlay.IsVisible() && (!onlyIfCovered || overlay.IsCovered()))
         {
             overlay.EnsureTopmost();
             any = true;

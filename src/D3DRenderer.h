@@ -90,6 +90,19 @@ SourceUvMapping ComputeSourceUv(DXGI_MODE_ROTATION rotation,
 RECT DesktopRectToTextureRect(DXGI_MODE_ROTATION rotation,
                               UINT texW, UINT texH, RECT desktopRect);
 
+// Which boxes to copy from a new duplication frame into the last-frame store.
+//
+// Returns false for "copy the whole texture", which is the answer whenever
+// region copies would not be cheaper or could not be trusted: too many rects
+// (one CopySubresourceRegion each), or rects covering most of the texture —
+// a fullscreen game repaints everything every frame, and a single CopyResource
+// beats the same bytes in pieces. Rects are clamped to the texture; empty ones
+// are dropped. True with an empty `out` means nothing in the texture changed.
+//
+// Pure, like ComputeSourceUv, so D3DRendererSelfCheck can assert it.
+bool PlanDirtyCopy(UINT texW, UINT texH, const RECT* rects, size_t count,
+                   std::vector<D3D11_BOX>& out);
+
 #ifdef _DEBUG
 // Assert-based self-check, run from main. Mirrors ViewportControllerSelfCheck.
 void D3DRendererSelfCheck();
@@ -133,7 +146,21 @@ public:
     // and on a layered window the Present is the expensive half anyway.
     //
     // Returns false when the texture could not be prepared.
-    bool UpdateSourceTexture(size_t targetIndex, ID3D11Texture2D* srcTexture);
+    //
+    // dirty/dirtyCount are the frame's changed regions in TEXTURE coordinates,
+    // straight from Desktop Duplication. When they are given and the store
+    // already holds the previous frame, only those regions are copied; see
+    // PlanDirtyCopy for when it falls back to the whole texture. nullptr means
+    // "unknown", which always copies everything.
+    bool UpdateSourceTexture(size_t targetIndex, ID3D11Texture2D* srcTexture,
+                             const RECT* dirty = nullptr, size_t dirtyCount = 0);
+
+    // Drop the last-frame store while its capture is suspended. It would be
+    // minutes stale by the time zoom comes back, and drawing it for even one
+    // frame shows the user a desktop that no longer exists; it is also a full
+    // monitor of VRAM held for nothing. RenderFrame declines to draw until the
+    // next captured frame recreates it.
+    void ReleaseSourceTexture(size_t targetIndex);
 
     // Draws a premultiplied-BGRA sprite over whatever RenderFrame just drew.
     // Coordinates are target pixels; the top-left corner, hotspot already
@@ -196,6 +223,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D11RasterizerState> m_rasterNoCull;
 
     std::vector<RenderTarget> m_renderTargets;
+
+    // PlanDirtyCopy's output, reused so a partial copy does not put the render
+    // thread on the heap at display rate.
+    std::vector<D3D11_BOX> m_copyBoxes;
 
 #ifdef _DEBUG
     Microsoft::WRL::ComPtr<ID3D11Debug> m_debug;

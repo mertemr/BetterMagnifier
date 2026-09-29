@@ -59,7 +59,11 @@ private:
 
     // Rate-limited: EVENT_OBJECT_SHOW fires constantly and calling
     // SetWindowPos on every one of them is z-order noise.
-    void AssertOverlaysTopmost();
+    //
+    // onlyIfCovered is the periodic backstop: it re-asserts only an overlay
+    // that something visible is actually on top of. The event path passes
+    // false and asserts unconditionally, as it always has.
+    void AssertOverlaysTopmost(bool onlyIfCovered = false);
 
     void Update();
     void RenderMonitor(size_t monitorIndex);
@@ -252,6 +256,12 @@ private:
 
     FrameWaiter m_frameWaiter;
 
+    // Set when a suspended capture is resumed: the next acquire on that
+    // monitor may block briefly for the new session's first frame, because
+    // until it arrives there is nothing at all to draw. See RenderMonitor.
+    std::array<bool, StatusSnapshot::kMaxMonitors> m_awaitFirstFrame{};
+    static constexpr UINT kFirstFrameTimeoutMs = 100;
+
     // Latched so SetThreadPriority is called on the transition rather than
     // every tick.
     bool m_renderPriorityRaised = false;
@@ -261,6 +271,7 @@ private:
     bool m_presentedThisTick = false;
 
     std::chrono::steady_clock::time_point m_lastTopmostAssert{};
+    std::chrono::steady_clock::time_point m_lastCoverCheck{};
 
     bool m_running     = false;
     bool m_initialized = false;

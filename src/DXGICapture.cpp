@@ -43,6 +43,7 @@ DXGICapture::DXGICapture(DXGICapture&& other) noexcept
     , m_frameAcquired(other.m_frameAcquired)
     , m_initialized(other.m_initialized)
     , m_needsReinit(other.m_needsReinit)
+    , m_suspended(other.m_suspended)
     , m_width(other.m_width)
     , m_height(other.m_height)
     , m_rotation(other.m_rotation)
@@ -72,6 +73,7 @@ DXGICapture& DXGICapture::operator=(DXGICapture&& other) noexcept
         m_frameAcquired     = other.m_frameAcquired;
         m_initialized       = other.m_initialized;
         m_needsReinit       = other.m_needsReinit;
+        m_suspended         = other.m_suspended;
         m_width             = other.m_width;
         m_height            = other.m_height;
         m_rotation          = other.m_rotation;
@@ -102,6 +104,7 @@ bool DXGICapture::Initialize(ID3D11Device* device, IDXGIOutput* output)
     Cleanup();
 
     m_device = device;
+    m_suspended = false;
     device->GetImmediateContext(&m_context);
 
     // Desktop Duplication lives on IDXGIOutput1 and above.
@@ -169,6 +172,10 @@ bool DXGICapture::Initialize(ID3D11Device* device, IDXGIOutput* output)
 CapturedFrame DXGICapture::AcquireFrame(UINT timeoutMs)
 {
     CapturedFrame result{};
+
+    // Suspended on purpose; asking for recovery here would undo the suspend.
+    if (m_suspended)
+        return result;
 
     if (!m_initialized || !m_duplication)
     {
@@ -250,6 +257,17 @@ CapturedFrame DXGICapture::AcquireFrame(UINT timeoutMs)
     {
         if (m_firstFrame)
         {
+            // Recorded once per session, because it decides whether the
+            // renderer's full-monitor copy can go: if the acquired texture is
+            // bindable as a shader resource, the frame can be held and sampled
+            // in place instead (ReleaseFrame's documentation recommends holding
+            // it — the OS stops copying updates into it while we own it).
+            D3D11_TEXTURE2D_DESC desc{};
+            result.texture->GetDesc(&desc);
+            LOG_INFO("Duplication texture: {}x{} format={} bind=0x{:X} misc=0x{:X} usage={}",
+                desc.Width, desc.Height, static_cast<unsigned>(desc.Format),
+                desc.BindFlags, desc.MiscFlags, static_cast<unsigned>(desc.Usage));
+
             // No metadata is trustworthy for a frame we are forcing through.
             m_firstFrame = false;
             m_dirtyKnown = false;
@@ -397,6 +415,38 @@ void DXGICapture::ReleaseDuplication()
     m_duplication.Reset();
     m_initialized = false;
     m_needsReinit = true;
+}
+
+bool DXGICapture::Suspend()
+{
+    if (m_suspended)
+        return false;
+
+    ReleaseDuplication();
+
+    // ReleaseDuplication asks for recovery; a suspended session must not be
+    // quietly reopened by the recovery path behind the caller's back.
+    m_needsReinit = false;
+    m_suspended   = true;
+
+    LOG_DEBUG("DXGICapture suspended (monitor not magnified)");
+    return true;
+}
+
+bool DXGICapture::Resume()
+{
+    if (!m_suspended)
+        return false;
+
+    m_suspended = false;
+
+    // Recovery semantics from here on: if this attempt fails, the ordinary
+    // throttled retry picks it up.
+    m_needsReinit = true;
+    m_lastReinitAttempt = {};
+
+    Reinitialize();
+    return true;
 }
 
 bool DXGICapture::Reinitialize()

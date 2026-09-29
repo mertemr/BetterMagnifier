@@ -42,6 +42,7 @@ struct MonitorStatus
     std::atomic<bool>  isActive{false};
     std::atomic<bool>  isFrozen{false};
     std::atomic<bool>  captureOk{false};        // initialised && !needs reinit
+    std::atomic<bool>  captureIdle{false};      // suspended: monitor not magnified
     std::atomic<bool>  captureExcluded{false};  // WDA_EXCLUDEFROMCAPTURE took
     std::atomic<float> fps{0.0f};
 

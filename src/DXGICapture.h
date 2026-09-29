@@ -79,14 +79,37 @@ public:
     bool DirtyKnown() const { return m_dirtyKnown; }
     bool DirtyIntersects(const RECT& textureRect) const;
 
-    // MUST be called after AcquireFrame or the next acquire fails.
+    // The regions themselves, for copying only what changed. Meaningless
+    // unless DirtyKnown(); move rects contribute both their ends.
+    const std::vector<RECT>& DirtyRects() const { return m_dirtyRects; }
+
+    // AcquireFrame releases a held frame itself before asking for the next
+    // one, and the render loop relies on that: it holds each frame until then,
+    // which is the order the Desktop Duplication documentation recommends.
     void ReleaseFrame();
 
     // Rebuild the duplication session after DXGI_ERROR_ACCESS_LOST.
     bool Reinitialize();
 
+    // ── Idle monitors hold no duplication session ──
+    //
+    // An open session is not free even when nobody acquires from it: while the
+    // client does not own a frame, the OS copies every desktop update into the
+    // duplication surface (see IDXGIOutputDuplication::ReleaseFrame). A game on
+    // a monitor that is not being magnified — or on any monitor while the app
+    // sits in the tray — paid for that copy on every one of its presents.
+    //
+    // Suspend drops the session and keeps device and output, like recovery
+    // does. Resume reopens it immediately, bypassing the recovery throttle,
+    // because it runs on the user's own zoom-on and must not wait 500 ms.
+    // Returns true only on the transition, so the caller can release what it
+    // was holding for this monitor once rather than every tick.
+    bool Suspend();
+    bool Resume();
+
     bool IsInitialized() const { return m_initialized; }
     bool NeedsReinit()   const { return m_needsReinit; }
+    bool IsSuspended()   const { return m_suspended; }
 
     // DESKTOP dimensions, from DXGI_OUTPUT_DESC.DesktopCoordinates. On a
     // rotated output these are deliberately NOT the acquired texture's
@@ -126,6 +149,7 @@ private:
     bool  m_frameAcquired = false;
     bool  m_initialized   = false;
     bool  m_needsReinit   = false;
+    bool  m_suspended     = false;
     UINT  m_width  = 0;
     UINT  m_height = 0;
 
