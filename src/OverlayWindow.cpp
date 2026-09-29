@@ -150,6 +150,20 @@ bool OverlayWindow::Create(HINSTANCE hInstance, const MonitorInfo& monitorInfo, 
         return false;
     }
 
+    // Not a fullscreen app, as far as the shell is concerned. A visible topmost
+    // window covering the whole monitor is exactly what Explorer's fullscreen
+    // detection looks for, and its answer is to drop that monitor's taskbar out
+    // of the topmost band. Nothing shows it until a fullscreen app sits behind
+    // us: that app then covers the taskbar in the captured image, so zooming in
+    // looked like it removed the taskbar. Coming back relied on Explorer
+    // re-evaluating, which waits for the next foreground change and sometimes
+    // never happened. Measured: Shell_TrayWnd loses WS_EX_TOPMOST while this
+    // window is shown, and keeps it with the property set. It has to be set
+    // before the first ShowWindow; the shell judges a window when it appears.
+    if (!SetPropW(m_hwnd, kNonRudeProp, reinterpret_cast<HANDLE>(TRUE)))
+        LOG_WARN("SetProp(NonRudeHWND) failed ({}) — the taskbar may drop behind "
+                 "a fullscreen app while zoomed", GetLastError());
+
     // Fully opaque. The window is layered for input transparency, not visual
     // transparency — and without this call a layered window is never drawn at
     // all.
@@ -285,6 +299,8 @@ LRESULT CALLBACK OverlayWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     }
 
     case WM_DESTROY:
+        // Properties are the owner's to remove; see Create.
+        RemovePropW(hwnd, kNonRudeProp);
         return 0;
 
     default:

@@ -488,6 +488,17 @@ layered style made the overlay swallow every click.
 `LAYERED | TRANSPARENT` is the reliable combination, and it forces the swap
 chain to the blt model since flip refuses layered windows.
 
+**To the shell, a topmost window the size of the monitor is a fullscreen
+app.** Explorer's fullscreen detection answers it by dropping that monitor's
+taskbar out of the topmost band. Over ordinary windows nothing shows it; over a
+fullscreen app sitting behind an alt-tab, that app covers the taskbar in the
+captured image, and zooming in looked like it removed the taskbar — with no
+guaranteed way back, since Explorer only re-evaluates on a later foreground
+change. The overlay carries the `NonRudeHWND` window property, set before its
+first show, which is the shell's own opt-out. Measured rather than assumed:
+`Shell_TrayWnd` loses `WS_EX_TOPMOST` while an overlay-styled window is shown,
+and keeps it with the property set.
+
 **Moving the OS cursor to follow keyboard focus creates a feedback loop.**
 Moving the pointer triggers hover and focus in whatever is now under it,
 which raises another focus event and moves it again — observed as the cursor

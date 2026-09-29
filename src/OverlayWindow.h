@@ -55,6 +55,9 @@ private:
     bool    m_excludedFromCapture = false;
 
     static constexpr wchar_t kClassName[] = L"BetterMagnifierOverlay";
+
+    // The shell's opt-out from fullscreen detection; see Create.
+    static constexpr wchar_t kNonRudeProp[] = L"NonRudeHWND";
     static bool s_classRegistered;
 };
 
