@@ -72,6 +72,9 @@ void PointerInput::Attach(ViewportController* controller, ViewportSnapshot* snap
     m_viewport = controller;
     m_snapshot = snapshot;
 
+    for (POINT& p : m_recent)
+        p = POINT{ LONG_MIN, LONG_MIN };
+
     SetSpeed(ReadEnvFloat(L"BM_POINTER_SPEED", 1.0f));
 
     // Read separately: 0 is a legitimate value here, and ReadEnvFloat treats
@@ -424,6 +427,9 @@ bool PointerInput::OnMouseMove(const MSLLHOOKSTRUCT& data)
 
     const POINT target{ static_cast<LONG>(std::lround(m_x)),
                         static_cast<LONG>(std::lround(m_y)) };
+
+    if (target.x == m_lastSet.x && target.y == m_lastSet.y)
+        return true;
 
     // Recorded BEFORE the call, not after. The echo can be delivered from
     // inside SetCursorPos itself, and a m_lastSet written afterwards would

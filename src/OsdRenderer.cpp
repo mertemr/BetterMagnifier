@@ -68,7 +68,8 @@ double PillCoverage(double x, double y, double w, double h, double r)
 // =============================================================================
 // RenderOsdText
 // =============================================================================
-bool RenderOsdText(const std::wstring& text, int fontHeightPx, OsdBitmap& out)
+bool RenderOsdText(const std::wstring& text, int fontHeightPx, OsdBitmap& out,
+                   float opacity)
 {
     out.pixels.clear();
     out.width  = 0;
@@ -78,6 +79,10 @@ bool RenderOsdText(const std::wstring& text, int fontHeightPx, OsdBitmap& out)
         return false;
 
     fontHeightPx = std::clamp(fontHeightPx, 10, 400);
+
+    const double fade = std::clamp(static_cast<double>(opacity), 0.0, 1.0);
+    if (fade <= 0.0)
+        return false;
 
     HDC screen = GetDC(nullptr);
     if (!screen)
@@ -203,11 +208,13 @@ bool RenderOsdText(const std::wstring& text, int fontHeightPx, OsdBitmap& out)
                 return static_cast<uint32_t>(std::clamp(std::lround(v), 0L, 255L));
             };
 
+            // Premultiplied, so one factor across all four channels is exactly a
+            // change of opacity — no unpremultiply-and-back needed.
             out.pixels[static_cast<size_t>(y) * w + x] =
-                  (clamp8(a * 255.0) << 24)
-                | (clamp8(r) << 16)
-                | (clamp8(g) << 8)
-                |  clamp8(b);
+                  (clamp8(a * 255.0 * fade) << 24)
+                | (clamp8(r * fade) << 16)
+                | (clamp8(g * fade) << 8)
+                |  clamp8(b * fade);
         }
     }
 
@@ -222,15 +229,23 @@ bool RenderOsdText(const std::wstring& text, int fontHeightPx, OsdBitmap& out)
 // =============================================================================
 // OsdCache
 // =============================================================================
-bool OsdCache::Acquire(const std::wstring& text, int fontHeightPx, Label& out)
+bool OsdCache::Acquire(const std::wstring& text, int fontHeightPx, float opacity, Label& out)
 {
     if (!m_device || text.empty())
+        return false;
+
+    // Quantised to a byte before it becomes a key, so a float that wanders in
+    // the last bits cannot mint a fresh entry — and a fresh entry every frame is
+    // a texture upload every frame.
+    const int alpha = std::clamp(static_cast<int>(std::lround(opacity * 255.0f)), 0, 255);
+    if (alpha == 0)
         return false;
 
     // The height is part of the key: the same string on a 4K display and on a
     // 1080p one is a different bitmap, and keying on the text alone would show
     // whichever size happened to be rendered first on both.
-    const std::wstring key = text + L'\x1' + std::to_wstring(fontHeightPx);
+    const std::wstring key = text + L'\x1' + std::to_wstring(fontHeightPx)
+                                  + L'\x1' + std::to_wstring(alpha);
 
     if (auto it = m_entries.find(key); it != m_entries.end())
     {
@@ -241,7 +256,7 @@ bool OsdCache::Acquire(const std::wstring& text, int fontHeightPx, Label& out)
     }
 
     OsdBitmap bmp;
-    if (!RenderOsdText(text, fontHeightPx, bmp) || bmp.pixels.empty())
+    if (!RenderOsdText(text, fontHeightPx, bmp, alpha / 255.0f) || bmp.pixels.empty())
         return false;
 
     D3D11_TEXTURE2D_DESC desc{};

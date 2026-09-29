@@ -136,11 +136,7 @@ private:
     // scaled path, so switching the sprite off froze it in place.
     void DriveViewport();
 
-    // The last few SetCursorPos targets. An injected move at one of them that
-    // is not the newest is our own echo arriving late, and has to be dropped
-    // rather than allowed to pull the cursor backwards. Four covers more of our
-    // own moves than can plausibly be in flight at once.
-    static constexpr std::size_t kRecentTargets = 4;
+    static constexpr std::size_t kRecentTargets = 32;
 
     void RememberTarget(POINT target);
     bool WasRecentTarget(POINT p) const;
@@ -160,9 +156,9 @@ private:
     EdgeBreakout m_breakout;
 
     // LONG_MIN rather than zero: (0,0) is the primary monitor's top-left corner
-    // and a real place for a foreign SetCursorPos to aim at.
-    POINT       m_recent[kRecentTargets]{ {LONG_MIN, LONG_MIN}, {LONG_MIN, LONG_MIN},
-                                          {LONG_MIN, LONG_MIN}, {LONG_MIN, LONG_MIN} };
+    // and a real place for a foreign SetCursorPos to aim at. Filled by Attach,
+    // since a braced initializer for 32 entries is noise no reader needs.
+    POINT       m_recent[kRecentTargets]{};
     std::size_t m_recentNext = 0;
 
     // Diagnostics only, written in the hook and read on disable. Atomic for the
