@@ -77,6 +77,15 @@ bool InputThread::Start(HWND targetHwnd, FollowMode initialMode, bool hijackMagn
     m_thread = std::thread([this, p = std::move(ready)]() mutable {
         m_threadId.store(GetCurrentThreadId(), std::memory_order_release);
 
+        // Low-level hooks have a deadline, not just a latency budget: exceed
+        // LowLevelHooksTimeout (300 ms) and Windows uninstalls the hook
+        // without telling us. The callbacks here do almost nothing, so the
+        // only way to miss that deadline is to not be scheduled at all - which
+        // is exactly what a fullscreen game saturating the machine arranges.
+        // One class above normal costs nothing and removes that failure mode.
+        if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL))
+            LOG_WARN("Input thread priority could not be raised: {}", GetLastError());
+
         const bool ok = InstallHooks();
         p.set_value(ok);
 
@@ -243,6 +252,17 @@ void InputThread::ThreadMain()
             continue;
         }
 
+        // The render thread saw its request change and does not want to wait
+        // out the timer for it. Same work as a tick, without the liveness
+        // check: that one is deliberately rate-limited to about a second and
+        // driving it from a zoom ramp would call GetCursorPos per step.
+        if (msg.message == kMsgSyncNow && msg.hwnd == nullptr)
+        {
+            SyncFromRequests();
+            PublishViewport();
+            continue;
+        }
+
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -255,6 +275,17 @@ void InputThread::Attach(ViewportController* controller, ViewportSnapshot* snaps
     m_viewport = controller;
     m_snapshot = snapshot;
     m_pointer.Attach(controller, snapshot);
+}
+
+void InputThread::RequestSync()
+{
+    const DWORD tid = m_threadId.load(std::memory_order_acquire);
+    if (tid == 0 || !m_running.load(std::memory_order_acquire))
+        return;
+
+    // Failure here means the thread is going away, which Stop is already
+    // handling. Not worth a log line on a path that runs per zoom step.
+    PostThreadMessageW(tid, kMsgSyncNow, 0, 0);
 }
 
 void InputThread::SetViewportConfig(const ViewportConfig& cfg)

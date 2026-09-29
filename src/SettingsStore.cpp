@@ -4,6 +4,7 @@
 
 #include "pch.h"
 #include "SettingsStore.h"
+#include "FramePacer.h"
 #include "Logger.h"
 
 #include <shlobj.h>       // SHGetKnownFolderPath, FOLDERID_RoamingAppData
@@ -346,6 +347,20 @@ bool SettingsStore::Load()
     m_general.lockPointerToMonitor =
         GetPrivateProfileIntW(L"General", L"LockPointerToMonitor", 1, file.c_str()) != 0;
 
+    // ── Frame rate ceiling ──
+    // 0 means "follow the display" and is the default, so it has to survive
+    // the read untouched — clamping to the [10, 1000] override range would
+    // turn every fresh install into a hard 10 fps cap. Anything else is
+    // clamped to that range; a negative value in a hand-edited INI is a typo,
+    // not a request, and reads as auto.
+    {
+        const int raw = GetPrivateProfileIntW(L"General", L"MaxFps", 0, file.c_str());
+        m_general.maxFps = (raw <= 0)
+                         ? 0u
+                         : std::clamp(static_cast<unsigned>(raw),
+                                      kMinFrameRateCap, kMaxFrameRateCap);
+    }
+
     // ── Per-monitor section'lari ──
     // GetPrivateProfileSectionNamesW returns every section name in one buffer,
     // separated by '\0' and terminated by a double '\0'.
@@ -446,6 +461,8 @@ bool SettingsStore::Save() const
                     m_general.cursorScale) && ok;
     ok = WriteInt(file, L"General", L"LockPointerToMonitor",
                   m_general.lockPointerToMonitor ? 1 : 0) && ok;
+    ok = WriteInt(file, L"General", L"MaxFps",
+                  static_cast<int>(m_general.maxFps)) && ok;
 
     ok = WritePrivateProfileStringW(L"General", L"FollowMode",
             (m_general.followMode == FollowMode::Mouse)         ? L"Mouse" :
@@ -603,6 +620,12 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(std::abs(fresh.General().pointerSpeed - 1.0f) < 1e-4f);
         BM_SELFCHECK(std::abs(fresh.General().edgeBandFraction - 0.12f) < 1e-4f);
 
+        // Auto by default. The regression this guards is a plausible one: put
+        // MaxFps through the same clamp as the override range and a fresh
+        // install reads 0, clamps to the floor, and every display in the world
+        // gets paced to 10 fps.
+        BM_SELFCHECK(fresh.General().maxFps == 0);
+
         // An unknown monitor yields the defaults
         const auto m = fresh.Monitor(L"\\\\.\\NOSUCHDISPLAY");
         BM_SELFCHECK(m.minZoom == 1.0f);
@@ -621,6 +644,7 @@ void SettingsStoreSelfCheck()
         w.MutableGeneral().pointerCompensation  = 0.35f;
         w.MutableGeneral().cursorScale          = 1.25f;
         w.MutableGeneral().lockPointerToMonitor = false;
+        w.MutableGeneral().maxFps               = 144;
         w.SetMonitor(L"\\\\.\\DISPLAY1", MonitorSettings{ 1.5f, 8.0f, 0.5f, 3.25f });
         BM_SELFCHECK(w.Save());
 
@@ -637,6 +661,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(std::abs(r.General().pointerCompensation - 0.35f) < 1e-4f);
         BM_SELFCHECK(std::abs(r.General().cursorScale - 1.25f) < 1e-4f);
         BM_SELFCHECK(r.General().lockPointerToMonitor == false);
+        BM_SELFCHECK(r.General().maxFps == 144);
 
         // Sacma degerler tek tek varsayilana dusuyor, dosyanin geri kalanini
         // zehirlemiyor.
@@ -644,6 +669,7 @@ void SettingsStoreSelfCheck()
         outOfRange.MutableGeneral().edgeBandFraction    = 5.0f;
         outOfRange.MutableGeneral().pointerSpeed        = 99.0f;
         outOfRange.MutableGeneral().pointerCompensation = -3.0f;
+        outOfRange.MutableGeneral().maxFps              = 999999;
         BM_SELFCHECK(outOfRange.Save());
 
         SettingsStore clamped;
@@ -654,6 +680,18 @@ void SettingsStoreSelfCheck()
                      clamped.General().pointerSpeed <= 5.0f);
         BM_SELFCHECK(clamped.General().pointerCompensation >= 0.0f &&
                      clamped.General().pointerCompensation <= 1.0f);
+        BM_SELFCHECK(clamped.General().maxFps == kMaxFrameRateCap);
+
+        // And zero survives a round trip as zero rather than becoming the
+        // floor, because zero is the default and means something different
+        // from every other value this field can hold.
+        SettingsStore autoFps;
+        autoFps.MutableGeneral().maxFps = 0;
+        BM_SELFCHECK(autoFps.Save());
+
+        SettingsStore autoBack;
+        BM_SELFCHECK(autoBack.Load());
+        BM_SELFCHECK(autoBack.General().maxFps == 0);
 
         const auto rm = r.Monitor(L"\\\\.\\DISPLAY1");
         BM_SELFCHECK(rm.minZoom  == 1.5f);

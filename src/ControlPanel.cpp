@@ -798,7 +798,11 @@ void ControlPanel::UpdateLiveValues()
             ? winrt::hstring{ std::format(L"{:.0f} FPS", fps) }
             : winrt::hstring{ L"- FPS" });
 
-        if (!st.captureOk.load(std::memory_order_relaxed))
+        // Idle before reconnecting: a suspended capture is not initialised, and
+        // reading that as a fault would show every unmagnified monitor as broken.
+        if (st.captureIdle.load(std::memory_order_relaxed))
+            card.captureLabel.Text(L"Capture: idle");
+        else if (!st.captureOk.load(std::memory_order_relaxed))
             card.captureLabel.Text(L"Capture: reconnecting");
         else if (!st.captureExcluded.load(std::memory_order_relaxed))
             card.captureLabel.Text(L"Capture: feedback risk");

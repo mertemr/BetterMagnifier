@@ -410,6 +410,11 @@ bool App::InitializeComponents()
     // and edge-push settings sat unread until the user changed one.
     ApplyPointerSettings();
 
+    // Same reasoning, for the render loop's rate ceiling: it depends on the
+    // MaxFps setting and on each monitor's refresh rate, and neither is known
+    // until both the settings and the monitors have been read.
+    ApplyFrameRateCaps();
+
     // Same reason, plus a migration: a copy that had this on was carrying a Run
     // entry Windows never honoured, and only a settings change would have
     // replaced it with the logon task.
@@ -523,6 +528,12 @@ void App::PublishViewportRequests(bool bumpLayout)
     const size_t count = m_overlays.size();
     m_viewportSnapshot.monitorCount.store(count, std::memory_order_relaxed);
 
+    // Whether anything the input thread acts on actually moved. Only the
+    // render thread writes these, so reading them back to compare is not a
+    // race, and it keeps the answer here rather than in a shadow copy that
+    // could drift from what was published.
+    bool changed = bumpLayout;
+
     for (size_t i = 0; i < count; ++i)
     {
         const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
@@ -535,12 +546,20 @@ void App::PublishViewportRequests(bool bumpLayout)
         // monitor that is no longer magnified.
         const double zoom = mon->zoom.isActive
                           ? static_cast<double>(mon->zoom.zoomLevel) : 1.0;
+
+        if (a.requestedZoom.load(std::memory_order_relaxed) != zoom)
+            changed = true;
+
         a.requestedZoom.store(zoom, std::memory_order_relaxed);
 
         a.originX.store(mon->bounds.left, std::memory_order_relaxed);
         a.originY.store(mon->bounds.top,  std::memory_order_relaxed);
         a.width.store(mon->Width(),  std::memory_order_relaxed);
         a.height.store(mon->Height(), std::memory_order_relaxed);
+
+        if (a.frozen.load(std::memory_order_relaxed) != mon->zoom.isFrozen)
+            changed = true;
+
         a.frozen.store(mon->zoom.isFrozen, std::memory_order_relaxed);
     }
 
@@ -548,6 +567,13 @@ void App::PublishViewportRequests(bool bumpLayout)
     // sees every rect written above it.
     if (bumpLayout)
         m_viewportSnapshot.layoutEpoch.fetch_add(1, std::memory_order_release);
+
+    // Wake the input thread rather than let the request sit until its 16 ms
+    // sync timer. This runs every frame, so it has to be conditional: an
+    // unconditional post would be a thread message per frame per monitor for
+    // a value that had not moved.
+    if (changed)
+        m_inputThread.RequestSync();
 }
 
 // =============================================================================
@@ -770,12 +796,44 @@ void App::Update()
             st.fps.store(0.0f, std::memory_order_relaxed);
             m_lastFrameTime[slot] = {};
 
+            // Forget the cadence too. Turning zoom back on minutes later must
+            // not be held back by a deadline computed for the last session.
+            m_pacers[slot].Reset();
+
             // Clear the remembered rect too. Without this, zooming back in on
             // the same region reads as "nothing changed" and the draw is
             // skipped — and after a Present the back buffer contents are
             // undefined, so what appears on screen is garbage.
             m_lastSrcRect[slot] = RECT{};
+
+            // And close the duplication session. Left open, it costs the OS a
+            // copy of every desktop update on this monitor whether or not we
+            // ever acquire one — a game here paid for a magnifier that was not
+            // magnifying it. See DXGICapture::Suspend.
+            if (m_captures[i].Suspend())
+                m_renderer.ReleaseSourceTexture(i);
+
+            st.captureIdle.store(true, std::memory_order_relaxed);
             continue;
+        }
+
+        st.captureIdle.store(false, std::memory_order_relaxed);
+
+        // The session was closed while this monitor was idle, so zoom-on now
+        // has to reopen it, and the renderer has no frame to draw until the
+        // new session delivers one. m_awaitFirstFrame lets RenderMonitor wait
+        // briefly for it, so the overlay is shown and presented in the same
+        // tick as before rather than sitting on screen with nothing drawn.
+        if (m_captures[i].Resume())
+        {
+            m_awaitFirstFrame[slot] = true;
+        }
+        else if (m_captures[i].NeedsReinit())
+        {
+            // Duplication is lost on things like a fullscreen game taking the
+            // output. Retrying is free; failure just means trying again next
+            // frame.
+            m_captures[i].Reinitialize();
         }
 
         if (mon->zoom.isActive)
@@ -791,11 +849,6 @@ void App::Update()
         if (!m_overlays[i].IsVisible())
             m_overlays[i].Show();
 
-        // Duplication is lost on things like a fullscreen game taking the
-        // output. Retrying is free; failure just means trying again next frame.
-        if (m_captures[i].NeedsReinit())
-            m_captures[i].Reinitialize();
-
         RenderMonitor(i);
     }
 
@@ -810,16 +863,179 @@ void App::Update()
     // (WM_APP_ASSERT_TOPMOST); this catches whatever slips past it, and is
     // rate-limited inside AssertOverlaysTopmost.
     if (anyActive)
-        AssertOverlaysTopmost();
+        AssertOverlaysTopmost(true);
 
-    // Present with vSync paces the loop while zoom is on. When nothing was
-    // presented — zoom off, or the frame skipped because nothing changed —
-    // that brake is absent and the loop would spin a core.
+    ApplyRenderThreadPriority(anyActive);
+
+    // -- Idle until the next monitor is due a frame --
     //
-    // 4 ms is short enough to notice a change (a 240 Hz poll) and long enough
-    // to not be a spin.
-    if (!m_presentedThisTick)
-        Sleep(anyActive ? 4 : 8);
+    // This is where the loop's rate is actually decided, and it used to be
+    // decided by accident. Sleep(4) does not sleep 4 ms: the default system
+    // timer granularity is 15.6 ms and Sleep rounds up to it, so the real tick
+    // rate depended on whether some other process on the machine happened to
+    // have called timeBeginPeriod - a browser being open was the difference
+    // between a 64 Hz ceiling and a 250 Hz one. That is most of the answer to
+    // why this never went above 60 on a 144 Hz panel.
+    //
+    // FrameWaiter uses a high-resolution waitable timer, which is accurate
+    // without raising the timer resolution for the whole system, and waits on
+    // the message queue at the same time so a hotkey or a zoom step is not
+    // slept through.
+    auto wait = TimeUntilNextFrame(std::chrono::steady_clock::now());
+
+    if (!anyActive)
+    {
+        // Nothing magnified: the loop only has to notice a hotkey, and one of
+        // those arrives as a message and breaks the wait anyway.
+        wait = std::chrono::milliseconds(8);
+    }
+    else if (wait == std::chrono::steady_clock::duration::max()
+          || wait <= std::chrono::steady_clock::duration::zero())
+    {
+        // No pacer has a deadline, which means they are all uncapped - the
+        // flip-model overlay, where Present(1) blocks on vblank and is the
+        // brake. It only brakes when something was presented, so an idle tick
+        // still needs a floor under it.
+        wait = m_presentedThisTick
+             ? std::chrono::steady_clock::duration::zero()
+             : std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                   std::chrono::milliseconds(4));
+    }
+
+    // A backstop on the wait itself. At a hand-set MaxFps of 10 the interval
+    // is 100 ms, and going that long without looking at capture recovery or
+    // the readout's expiry makes the application feel stuck even though it is
+    // doing exactly what it was told.
+    const auto kMaxIdle =
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::milliseconds(50));
+
+    m_frameWaiter.WaitOrMessage((std::min)(wait, kMaxIdle));
+}
+
+// =============================================================================
+// ApplyFrameRateCaps - what each monitor's pacer is aiming for
+// =============================================================================
+//
+// Two inputs and either can move on its own: the user's MaxFps setting, and
+// the monitor's refresh rate, which changes when a display is swapped, rotated
+// or reconfigured. So this is called from Initialize, from ApplySettings and
+// from OnDisplayChange rather than computed once.
+// =============================================================================
+void App::ApplyFrameRateCaps()
+{
+    // Under BM_OVERLAY_FLIP the swap chain is flip-model and Present gets
+    // SyncInterval 1, which is this same brake applied by the display itself
+    // and applied more accurately. Pacing on top of it would only add a
+    // second, coarser cadence beating against the first.
+    const bool vSyncPaces = UseFlipOverlay();
+    const unsigned maxFps = m_settings.General().maxFps;
+
+    for (size_t i = 0; i < StatusSnapshot::kMaxMonitors; ++i)
+    {
+        const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
+        const unsigned refresh = mon ? mon->refreshRate : 0u;
+
+        m_pacers[i].SetCap(vSyncPaces ? 0u : ResolveFrameRateCap(maxFps, refresh));
+    }
+
+    if (vSyncPaces)
+    {
+        LOG_INFO("Frame pacing off: the flip-model overlay presents with vSync");
+    }
+    else
+    {
+        LOG_INFO("Frame pacing: MaxFps={} ({}), monitor 0 capped at {} fps, "
+                 "high-resolution timer {}",
+                 maxFps,
+                 maxFps == 0 ? "follow the display" : "explicit override",
+                 m_pacers[0].Cap(),
+                 m_frameWaiter.IsHighResolution() ? "yes" : "no");
+    }
+}
+
+// =============================================================================
+// TimeUntilNextFrame - how long the loop may idle
+// =============================================================================
+// The soonest deadline across the monitors that are actually magnified.
+// duration::max() means none of them has one, which is either "nothing is
+// magnified" or "every pacer is uncapped"; the caller distinguishes.
+// =============================================================================
+std::chrono::steady_clock::duration App::TimeUntilNextFrame(
+    std::chrono::steady_clock::time_point now) const
+{
+    using duration = std::chrono::steady_clock::duration;
+
+    duration soonest = duration::max();
+
+    for (size_t i = 0; i < m_overlays.size(); ++i)
+    {
+        const MonitorInfo* mon = m_monitorManager.GetMonitor(i);
+        if (!mon || !mon->zoom.isActive)
+            continue;
+
+        const size_t slot = (i < StatusSnapshot::kMaxMonitors)
+                          ? i : StatusSnapshot::kMaxMonitors - 1;
+
+        const duration d = m_pacers[slot].TimeUntilDue(now);
+        if (d <= duration::zero())
+            return duration::zero();
+
+        soonest = (std::min)(soonest, d);
+    }
+
+    return soonest;
+}
+
+// =============================================================================
+// ApplyRenderThreadPriority
+// =============================================================================
+//
+// A magnifier competes for the CPU with the application it is magnifying, and
+// under a fullscreen game that competition is one it loses: the view stutters
+// exactly when the user most needs it to be readable. One class above normal
+// is enough to be scheduled promptly without pre-empting anything that
+// matters, and it is given back the moment nothing is magnified so an idle
+// tray application is not sitting above everything else on the machine.
+//
+// Latched, because SetThreadPriority every tick is a syscall for nothing.
+// =============================================================================
+void App::ApplyRenderThreadPriority(bool anyActive)
+{
+    if (anyActive == m_renderPriorityRaised)
+        return;
+
+    const int priority = anyActive ? THREAD_PRIORITY_ABOVE_NORMAL
+                                   : THREAD_PRIORITY_NORMAL;
+
+    if (!SetThreadPriority(GetCurrentThread(), priority))
+    {
+        // Not fatal, and not worth retrying every tick: latch anyway so the
+        // log does not fill up with it.
+        LOG_WARN("SetThreadPriority failed: {}", GetLastError());
+    }
+    else
+    {
+        LOG_DEBUG("Render thread priority {}", anyActive ? "raised" : "restored");
+    }
+
+    // EcoQoS, the other half. With a fullscreen game in the foreground Windows
+    // 11 treats this process as background work and may throttle it — on a
+    // hybrid CPU that means efficiency cores, where a thread priority does not
+    // follow it. Opt out while magnifying; hand the decision back to the
+    // system (ControlMask 0) when idle, where throttling a tray icon is right.
+    PROCESS_POWER_THROTTLING_STATE throttling{};
+    throttling.Version     = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    throttling.ControlMask = anyActive ? PROCESS_POWER_THROTTLING_EXECUTION_SPEED : 0;
+    throttling.StateMask   = 0;   // with the bit controlled: throttling off
+
+    if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
+                               &throttling, sizeof(throttling)))
+    {
+        LOG_WARN("SetProcessInformation(ProcessPowerThrottling) failed: {}", GetLastError());
+    }
+
+    m_renderPriorityRaised = anyActive;
 }
 
 // =============================================================================
@@ -843,10 +1059,66 @@ void App::RenderMonitor(size_t monitorIndex)
     if (!capture.IsInitialized())
         return;
 
+    // -- Frame pacing --
+    //
+    // The gate is here, before the capture, rather than around the Present.
+    // Everything in this function costs something the display cannot show more
+    // often than once per refresh: acquiring a duplication frame, copying a
+    // whole monitor's worth of pixels, a fullscreen shader pass, and on a
+    // layered window a DWM surface update of the entire monitor. Doing any of
+    // that twice between two refreshes is work taken from whatever application
+    // is being magnified, which under a fullscreen game is the whole problem.
+    //
+    // Skipping the acquire is not skipping the frame: Desktop Duplication
+    // accumulates while we are not asking, and hands over the composed result
+    // with the metadata for everything that changed in the meantime.
+    const size_t pacerSlot = (monitorIndex < StatusSnapshot::kMaxMonitors)
+                           ? monitorIndex : StatusSnapshot::kMaxMonitors - 1;
+
+    const auto tickNow = std::chrono::steady_clock::now();
+    if (!m_pacers[pacerSlot].Due(tickNow))
+        return;
+
+    m_pacers[pacerSlot].Serviced(tickNow);
+
     // Timeout 0: take a frame if one is ready, otherwise return immediately.
     // Blocking would be wrong — with no new frame we still need to re-present
     // the previous one, or the view would not follow a moving source rect.
-    CapturedFrame frame = capture.AcquireFrame(0);
+    //
+    // The one exception is the first acquire after a resume. There is no
+    // previous frame then, so not waiting means not drawing, and the overlay
+    // that was just shown sits there with whatever it last held. The first
+    // frame of a new session is the current desktop and normally arrives at
+    // once; the bound is only there so a session that never delivers cannot
+    // stall the loop. Spent after one attempt whatever the outcome.
+    UINT acquireTimeout = 0;
+    if (m_awaitFirstFrame[pacerSlot])
+    {
+        m_awaitFirstFrame[pacerSlot] = false;
+        acquireTimeout = kFirstFrameTimeoutMs;
+    }
+
+    CapturedFrame frame = capture.AcquireFrame(acquireTimeout);
+
+    // -- Keep the intermediate texture current, whatever we decide to draw --
+    //
+    // Straight after the acquire, before any path can return: the store is
+    // updated with only the regions that changed, which is correct only if no
+    // new frame is ever absorbed without being copied. A frame skipped here
+    // would leave its regions stale with nothing left to repaint them.
+    //
+    // Deliberately not inside the skip test further down, for the same
+    // reason: the renderer's copy is also the last-frame store the anchor pans
+    // across. Copy always, draw sometimes.
+    const bool haveNewImage = frame.isNewFrame && frame.texture;
+
+    if (haveNewImage)
+    {
+        const auto& dirty = capture.DirtyRects();
+        m_renderer.UpdateSourceTexture(monitorIndex, frame.texture.Get(),
+            capture.DirtyKnown() ? dirty.data() : nullptr,
+            capture.DirtyKnown() ? dirty.size() : 0);
+    }
 
     // Drawn even when no new frame arrived.
     //
@@ -897,10 +1169,7 @@ void App::RenderMonitor(size_t monitorIndex)
         const long monH = (frame.height > 0) ? static_cast<long>(frame.height) : mon->Height();
 
         if (monW <= 0 || monH <= 0)
-        {
-            capture.ReleaseFrame();
             return;
-        }
 
         const long srcW = (std::max)(1L, static_cast<long>(monW / zoom));
         const long srcH = (std::max)(1L, static_cast<long>(monH / zoom));
@@ -1052,8 +1321,33 @@ void App::RenderMonitor(size_t monitorIndex)
         // for a frame per imperceptible step.
         const int osdAlphaStep = static_cast<int>(osdAlpha * 64.0f);
 
-        // Nothing new: no frame, no source movement, no cursor movement.
-        // Presenting anyway would only block on vSync and burn GPU time.
+        // -- Did the change land inside what this monitor is magnifying? --
+        //
+        // Desktop Duplication reports which regions it repainted. A magnifier
+        // showing one corner of the screen has no reason to redraw because a
+        // video is playing in another, and at 2x or more the magnified region
+        // is a small fraction of the screen, so this is the common case rather
+        // than the lucky one.
+        //
+        // The rects are in the TEXTURE's coordinates, which on a rotated output
+        // is not desktop space - hence the transform. Getting that wrong would
+        // not look like a rotation bug; it would look like a portrait monitor
+        // that quietly stops repainting.
+        bool contentChanged = haveNewImage;
+
+        if (haveNewImage && capture.DirtyKnown())
+        {
+            D3D11_TEXTURE2D_DESC texDesc{};
+            frame.texture->GetDesc(&texDesc);
+
+            const RECT texRect = DesktopRectToTextureRect(
+                capture.GetRotation(), texDesc.Width, texDesc.Height, srcRect);
+
+            contentChanged = capture.DirtyIntersects(texRect);
+        }
+
+        // Nothing new: no changed pixels under the view, no source movement,
+        // no cursor movement. Presenting anyway would only burn GPU time.
         const RECT& lastRect = m_lastSrcRect[rectSlot];
 
         const bool rectSame = (lastRect.left   == srcRect.left)
@@ -1068,11 +1362,9 @@ void App::RenderMonitor(size_t monitorIndex)
         const bool osdSame = (m_lastOsdShape[rectSlot] == osdShape)
                           && (m_lastOsdAlpha[rectSlot] == osdAlphaStep);
 
-        if (!frame.isNewFrame && rectSame && spriteSame && osdSame)
-        {
-            capture.ReleaseFrame();
+        // Held, not released: see the end of this function.
+        if (!contentChanged && rectSame && spriteSame && osdSame)
             return;
-        }
 
         m_lastSrcRect[rectSlot]     = srcRect;
         m_lastSpritePos[rectSlot]   = spritePos;
@@ -1080,19 +1372,16 @@ void App::RenderMonitor(size_t monitorIndex)
         m_lastOsdShape[rectSlot]    = osdShape;
         m_lastOsdAlpha[rectSlot]    = osdAlphaStep;
 
-        // nullptr means "re-use the last frame".
-        ID3D11Texture2D* newFrame = (frame.isNewFrame && frame.texture)
-                                  ? frame.texture.Get()
-                                  : nullptr;
-
+        // nullptr because the copy already happened above, unconditionally.
+        // Passing the texture again here would repeat it.
+        //
         // srcRect is in desktop coordinates; on a rotated output the texture is
         // not, so the renderer needs the rotation to sample it upright. Read
         // from the capture rather than from MonitorInfo: it is the object that
         // produced the texture, and it re-reads the orientation on recovery.
-        if (!m_renderer.RenderFrame(newFrame, monitorIndex, srcRect, capture.GetRotation()))
+        if (!m_renderer.RenderFrame(nullptr, monitorIndex, srcRect, capture.GetRotation()))
         {
             // Henuz hic frame gelmemis olabilir — bir sonraki turda tekrar denenir.
-            capture.ReleaseFrame();
             return;
         }
 
@@ -1187,9 +1476,12 @@ void App::RenderMonitor(size_t monitorIndex)
         lastTime = now;
     }
 
-    // Unconditional after AcquireFrame: skipping it makes the next
-    // AcquireFrame fail with "frame already acquired".
-    capture.ReleaseFrame();
+    // The frame is NOT released here. It is held until the next AcquireFrame,
+    // which releases it first — the order ReleaseFrame's documentation
+    // recommends. While we own the frame the OS accumulates desktop updates
+    // instead of copying each one into the duplication surface, so a game
+    // presenting faster than we acquire stops paying for copies nobody reads.
+    // Suspend, recovery and teardown all release it on their own way out.
 }
 
 // =============================================================================
@@ -1205,7 +1497,7 @@ void App::RenderMonitor(size_t monitorIndex)
 // frames, so it is invisible to the user, but it stops a SetWindowPos storm
 // and the z-order churn that comes with it.
 // =============================================================================
-void App::AssertOverlaysTopmost()
+void App::AssertOverlaysTopmost(bool onlyIfCovered)
 {
     // BM_NO_TOPMOST_FIGHT=1 disables this: popups stay live but unmagnified
     // and doubled. See FightPopupZOrder in pch.h.
@@ -1220,10 +1512,23 @@ void App::AssertOverlaysTopmost()
         return;
     }
 
+    // The coverage walk has a clock of its own. Stamping m_lastTopmostAssert
+    // for a check that asserted nothing would hold back a popup event arriving
+    // just after it; not stamping anything would run the walk every tick.
+    if (onlyIfCovered)
+    {
+        if (m_lastCoverCheck.time_since_epoch().count() != 0
+            && now - m_lastCoverCheck < std::chrono::milliseconds(40))
+        {
+            return;
+        }
+        m_lastCoverCheck = now;
+    }
+
     bool any = false;
     for (auto& overlay : m_overlays)
     {
-        if (overlay.IsVisible())
+        if (overlay.IsVisible() && (!onlyIfCovered || overlay.IsCovered()))
         {
             overlay.EnsureTopmost();
             any = true;
@@ -1684,6 +1989,7 @@ void App::ApplySettings()
     m_inputThread.SetHijackMagnifierKeys(g.hijackMagnifierKeys);
 
     ApplyPointerSettings();
+    ApplyFrameRateCaps();
 
     // Pull the current zoom back inside the new limits
     for (size_t i = 0; i < m_monitorManager.GetMonitorCount(); ++i)
@@ -1927,6 +2233,10 @@ void App::OnDisplayChange()
     PublishViewportRequests(true);
 
     m_controlPanel.NotifyDisplayChange();
+
+    // Refresh rates move with the monitor list: a display swapped for a faster
+    // one, or a mode change, and every pacer is now aiming at the wrong rate.
+    ApplyFrameRateCaps();
 
     LOG_INFO("Pipeline rebuilt ({} monitors)", m_overlays.size());
 }
