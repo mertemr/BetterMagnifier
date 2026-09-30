@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.4.1](https://github.com/mertemr/BetterMagnifier/compare/v0.4.0...v0.4.1) (2026-09-30)
+
+
+### Bug fixes
+
+* **overlay:** keep the taskbar topmost while zoomed ([cf00f47](https://github.com/mertemr/BetterMagnifier/commit/cf00f475b8470980bee85b98400167ebe5e65612))
+* **overlay:** keep the taskbar topmost while zoomed ([b5e9252](https://github.com/mertemr/BetterMagnifier/commit/b5e9252c31558480b5b2acbcc9d41b217246a614))
+
+
+### Performance
+
+* **render:** pace the loop, release idle captures, copy only dirty regions ([3ce87cf](https://github.com/mertemr/BetterMagnifier/commit/3ce87cfa5590e88563f099528a8797348d7c0ffa))
+* **render:** pace the loop, skip the frames nothing can see ([396f893](https://github.com/mertemr/BetterMagnifier/commit/396f893ae053f0cac50a8462fab5598f00ba1709))
+* **render:** release idle captures, hold frames, copy only dirty regions ([d820eed](https://github.com/mertemr/BetterMagnifier/commit/d820eed6f636ea894a0f058cdadaa34bb589d407))
+
+
+### Refactoring
+
+* trim stale, redundant and untranslated comments ([b36886f](https://github.com/mertemr/BetterMagnifier/commit/b36886fbefd193e65983f9788b110fddeadcd39f))
+* trim stale, redundant and untranslated comments ([bcaa0dd](https://github.com/mertemr/BetterMagnifier/commit/bcaa0dd7e9193b8dc7671cf9e8894e79e197ce8c))
+
+
+### Documentation
+
+* describe capture suspend, frame holding and dirty-region copy ([b7e24cd](https://github.com/mertemr/BetterMagnifier/commit/b7e24cdc3b1f59c2dac57e95732823fb05864644))
+
 ## [0.4.0](https://github.com/mertemr/BetterMagnifier/compare/v0.3.1...v0.4.0) (2026-08-28)
 
 
