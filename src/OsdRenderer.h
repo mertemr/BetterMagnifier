@@ -54,9 +54,9 @@ public:
     // False when the text could not be rendered or uploaded. A missing OSD is
     // cosmetic: the caller draws nothing and carries on.
     //
-    // opacity is baked into the bitmap and forms part of the cache key. Scaling
-    // the sprite in the shader would be the other way to do it, and would mean a
-    // second constant buffer register and an HLSL change for one faded label.
+    // opacity is baked into the bitmap and forms part of the cache key. The
+    // render loop passes 1.0 and fades through RenderSprite instead, so an
+    // animated fade does not upload a texture per step.
     bool Acquire(const std::wstring& text, int fontHeightPx, float opacity, Label& out);
 
     void Clear();

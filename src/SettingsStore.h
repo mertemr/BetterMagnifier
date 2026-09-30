@@ -69,12 +69,8 @@ struct GeneralSettings
     // drawn.
     bool  pointerScaling = true;
 
-    // scale = pointerSpeed / pow(zoom, pointerCompensation)
-    //
-    // 1.0 compensation maps hand movement 1:1 onto the magnified screen, which
-    // is right in theory and measured as far too slow: content is zoom times
-    // further apart than it looks. 0.2 tested right; the theory oversold how
-    // much correction the pointer wants.
+    // scale = pointerSpeed / pow(zoom, pointerCompensation). 0.2 is measured,
+    // not a guess; see PointerInput::SetCompensation.
     float pointerSpeed       = 1.0f;
     float pointerCompensation = 0.2f;
 
@@ -83,17 +79,10 @@ struct GeneralSettings
     float cursorScale = 1.0f;
 
     // ── Frame rate ──
-    // The ceiling the render loop paces itself to.
-    //
-    //   0   follow each monitor's own refresh rate, which is the fastest rate
-    //       at which a present can ever be seen. The default, and the reason
-    //       a 144 Hz panel now gets 144 rather than whatever the system timer
-    //       granularity happened to allow.
-    //   >0  an explicit override, clamped to [10, 1000]. Deliberately NOT
-    //       capped to the refresh rate: a display that misreports its mode is
-    //       exactly the case an override exists for. Lower is also a valid
-    //       choice — a magnifier that costs a game less matters more to some
-    //       people than a smooth one.
+    // The ceiling the render loop paces itself to: 0 follows each monitor's
+    // refresh rate, anything else is an override; see ResolveFrameRateCap.
+    // Lower than the display is a valid choice too — a magnifier that costs a
+    // game less matters more to some people than a smooth one.
     //
     // Ignored under BM_OVERLAY_FLIP=1, where Present(1) blocks on vblank and
     // is already the brake.
@@ -179,8 +168,7 @@ private:
 // Empty path restores normal behaviour.
 void SetSettingsPathOverride(const std::filesystem::path& p);
 
-// Assert-based self-check, run from main on Debug startup. There is no test
-// framework here, and this is the only component that is pure logic.
+// Assert-based self-check, run from main on Debug startup.
 void SettingsStoreSelfCheck();
 #endif
 

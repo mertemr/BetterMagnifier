@@ -160,7 +160,7 @@ struct ControlPanel::Impl
 
     std::vector<MonitorCard> cards;
 
-    // Settings tab
+    // Settings section
     WUXC::TextBlock   hotkeyWarning{ nullptr };
 
     // Hotkeys, captured rather than typed — a TextBox here kills the process.
@@ -177,7 +177,7 @@ struct ControlPanel::Impl
     WUXC::RadioButton followFocusRadio{ nullptr };
 
     // Pointer section. ToggleSwitch and Slider only — anything embedding a
-    // TextBox takes the process down (docs/PANEL-BLANK.md).
+    // TextBox takes the process down (docs/ARCHITECTURE.md).
     WUXC::ToggleSwitch pointerScalingSwitch{ nullptr };
     WUXC::ToggleSwitch lockToMonitorSwitch{ nullptr };
     WUXC::Slider       pointerSpeedSlider{ nullptr };
@@ -189,7 +189,7 @@ struct ControlPanel::Impl
     WUXC::Slider       edgeBandSlider{ nullptr };
     WUXC::TextBlock    edgeBandLabel{ nullptr };
     // Sliders, not NumberBox: a NumberBox embeds a TextBox internally and kills
-    // the process the same way a bare TextBox does. See docs/PANEL-BLANK.md.
+    // the process the same way a bare TextBox does. See docs/ARCHITECTURE.md.
     WUXC::Slider      minZoomSlider{ nullptr };
     WUXC::Slider      maxZoomSlider{ nullptr };
     WUXC::Slider      zoomStepSlider{ nullptr };
@@ -230,16 +230,11 @@ ControlPanel::~ControlPanel()
     Stop();
 }
 
-// =============================================================================
-// Show
-// =============================================================================
 void ControlPanel::Show(HWND engineHwnd, SettingsStore* settings, StatusSnapshot* status)
 {
     if (m_running.load(std::memory_order_acquire))
     {
-        // Already up: hand the work to the GUI thread. PostThreadMessage is not
-        // an option, because Application::Start runs the message loop itself and
-        // does not forward thread-only messages to us.
+        // Already up: hand the work to the GUI thread through its DispatcherQueue.
         auto queue = m_impl->queue;
         if (queue)
         {
@@ -257,8 +252,8 @@ void ControlPanel::Show(HWND engineHwnd, SettingsStore* settings, StatusSnapshot
 
     if (m_startAttempted.load(std::memory_order_acquire))
     {
-        // Either still coming up, or it failed. Application::Start is a
-        // once-per-process call, so a failed panel cannot be retried.
+        // Either still coming up, or it failed; the panel is started at most
+        // once per process.
         LOG_DEBUG("Control panel start already attempted, not starting again");
         return;
     }
@@ -273,7 +268,7 @@ void ControlPanel::Show(HWND engineHwnd, SettingsStore* settings, StatusSnapshot
 }
 
 // =============================================================================
-// ThreadMain - STA apartment, XAML runtime, then Application::Start's own loop
+// ThreadMain - STA apartment, XAML runtime, then a GetMessage loop of our own
 // =============================================================================
 void ControlPanel::ThreadMain()
 {
@@ -364,7 +359,7 @@ void ControlPanel::ThreadMain()
 }
 
 // =============================================================================
-// BuildUi - host window, island, tabs. GUI thread only.
+// BuildUi - host window, island, the page. GUI thread only.
 // =============================================================================
 void ControlPanel::BuildUi()
 {
@@ -488,7 +483,7 @@ void ControlPanel::BuildUi()
 }
 
 // =============================================================================
-// Status tab
+// Monitors section
 // =============================================================================
 void ControlPanel::RebuildMonitorCards()
 {
@@ -852,12 +847,10 @@ void ControlPanel::UpdateLiveValues()
 }
 
 // =============================================================================
-// Settings tab
+// Settings section
 // =============================================================================
-// Hotkeys are typed as text and validated by ParseHotkey. Capturing real key
-// presses would be nicer, but mapping XAML KeyRoutedEventArgs onto Win32 hotkey
-// semantics (extended keys, left/right modifiers) is a job of its own, and
-// ParseHotkey is the one piece of this codebase that already has tests.
+// Hotkeys are captured from a real key press through the input thread's
+// keyboard hook, not typed; see WM_APP_CAPTURE_HOTKEY.
 // =============================================================================
 void ControlPanel::BuildSettingsTab()
 {
@@ -874,17 +867,8 @@ void ControlPanel::BuildSettingsTab()
     // ── Hotkeys ──
     panel.Children().Append(MakeHeader(L"Hotkeys"));
 
-    // Shown as text, changed by pressing keys. There is deliberately no text
-    // field: a XAML TextBox kills this process, and the first layout pass ends
-    // in a stowed exception (0xC000027B) — bisected down to exactly that
-    // control while every other control here is fine. Text input services do
-    // not come up for an island on a secondary STA thread in an unpackaged
-    // process.
-    //
-    // Capture through the WH_KEYBOARD_LL hook the application already installs
-    // turns out to be the better UI anyway: nothing to mistype, no format to
-    // explain, and the extended-key and left/right-modifier questions never
-    // arise because the answer arrives as the pair RegisterHotKey wants.
+    // Shown as text, changed by pressing keys; WM_APP_CAPTURE_HOTKEY says why
+    // there is no text field.
     m_impl->hotkeyBindings = WUXC::TextBlock{};
     m_impl->hotkeyBindings.FontFamily(WUX::Media::FontFamily{ L"Consolas" });
     m_impl->hotkeyBindings.IsTextSelectionEnabled(true);
@@ -1023,11 +1007,9 @@ void ControlPanel::BuildSettingsTab()
     // ── Zoom limits ──
     panel.Children().Append(MakeHeader(L"Zoom limits"));
 
-    // Slider, not NumberBox: a NumberBox embeds a TextBox internally, and that
-    // kills this process on first layout the same way a bare TextBox does (see
-    // the Hotkeys section above and docs/PANEL-BLANK.md). Sliders are plain
-    // controls with no text-input service dependency and are already proven
-    // safe by the per-monitor zoom slider in the Status section.
+    // Slider, not NumberBox: a NumberBox embeds a TextBox, which kills this
+    // process on first layout (docs/ARCHITECTURE.md). Slider is proven safe by
+    // the per-monitor zoom slider in the Monitors section.
     auto makeLimitRow = [&panel](std::wstring_view label, double value, double lo, double hi,
                                  double step, WUXC::Slider& sliderOut, WUXC::TextBlock& labelOut)
     {
@@ -1394,9 +1376,6 @@ void ControlPanel::ReloadFromDisk()
     }
 }
 
-// =============================================================================
-// NotifyDisplayChange
-// =============================================================================
 void ControlPanel::NotifyDisplayChange()
 {
     if (!m_running.load(std::memory_order_acquire))
@@ -1412,7 +1391,7 @@ void ControlPanel::NotifyDisplayChange()
 // =============================================================================
 // Only the two things a capture can have moved: the displayed bindings and the
 // buttons' captions. Deliberately not a BuildSettingsTab call — rebuilding the
-// whole tab would throw away a slider the user happens to be dragging, and
+// whole section would throw away a slider the user happens to be dragging, and
 // would fire every control's change event on the way back in.
 // =============================================================================
 void ControlPanel::NotifyHotkeysChanged()
@@ -1445,9 +1424,6 @@ void ControlPanel::NotifyHotkeysChanged()
     });
 }
 
-// =============================================================================
-// Stop
-// =============================================================================
 void ControlPanel::Stop()
 {
     if (!m_thread.joinable())
@@ -1455,14 +1431,14 @@ void ControlPanel::Stop()
 
     m_stopping.store(true, std::memory_order_release);
 
-    // The loop is ours now, so WM_QUIT ends it. Cleanup happens on that thread
+    // The loop is ours, so WM_QUIT ends it. Cleanup happens on that thread
     // right after the loop, where the XAML objects belong.
     const DWORD tid = m_threadId.load(std::memory_order_acquire);
     if (tid != 0)
         PostThreadMessageW(tid, WM_QUIT, 0, 0);
 
-    // ponytail: waiting on the thread's own promise rather than joining flat. If
-    // Exit ever fails to end the XAML loop, a plain join would hang shutdown -
+    // Waiting on the thread's own promise rather than joining flat. If WM_QUIT
+    // ever fails to end the loop, a plain join would hang shutdown -
     // the exact failure that already cost this project a trip to Task Manager.
     // The thread is abandoned instead; the process is on its way out either way.
     if (m_exitedFuture.valid()

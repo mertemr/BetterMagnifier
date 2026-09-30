@@ -1161,7 +1161,7 @@ void UpdateCheckerSelfCheck()
 {
     LOG_INFO("UpdateChecker self-check starting");
 
-    // ── 1. CompareVersion: ordering ──
+    // ── CompareVersion: ordering ──
     {
         BM_SELFCHECK(CompareVersion(L"1.0.0", L"1.0.0") == 0);
         BM_SELFCHECK(CompareVersion(L"1.0.0", L"1.0.1") < 0);
@@ -1170,21 +1170,21 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(CompareVersion(L"2.0.0", L"1.99.99") > 0);
     }
 
-    // ── 2. CompareVersion: the shapes a feed actually delivers ──
+    // ── CompareVersion: the shapes a feed actually delivers ──
     {
         BM_SELFCHECK(CompareVersion(L"v1.2.3", L"1.2.3") == 0);   // tag vs version
         BM_SELFCHECK(CompareVersion(L"1.2", L"1.2.0") == 0);      // missing patch
         BM_SELFCHECK(CompareVersion(L"1.2.3-beta", L"1.2.3") == 0);
     }
 
-    // ── 3. CompareVersion: garbage reads as 0.0.0, never as an exception ──
+    // ── CompareVersion: garbage reads as 0.0.0, never as an exception ──
     {
         BM_SELFCHECK(CompareVersion(L"", L"0.0.0") == 0);
         BM_SELFCHECK(CompareVersion(L"not-a-version", L"0.0.0") == 0);
         BM_SELFCHECK(CompareVersion(L"", L"0.0.1") < 0);
     }
 
-    // ── 4. IsTrustedDownloadUrl ──
+    // ── IsTrustedDownloadUrl ──
     //
     // This is the guard on where we connect and what we execute, so the
     // rejections matter more than the acceptances.
@@ -1204,7 +1204,7 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(!IsTrustedDownloadUrl(L"https://"));
     }
 
-    // ── 5. ParseSha256Sums ──
+    // ── ParseSha256Sums ──
     {
         const std::string sums =
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  "
@@ -1233,7 +1233,7 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(hex == std::string(64, 'a'));
     }
 
-    // ── 6. HexEncodeLower ──
+    // ── HexEncodeLower ──
     //
     // The digest comparison is what decides whether we run a downloaded
     // binary, so the formatting either side of it is worth pinning down.
@@ -1243,7 +1243,7 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(HexEncodeLower({}).empty());
     }
 
-    // ── 7. ParseRelease: the response we actually get ──
+    // ── ParseRelease: the response we actually get ──
     {
         const std::string json = R"JSON({
             "tag_name": "v0.2.0",
@@ -1272,7 +1272,7 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(!info.sums.url.empty());
     }
 
-    // ── 8. ParseRelease: the setup asset is matched by shape, not by case ──
+    // ── ParseRelease: the setup asset is matched by shape, not by case ──
     //
     // "ends with -setup.exe", not "contains setup" and not "any .exe": this
     // picks the binary we later execute, so it stays narrow. Case is a separate
@@ -1307,7 +1307,7 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(!ParseRelease(otherShape, other));
     }
 
-    // ── 9. ParseRelease: a release with nothing to install is a failure ──
+    // ── ParseRelease: a release with nothing to install is a failure ──
     {
         const std::string noSetup = R"JSON({
             "tag_name": "v0.2.0",
@@ -1321,7 +1321,7 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(!ParseRelease(noSetup, info));
     }
 
-    // ── 9. ParseRelease: malformed input leaves the output untouched ──
+    // ── ParseRelease: malformed input leaves the output untouched ──
     {
         ReleaseInfo info;
         info.version = L"sentinel";
@@ -1336,7 +1336,7 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(info.version == L"sentinel");
     }
 
-    // ── 10. PathsNameSameDirectory ──
+    // ── PathsNameSameDirectory ──
     {
         BM_SELFCHECK(PathsNameSameDirectory(
             L"C:\\Program Files\\BetterMagnifier",
@@ -1359,7 +1359,7 @@ void UpdateCheckerSelfCheck()
         BM_SELFCHECK(!PathsNameSameDirectory(L"", L""));
     }
 
-    // ── 11. Sha256FileHex against the NIST vectors ──
+    // ── Sha256FileHex against the NIST vectors ──
     //
     // Asserts the BCrypt wiring rather than any logic of ours. That is the
     // point: this digest decides whether a downloaded installer gets executed,

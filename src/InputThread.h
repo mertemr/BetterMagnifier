@@ -61,17 +61,10 @@ public:
     void SetViewportConfig(const ViewportConfig& cfg);
 
     // Pull the render thread's latest viewport request through NOW instead of
-    // waiting for the sync timer.
-    //
-    // The timer is a backstop for "zoom changed with the mouse perfectly
-    // still", and at 16 ms it is a cheap one — but it sat in the middle of the
-    // zoom path, which is a round trip: wheel event, hook, post to the render
-    // thread, render thread updates zoom and publishes the request, THIS
-    // thread applies it and publishes the resulting source origin, render
-    // thread reads it back and draws. Two of those hops used to wait on the
-    // timer, so a zoom step could take longer than the frame it was asking
-    // for. That is the lag the user feels while zooming, and it is entirely
-    // avoidable: the render thread knows the moment the request changes.
+    // waiting for the sync timer. A zoom step is a round trip through both
+    // threads, and a hop that waits on a 16 ms timer can cost more than the
+    // frame it is asking for; the render thread knows the moment the request
+    // changes.
     //
     // Safe to call from any thread, and a no-op before Start or after Stop.
     void RequestSync();
@@ -141,8 +134,8 @@ private:
     // ours is still installed — so it is inferred: the OS cursor moved but no
     // event reached us since the last tick.
     //
-    // This mattered little before. Now a dead hook while the pointer is hidden
-    // leaves the user with no pointer at all and no scaling to move it with.
+    // A dead hook while the pointer is hidden leaves the user with no pointer
+    // at all and no scaling to move it with.
     void CheckHookLiveness();
 
     std::atomic<std::uint64_t> m_mouseEvents{0};

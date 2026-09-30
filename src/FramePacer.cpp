@@ -1,7 +1,3 @@
-// =============================================================================
-// FramePacer.cpp — the render loop's brake, and how it waits
-// =============================================================================
-
 #include "pch.h"
 #include "FramePacer.h"
 #include "Logger.h"
@@ -12,7 +8,6 @@ namespace BetterMagnifier {
 
 namespace {
 
-// One second, in the units the interval arithmetic works in.
 constexpr long long kNanosPerSecond = 1000000000LL;
 
 // What a display plausibly runs at. Anything outside this is a value we did
@@ -36,9 +31,6 @@ unsigned ResolveFrameRateCap(unsigned maxFps, unsigned refreshRate)
     return refreshRate;
 }
 
-// =============================================================================
-// FramePacer
-// =============================================================================
 void FramePacer::SetCap(unsigned fps)
 {
     if (fps == m_fps)
@@ -107,10 +99,6 @@ void FramePacer::Reset()
 {
     m_next = time_point{};
 }
-
-// =============================================================================
-// FrameWaiter
-// =============================================================================
 
 // Windows 10 1803. Defined here rather than assumed, because the constant is
 // absent from older SDK headers and its absence is a build break rather than

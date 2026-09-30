@@ -1,7 +1,3 @@
-// =============================================================================
-// SettingsStore.cpp — INI kalicilik implementasyonu
-// =============================================================================
-
 #include "pch.h"
 #include "SettingsStore.h"
 #include "FramePacer.h"
@@ -15,7 +11,6 @@ namespace BetterMagnifier {
 
 namespace {
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Case-insensitive compare done by hand: _wcsicmp wants null-terminated input
 // and a string_view is not obliged to be.
 bool EqualsCI(std::wstring_view a, std::wstring_view b)
@@ -31,7 +26,7 @@ bool EqualsCI(std::wstring_view a, std::wstring_view b)
     return true;
 }
 
-// "ctrl" -> MOD_CONTROL. Taninmazsa 0.
+// "ctrl" -> MOD_CONTROL, 0 when unrecognised.
 UINT ModifierFromName(std::wstring_view name)
 {
     if (EqualsCI(name, L"ctrl"))  return MOD_CONTROL;
@@ -41,13 +36,12 @@ UINT ModifierFromName(std::wstring_view name)
     return 0;
 }
 
-// "Z" -> 'Z', "F12" -> VK_F12. Taninmazsa 0.
+// "Z" -> 'Z', "F12" -> VK_F12, 0 when unrecognised.
 UINT VirtualKeyFromName(std::wstring_view name)
 {
     if (name.empty())
         return 0;
 
-    // Tek karakter: A-Z veya 0-9
     if (name.size() == 1)
     {
         const wchar_t c = static_cast<wchar_t>(towupper(name[0]));
@@ -56,7 +50,6 @@ UINT VirtualKeyFromName(std::wstring_view name)
         return 0;
     }
 
-    // F1 - F24
     if (towupper(name[0]) == L'F')
     {
         UINT num = 0;
@@ -73,8 +66,6 @@ UINT VirtualKeyFromName(std::wstring_view name)
     return 0;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// INI float yardimcilari
 // INI has no float type, so these go through text.
 //
 // std::format rather than std::to_wstring: to_wstring is locale-dependent and
@@ -91,7 +82,7 @@ float ReadFloat(const std::wstring& file, const std::wstring& section,
 
     wchar_t* endPtr = nullptr;
     const float v = std::wcstof(buf, &endPtr);
-    if (endPtr == buf)      // hic rakam okunamadi
+    if (endPtr == buf)      // no digits at all
         return fallback;
 
     return v;
@@ -154,7 +145,7 @@ bool ParseHotkey(std::wstring_view text, UINT& modifiers, UINT& vk)
 
         const UINT mod = ModifierFromName(piece);
         if (mod == 0)
-            return false;   // Taninmayan modifier
+            return false;
 
         parsedMods |= mod;
         start = plus + 1;
@@ -193,7 +184,6 @@ std::wstring FormatHotkey(UINT modifiers, UINT vk)
 // =============================================================================
 // FilePath — %APPDATA%\BetterMagnifier\settings.ini
 // =============================================================================
-// SHGetKnownFolderPath modern API (Vista+); eski SHGetFolderPath deprecated.
 // The returned buffer is owned by the caller and must go back through
 // CoTaskMemFree.
 // =============================================================================
@@ -233,12 +223,9 @@ std::filesystem::path SettingsStore::FilePath()
     return p;
 }
 
-// =============================================================================
-// Load
-// =============================================================================
 bool SettingsStore::Load()
 {
-    m_general = GeneralSettings{};   // varsayilanlara don
+    m_general = GeneralSettings{};
     m_monitors.clear();
 
     const auto path = FilePath();
@@ -249,7 +236,7 @@ bool SettingsStore::Load()
     if (!std::filesystem::exists(path, ec))
     {
         LOG_INFO("No settings file, using defaults");
-        return true;   // First run is not a failure
+        return true;   // first run is not a failure
     }
 
     const std::wstring file = path.wstring();
@@ -274,10 +261,8 @@ bool SettingsStore::Load()
         }
     }
 
-    // ── Bayraklar ──
-    // GetPrivateProfileIntW takes the default as a parameter, so a missing key
-    // eksik anahtar otomatik varsayilana duser.
-    // Defaults to on: someone running this wants it instead of the OS Magnifier.
+    // HijackMagnifierKeys defaults to on: someone running this wants it
+    // instead of the OS Magnifier.
     m_general.hijackMagnifierKeys =
         GetPrivateProfileIntW(L"General", L"HijackMagnifierKeys", 1, file.c_str()) != 0;
     m_general.startWithWindows =
@@ -285,7 +270,6 @@ bool SettingsStore::Load()
     m_general.rememberZoomLevel =
         GetPrivateProfileIntW(L"General", L"RememberZoomLevel", 1, file.c_str()) != 0;
 
-    // ── Guncelleme ──
     m_general.checkForUpdates =
         GetPrivateProfileIntW(L"General", L"CheckForUpdates", 1, file.c_str()) != 0;
 
@@ -310,11 +294,7 @@ bool SettingsStore::Load()
         m_general.skippedVersion = buf;
     }
 
-    // ── Takip modu ──
     {
-        // EdgePush is the default now. It is what the pointer work was built
-        // for, and with our own cursor it no longer costs the click alignment
-        // that made Mouse the safe choice.
         wchar_t buf[32]{};
         GetPrivateProfileStringW(L"General", L"FollowMode", L"EdgePush",
                                  buf, 32, file.c_str());
@@ -361,7 +341,7 @@ bool SettingsStore::Load()
                                       kMinFrameRateCap, kMaxFrameRateCap);
     }
 
-    // ── Per-monitor section'lari ──
+    // ── Per-monitor sections ──
     // GetPrivateProfileSectionNamesW returns every section name in one buffer,
     // separated by '\0' and terminated by a double '\0'.
     {
@@ -402,9 +382,6 @@ bool SettingsStore::Load()
     return true;
 }
 
-// =============================================================================
-// Save
-// =============================================================================
 bool SettingsStore::Save() const
 {
     const auto path = FilePath();
@@ -506,7 +483,7 @@ void SettingsStoreSelfCheck()
 {
     LOG_INFO("SettingsStore self-check starting");
 
-    // ── 1. ParseHotkey: temel durum ──
+    // ── ParseHotkey ──
     {
         UINT mods = 0, vk = 0;
         BM_SELFCHECK(ParseHotkey(L"Ctrl+Alt+Z", mods, vk));
@@ -514,7 +491,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(vk == 'Z');
     }
 
-    // ── 2. ParseHotkey: dort modifier birlikte ──
+    // All four modifiers at once.
     {
         UINT mods = 0, vk = 0;
         BM_SELFCHECK(ParseHotkey(L"Ctrl+Alt+Shift+Win+K", mods, vk));
@@ -522,7 +499,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(vk == 'K');
     }
 
-    // ── 3. ParseHotkey: buyuk/kucuk harf onemsiz ──
+    // Case-insensitive.
     {
         UINT mods = 0, vk = 0;
         BM_SELFCHECK(ParseHotkey(L"ctrl+ALT+z", mods, vk));
@@ -530,7 +507,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(vk == 'Z');
     }
 
-    // ── 4. ParseHotkey: fonksiyon tuslari ──
+    // Function keys.
     {
         UINT mods = 0, vk = 0;
         BM_SELFCHECK(ParseHotkey(L"Ctrl+F12", mods, vk));
@@ -538,8 +515,8 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(vk == VK_F12);
     }
 
-    // ParseHotkey must not touch its outputs on bad input. This matters for the
-    // panel: typing nonsense should leave the working binding working.
+    // Bad input leaves the outputs untouched, which is what lets Load keep the
+    // default when a hand-edited entry is malformed.
     {
         UINT mods = 0xDEAD, vk = 0xBEEF;
         BM_SELFCHECK(!ParseHotkey(L"", mods, vk));
@@ -554,11 +531,11 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(!ParseHotkey(L"Ctrl+Alt", mods, vk));   // no key, only modifiers
         BM_SELFCHECK(mods == 0xDEAD && vk == 0xBEEF);
 
-        BM_SELFCHECK(!ParseHotkey(L"Ctrl+F99", mods, vk));   // F24'ten buyuk
+        BM_SELFCHECK(!ParseHotkey(L"Ctrl+F99", mods, vk));   // past F24
         BM_SELFCHECK(mods == 0xDEAD && vk == 0xBEEF);
     }
 
-    // ── 6. FormatHotkey: sabit modifier sirasi ──
+    // ── FormatHotkey: fixed modifier order ──
     {
         BM_SELFCHECK(FormatHotkey(MOD_CONTROL | MOD_ALT, 'Z') == L"Ctrl+Alt+Z");
         BM_SELFCHECK(FormatHotkey(MOD_ALT | MOD_CONTROL, 'Z') == L"Ctrl+Alt+Z");
@@ -578,7 +555,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(vk == origVk);
     }
 
-    // ── 8. FilePath: under %APPDATA%, with the right file name ──
+    // ── FilePath: under %APPDATA%, with the right file name ──
     {
         const auto p = SettingsStore::FilePath();
         BM_SELFCHECK(!p.empty());
@@ -586,15 +563,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(p.parent_path().filename() == L"BetterMagnifier");
     }
 
-    // ── 9 & 10. Load/Save ──
-    //
-    // Redirected to a temp file. The suite used to move the real settings.ini
-    // aside and put it back, which is fine until an assertion aborts the
-    // process mid-run: the real file then stays parked under the backup name,
-    // the next run's rename fails because the destination exists, and the suite
-    // reads its own leftovers while the user's settings sit in a file nothing
-    // will ever open again. That happened. A test that can eat the user's
-    // config when it fails is not worth having, so it no longer goes near it.
+    // ── Load/Save, against a temp file; see SetSettingsPathOverride ──
     {
         std::error_code ec;
         const auto temp = std::filesystem::temp_directory_path(ec)
@@ -613,7 +582,6 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(fresh.General().followMode == FollowMode::EdgePush);  // the current default
         BM_SELFCHECK(fresh.General().rememberZoomLevel == true);
 
-        // Pointer ve edge-push varsayilanlari
         BM_SELFCHECK(fresh.General().pointerScaling == true);
         BM_SELFCHECK(fresh.General().lockPointerToMonitor == true);
         BM_SELFCHECK(std::abs(fresh.General().pointerCompensation - 0.2f) < 1e-4f);
@@ -626,12 +594,11 @@ void SettingsStoreSelfCheck()
         // gets paced to 10 fps.
         BM_SELFCHECK(fresh.General().maxFps == 0);
 
-        // An unknown monitor yields the defaults
         const auto m = fresh.Monitor(L"\\\\.\\NOSUCHDISPLAY");
         BM_SELFCHECK(m.minZoom == 1.0f);
         BM_SELFCHECK(m.maxZoom == 10.0f);
 
-        // ── 10. Save -> Load turu degerleri koruyor ──
+        // Save -> Load keeps every value.
         SettingsStore w;
         w.MutableGeneral().toggleModifiers  = MOD_CONTROL | MOD_SHIFT;
         w.MutableGeneral().toggleVk         = 'M';
@@ -663,8 +630,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(r.General().lockPointerToMonitor == false);
         BM_SELFCHECK(r.General().maxFps == 144);
 
-        // Sacma degerler tek tek varsayilana dusuyor, dosyanin geri kalanini
-        // zehirlemiyor.
+        // Out-of-range values are clamped one by one.
         SettingsStore outOfRange;
         outOfRange.MutableGeneral().edgeBandFraction    = 5.0f;
         outOfRange.MutableGeneral().pointerSpeed        = 99.0f;
@@ -699,7 +665,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(rm.zoomStep == 0.5f);
         BM_SELFCHECK(rm.lastZoom == 3.25f);
 
-        // ── 11. Mantiksiz degerler varsayilana duser ──
+        // Nonsensical per-monitor values fall back to the defaults.
         SettingsStore bad;
         bad.SetMonitor(L"\\\\.\\DISPLAY9", MonitorSettings{ -5.0f, -1.0f, 0.0f, 999.0f });
         BM_SELFCHECK(bad.Save());
@@ -712,9 +678,7 @@ void SettingsStoreSelfCheck()
         BM_SELFCHECK(fm.zoomStep == 0.25f);   // zero -> default
         BM_SELFCHECK(fm.lastZoom >= fm.minZoom && fm.lastZoom <= fm.maxZoom);
 
-        // ── 12. Update settings survive a save/load round trip ──
-        //
-        // lastUpdateCheck is the one that matters: a value that failed to
+        // Update settings round-trip. lastUpdateCheck is the one that matters: a value that failed to
         // persist would silently turn the 24-hour floor off.
         SettingsStore u;
         u.MutableGeneral().checkForUpdates = false;

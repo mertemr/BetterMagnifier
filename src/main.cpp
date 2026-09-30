@@ -26,7 +26,7 @@ static void AttachDebugConsole();
 
 // Reads the version out of the exe's own VERSIONINFO resource (see
 // BetterMagnifier.rc) instead of a string literal here, so the two can't
-// drift apart the way FILEVERSION and the FileVersion string already have.
+// drift apart.
 static std::wstring GetAppVersionString()
 {
     wchar_t exePath[MAX_PATH]{};
@@ -167,7 +167,7 @@ int WINAPI wWinMain(
     BetterMagnifier::SystemCursor::InstallGuards();
 
     // ── Debug self-check ──
-    // The two components with pure logic in them. Failing here beats failing as
+    // Every component with pure logic in it. Failing here beats failing as
     // strange behaviour halfway through a session.
 #ifdef _DEBUG
     // Route CRT diagnostics to stderr rather than a dialog. This does NOT cover

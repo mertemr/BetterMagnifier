@@ -176,7 +176,6 @@ public:
         }
     }
 
-    // ── Flush ──
     void Flush()
     {
         std::lock_guard lock(m_mutex);
@@ -184,7 +183,6 @@ public:
             m_fileStream.flush();
     }
 
-    // ── Log Level Ayarla ──
     void SetMinLevel(LogLevel level)
     {
         m_minLevel = level;
@@ -195,7 +193,6 @@ public:
         return m_minLevel;
     }
 
-    // ── Shutdown ──
     void Shutdown()
     {
         std::lock_guard lock(m_mutex);
@@ -213,7 +210,6 @@ public:
     bool IsInitialized() const { return m_initialized; }
 
 private:
-    // ── Constructor/Destructor (Singleton — private) ──
     Logger() = default;
 
     ~Logger()

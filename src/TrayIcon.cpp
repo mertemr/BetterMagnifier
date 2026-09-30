@@ -1,7 +1,3 @@
-// =============================================================================
-// TrayIcon.cpp — System Tray Icon Implementation
-// =============================================================================
-
 #include "pch.h"
 #include "TrayIcon.h"
 #include "resource.h"
@@ -9,17 +5,11 @@
 
 namespace BetterMagnifier {
 
-// =============================================================================
-// Destructor
-// =============================================================================
 TrayIcon::~TrayIcon()
 {
     Destroy();
 }
 
-// =============================================================================
-// Create — add the icon to the system tray
-// =============================================================================
 bool TrayIcon::Create(HWND hwnd, HINSTANCE hInstance)
 {
     m_hwnd      = hwnd;
@@ -153,9 +143,6 @@ void TrayIcon::ShowUpdateBalloon(const std::wstring& version)
         LOG_INFO("Tray: announced version {}", ToUtf8(version));
 }
 
-// =============================================================================
-// Destroy
-// =============================================================================
 void TrayIcon::Destroy()
 {
     if (m_created)
@@ -166,9 +153,6 @@ void TrayIcon::Destroy()
     }
 }
 
-// =============================================================================
-// HandleMessage — dispatch what the shell sends to kTrayCallbackMsg
-// =============================================================================
 void TrayIcon::HandleMessage(WPARAM /*wParam*/, LPARAM lParam)
 {
     UINT msg = LOWORD(lParam);
@@ -181,7 +165,6 @@ void TrayIcon::HandleMessage(WPARAM /*wParam*/, LPARAM lParam)
         break;
 
     case WM_LBUTTONDBLCLK:
-        // Double click toggles zoom
         if (m_onToggle) m_onToggle();
         break;
 
@@ -196,9 +179,6 @@ void TrayIcon::HandleMessage(WPARAM /*wParam*/, LPARAM lParam)
     }
 }
 
-// =============================================================================
-// ShowContextMenu
-// =============================================================================
 void TrayIcon::ShowContextMenu()
 {
     HMENU hMenu = CreatePopupMenu();

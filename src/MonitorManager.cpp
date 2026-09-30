@@ -1,16 +1,9 @@
-// =============================================================================
-// MonitorManager.cpp — Multi-Monitor Enumeration & State Management
-// =============================================================================
-
 #include "pch.h"
 #include "MonitorManager.h"
 #include "Logger.h"
 
 namespace BetterMagnifier {
 
-// =============================================================================
-// Initialize — enumerate the monitors and match them to DXGI outputs
-// =============================================================================
 bool MonitorManager::Initialize()
 {
     LOG_INFO("MonitorManager starting");
@@ -50,23 +43,18 @@ bool MonitorManager::Initialize()
     return true;
 }
 
-// =============================================================================
-// Refresh — rebuild the monitor list (WM_DISPLAYCHANGE)
-// =============================================================================
 void MonitorManager::Refresh()
 {
     LOG_INFO("Rebuilding the monitor list (display change)");
 
     std::lock_guard lock(m_mutex);
 
-    // Keep the current zoom states so they can be carried into the new list.
     std::unordered_map<std::wstring, ZoomState> savedZoomStates;
     for (const auto& mon : m_monitors)
     {
         savedZoomStates[mon.deviceName] = mon.zoom;
     }
 
-    // Enumerate again
     m_monitors.clear();
     EnumDisplayMonitors(nullptr, nullptr, EnumMonitorCallback, reinterpret_cast<LPARAM>(this));
 
@@ -89,11 +77,6 @@ void MonitorManager::Refresh()
     LogAllMonitors();
 }
 
-// =============================================================================
-// EnumMonitorCallback — invoked by Windows once per monitor
-// =============================================================================
-// Static, as the Win32 signature requires, so the instance arrives via lParam.
-// =============================================================================
 BOOL CALLBACK MonitorManager::EnumMonitorCallback(
     HMONITOR hMon, HDC /*hDC*/, LPRECT lpRect, LPARAM lParam)
 {
@@ -109,12 +92,9 @@ BOOL CALLBACK MonitorManager::EnumMonitorCallback(
 
     self->m_monitors.push_back(std::move(info));
 
-    return TRUE;   // FALSE would stop the enumeration early
+    return TRUE;
 }
 
-// =============================================================================
-// PopulateMonitorDetails — name, bounds, DPI and refresh rate for one monitor
-// =============================================================================
 void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
 {
     // MONITORINFOEX rather than MONITORINFO: the device name comes with it.
@@ -134,11 +114,7 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
             reinterpret_cast<uintptr_t>(info.hMonitor));
     }
 
-    // ── 2. Per-Monitor DPI ──
-    // Windows 8.1+, and the only way to get a per-monitor DPI rather than the
-    // system one.
-    // 96 DPI is 100% scaling, 144 is 150%, 192 is 200%. Needed for overlay
-    // sizing and reported in the panel.
+    // Per-monitor rather than system DPI, which is wrong on mixed-scale setups.
     UINT dpiX = 96, dpiY = 96;
     HRESULT hr = GetDpiForMonitor(info.hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
     if (SUCCEEDED(hr))
@@ -151,7 +127,7 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
         LOG_WARN("GetDpiForMonitor failed: 0x{:08X}", static_cast<unsigned long>(hr));
     }
 
-    // Refresh rate, needed to pace Present against the right vblank.
+    // The frame pacer's default target; see ResolveFrameRateCap.
     DEVMODEW devMode{};
     devMode.dmSize = sizeof(devMode);
 
@@ -163,7 +139,7 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
     {
         LOG_WARN("EnumDisplaySettings failed: {}",
             ToUtf8(info.deviceName));
-        info.refreshRate = 60;  // Fallback
+        info.refreshRate = 60;
     }
 }
 
@@ -173,12 +149,10 @@ void MonitorManager::PopulateMonitorDetails(MonitorInfo& info)
 // Desktop Duplication works per IDXGIOutput, so we have to know which output
 // corresponds to which physical monitor. The pairing key is
 // DXGI_OUTPUT_DESC.Monitor == MonitorInfo.hMonitor.
-
 //
-// Lifetime: the factory, adapters and outputs created here are held in ComPtr
-// and released when the scope ends. The exception is the output pointer stored
-// into MonitorInfo, whose lifetime then follows that MonitorInfo — which is
-// why a display change has to tear the whole chain down rather than patch it.
+// The output pointer stored into MonitorInfo lives as long as that MonitorInfo,
+// which is why a display change has to tear the whole chain down rather than
+// patch it.
 // =============================================================================
 bool MonitorManager::MatchDXGIOutputs()
 {
@@ -201,7 +175,7 @@ bool MonitorManager::MatchDXGIOutputs()
         hr = factory->EnumAdapters1(adapterIdx, &adapter);
 
         if (hr == DXGI_ERROR_NOT_FOUND)
-            break;  // no more adapters
+            break;
 
         if (FAILED(hr))
         {
@@ -209,7 +183,6 @@ bool MonitorManager::MatchDXGIOutputs()
             continue;
         }
 
-        // Log what this adapter is
         DXGI_ADAPTER_DESC1 adapterDesc{};
         adapter->GetDesc1(&adapterDesc);
         LOG_INFO("  GPU {}: {} (VRAM: {} MB)",
@@ -217,14 +190,13 @@ bool MonitorManager::MatchDXGIOutputs()
             ToUtf8(adapterDesc.Description),
             adapterDesc.DedicatedVideoMemory / (1024 * 1024));
 
-        // Enumerate the outputs on this adapter.
         for (UINT outputIdx = 0; ; outputIdx++)
         {
             ComPtr<IDXGIOutput> output;
             hr = adapter->EnumOutputs(outputIdx, &output);
 
             if (hr == DXGI_ERROR_NOT_FOUND)
-                break;  // no more outputs on this adapter
+                break;
 
             if (FAILED(hr))
             {
@@ -232,11 +204,9 @@ bool MonitorManager::MatchDXGIOutputs()
                 continue;
             }
 
-            // Which monitor is this output attached to?
             DXGI_OUTPUT_DESC outputDesc{};
             output->GetDesc(&outputDesc);
 
-            // Match against our MonitorInfo list by HMONITOR
             for (auto& mon : m_monitors)
             {
                 if (mon.hMonitor == outputDesc.Monitor)
@@ -297,7 +267,6 @@ MonitorInfo* MonitorManager::FindByHandle(HMONITOR hMon)
     return nullptr;
 }
 
-// Which monitor contains a point.
 MonitorInfo* MonitorManager::FindByPoint(POINT pt)
 {
     for (auto& mon : m_monitors)
@@ -336,7 +305,7 @@ void MonitorManager::AdjustZoom(size_t monitorIndex, float delta)
     float newZoom = mon->zoom.zoomLevel + delta;
     newZoom = std::clamp(newZoom, ZoomState::kMinZoom, ZoomState::kMaxZoom);
     mon->zoom.targetZoom = newZoom;
-    mon->zoom.zoomLevel  = newZoom;  // Simdilik anlik — smooth interpolation ileride
+    mon->zoom.zoomLevel  = newZoom;  // immediate; see ZoomState::targetZoom
 
     LOG_DEBUG("Monitor {} zoom: {:.2f}", monitorIndex, newZoom);
 }
@@ -358,7 +327,6 @@ void MonitorManager::ToggleZoom(size_t monitorIndex)
     mon->zoom.isActive = !mon->zoom.isActive;
     LOG_INFO("Monitor {} zoom {}", monitorIndex, mon->zoom.isActive ? "ON" : "OFF");
 
-    // Reset the level when zoom goes off
     if (!mon->zoom.isActive)
     {
         mon->zoom.zoomLevel = ZoomState::kMinZoom;

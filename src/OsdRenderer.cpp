@@ -65,9 +65,6 @@ double PillCoverage(double x, double y, double w, double h, double r)
 
 } // anonymous namespace
 
-// =============================================================================
-// RenderOsdText
-// =============================================================================
 bool RenderOsdText(const std::wstring& text, int fontHeightPx, OsdBitmap& out,
                    float opacity)
 {
@@ -226,9 +223,6 @@ bool RenderOsdText(const std::wstring& text, int fontHeightPx, OsdBitmap& out,
     return true;
 }
 
-// =============================================================================
-// OsdCache
-// =============================================================================
 bool OsdCache::Acquire(const std::wstring& text, int fontHeightPx, float opacity, Label& out)
 {
     if (!m_device || text.empty())
@@ -241,9 +235,6 @@ bool OsdCache::Acquire(const std::wstring& text, int fontHeightPx, float opacity
     if (alpha == 0)
         return false;
 
-    // The height is part of the key: the same string on a 4K display and on a
-    // 1080p one is a different bitmap, and keying on the text alone would show
-    // whichever size happened to be rendered first on both.
     const std::wstring key = text + L'\x1' + std::to_wstring(fontHeightPx)
                                   + L'\x1' + std::to_wstring(alpha);
 

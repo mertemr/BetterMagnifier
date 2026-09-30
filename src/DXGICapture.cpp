@@ -165,10 +165,8 @@ bool DXGICapture::Initialize(ID3D11Device* device, IDXGIOutput* output)
     return true;
 }
 
-// Timeout 0 means ask without blocking: take a new frame if there is one,
-// otherwise return immediately. Blocking is wrong here because the anchor can
-// move while the screen is static, and then the previous frame has to be
-// re-presented against a new source region.
+// Timeout 0 polls without blocking, which is the normal case; RenderMonitor
+// says why, and when it waits instead.
 CapturedFrame DXGICapture::AcquireFrame(UINT timeoutMs)
 {
     CapturedFrame result{};
@@ -183,7 +181,7 @@ CapturedFrame DXGICapture::AcquireFrame(UINT timeoutMs)
         return result;
     }
 
-    // Release a frame the caller forgot about, or the next acquire fails.
+    // The frame held since the last acquire; see ReleaseFrame in the header.
     if (m_frameAcquired)
         ReleaseFrame();
 
@@ -257,11 +255,7 @@ CapturedFrame DXGICapture::AcquireFrame(UINT timeoutMs)
     {
         if (m_firstFrame)
         {
-            // Recorded once per session, because it decides whether the
-            // renderer's full-monitor copy can go: if the acquired texture is
-            // bindable as a shader resource, the frame can be held and sampled
-            // in place instead (ReleaseFrame's documentation recommends holding
-            // it — the OS stops copying updates into it while we own it).
+            // Once per session, for diagnosing the copy out of this texture.
             D3D11_TEXTURE2D_DESC desc{};
             result.texture->GetDesc(&desc);
             LOG_INFO("Duplication texture: {}x{} format={} bind=0x{:X} misc=0x{:X} usage={}",

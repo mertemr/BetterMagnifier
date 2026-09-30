@@ -100,8 +100,7 @@ private:
     std::promise<void> m_exited;
     std::future<void>  m_exitedFuture;
 
-    // Application::Start may only be called once per process, so a panel that
-    // failed to come up, or was stopped, cannot be started again.
+    // A panel that failed to come up, or was stopped, is not started again.
     std::atomic<bool>  m_startAttempted{false};
 
     HWND            m_engineHwnd = nullptr;
