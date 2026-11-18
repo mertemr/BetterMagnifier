@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.2](https://github.com/mertemr/BetterMagnifier/compare/v0.4.1...v0.4.2) (2026-11-18)
+
+
+### Build
+
+* **deps:** bump actions/upload-artifact ([39c901b](https://github.com/mertemr/BetterMagnifier/commit/39c901bb9728ab6a6d9fc106818130228def013c))
+* **deps:** bump actions/upload-artifact from 7.0.1 to 7.0.2 in /.github/workflows in the github-actions group ([94a5b97](https://github.com/mertemr/BetterMagnifier/commit/94a5b9701c544e110545fa4def337cc11ebcc062))
+
 ## [0.4.1](https://github.com/mertemr/BetterMagnifier/compare/v0.4.0...v0.4.1) (2026-09-30)
 
 
